@@ -7,6 +7,7 @@
 #include "gx/render_gl.h"
 #include "gx/gl.h"
 #include "hw/pad.h"
+#include "vr_game.h"
 #ifdef _WIN32
 // Console app: keep our own main() rather than SDL2main's WinMain shim.
 #define SDL_MAIN_HANDLED
@@ -309,6 +310,17 @@ int main(int argc, char** argv) {
         gx::render_set_window_size(dw, dh);
         auto b = gx::take_batch(4);
         if (!b) continue;
+        // GCN_STEREOLOG=1: what the game's stereo hook (vr_game.h) would have a headset
+        // show, whenever the answer changes, numbered as the frame dumps are.
+        static const bool stereolog = getenv("GCN_STEREOLOG") != nullptr;
+        if (stereolog && vr::game_hooks().wants_stereo) {
+            static int last = -1;
+            const int want = vr::game_hooks().wants_stereo(*b) ? 1 : 0;
+            if (want != last) {
+                last = want;
+                fprintf(stderr, "[stereo] frame %u: %s\n", gx::present_count(), want ? "stereo" : "theater");
+            }
+        }
         bool presented;
         if (g_eye_mode) {
             float P[16], V[16], H[16];

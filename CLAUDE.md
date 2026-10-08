@@ -2,9 +2,10 @@
 
 This is the shared GameCube recompilation layer used by the per-game projects
 (`~/Source/prime-recomp` and `~/Source/bluestorm-recomp`). It was split out of
-bluestorm-recomp on 2026-10-07, and bluestorm-recomp was rebased onto it the next day; the
-Android and OpenXR frontends still live there, with the game's own gates in them, and are the
-next thing to move here once a second game wants a headset build.
+bluestorm-recomp on 2026-10-07, and bluestorm-recomp was rebased onto it the next day. The
+Android and OpenXR frontends moved here on 2026-10-08, when Prime wanted a headset build, as
+`android/`, with the game's own decisions behind `vr::GameHooks`; bluestorm-recomp still
+builds its own copies, with its gates written into them, until it moves onto these.
 
 **Nothing game-specific belongs here.** No disc IDs, guest addresses, game names or
 per-game heuristics in code; those arrive through `gcn_add_game()` and the game project's

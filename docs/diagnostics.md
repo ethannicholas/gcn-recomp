@@ -63,6 +63,31 @@ hook says (`render_set_eye_hook` in `runtime/gx/render_gl.h`: the renderer asks 
 frame, for a view transform and the draws to leave out, and a game without a hook keeps the
 chase camera). With `--dump-dir`/`--dump-every` the eye's frames are written as `eye_NNNNN.png`.
 
+## On a headset
+
+A game built with `ANDROID_PACKAGE` has two device-side tools besides the app.
+
+`<game>_egl` is the GL ES renderer on a headless EGL pbuffer, run over `adb shell` from a
+directory holding the image (`game.iso` or `game.ciso`). `--dump-dir`/`--dump-every`,
+`--seconds=N`, `--frames=N` and `--scale=N` work as on the desktop. `--eye` renders through
+the stereo path instead, with the VR settings the headset uses (the game's defaults, then
+`./vr.txt` if present): `--eyes=2` renders both eyes, `--eye-size=WxH` and `--msaa=N` match
+the headset's target, `--eye-yaw=deg`/`--eye-pitch=deg` turn the head (dump at two yaws:
+anything that does not move is head-locked), and `--first-person` with `--fp-window=a-b`
+calls the game's `set_first_person` hook. `GCN_EYE_GPU=1` times the eye passes,
+`GCN_EYE_MORPH=0,0.5,1` dumps the theater/stereo morph at those points beside the flat
+frame, and `GCN_STEREOLOG=1` prints the game's `wants_stereo` answer whenever it changes.
+The desktop build honours `GCN_STEREOLOG` too, numbering frames as its dumps are, so a
+game's stereo hook can be checked against a replayed route without a device.
+`GCN_RAMSNAP=<dir>` (with `GCN_RAMSNAP_EVERY`, `GCN_RAMSNAP_RANGE=a-b`) writes the low 8 MB
+of guest RAM beside the frames, for finding the state such a hook reads.
+
+The app has no environment of its own, so `gcn_env.txt` in its files directory
+(`/sdcard/Android/data/<package>/files/`), one `KEY=VALUE` per line, is put into it before
+the runtime starts; `gcn_input.txt` there holds a `GCN_INPUT` script, and `GCN_REPLAY=<dir>`
+in the env file replays an input log relative to that directory. Its log is
+`adb logcat -s <game>`, with compositor and game frame counts every five seconds.
+
 ## Measuring the guest
 
 `<game>_bench` runs the game with no graphics, audio or input, unpaced, and reports how fast

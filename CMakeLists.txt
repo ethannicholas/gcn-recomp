@@ -29,13 +29,18 @@ option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every pol
 #   FPS <n>                    the game's frame rate, for the benchmark's percentage
 #   [IMAGE_DIR <dir>]          where to look for the user's .iso/.ciso (default rom/)
 #   [SOURCES <files>...]       the game project's own runtime sources, compiled into the
-#                              game executable: hooks the runtime offers a game (see
-#                              render_set_eye_hook in runtime/gx/render_gl.h), installed
-#                              from a static initializer
+#                              game executable and the headset app: hooks the runtime
+#                              offers a game (render_set_eye_hook in runtime/gx/render_gl.h,
+#                              vr::GameHooks in runtime/vr_game.h), installed from a static
+#                              initializer
+#   [ANDROID_PACKAGE <id>]     e.g. com.example.game. On an Android build, also build the
+#                              headset app (lib<target>.so, a NativeActivity that
+#                              tools/package-apk.ps1 packages) and <target>_egl, the
+#                              renderer headless on a device; see android/
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR" "SOURCES" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE" "SOURCES" ${ARGN})
   foreach(req NAME TITLE DISC_ID DOL_SHA1 SYMBOLS TABLES FPS)
     if(NOT G_${req})
       message(FATAL_ERROR "gcn_add_game: ${req} is required")
@@ -244,6 +249,61 @@ function(gcn_add_game)
     target_link_libraries(${G_NAME} PRIVATE game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS})
     target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
     target_compile_definitions(${G_NAME} PRIVATE ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
+  endif()
+
+  # ---- Android headset app and harness ----
+  # Built from the same pieces as everything else, with the real audio mix and an AAudio
+  # device in place of the stub, and the game's own sources. The OpenXR loader comes from
+  # Khronos' official Android AAR on Maven Central: it carries both the headers and a
+  # prebuilt libopenxr_loader.so, so nothing has to be committed as a binary.
+  if(ANDROID AND HAVE_GAME_ISO AND G_ANDROID_PACKAGE)
+    set(AND_DIR ${GCN_RECOMP_DIR}/android)
+    set(ANDROID_SOURCES ${CORE_SOURCES} ${RT}/audio.cpp ${AND_DIR}/audio_aaudio.cpp
+      ${RT}/gx/render_gl.cpp ${RT}/gx/shadergen.cpp ${RT}/gx/gl_load.cpp ${RT}/png.cpp
+      ${GLAD_SOURCE} ${G_SOURCES})
+    list(REMOVE_ITEM ANDROID_SOURCES ${RT}/audio_stub.cpp)
+    set(ANDROID_DEFS ${GCN_GAME_DEFS} ${GCN_GL_DEFS} GCN_LOG_TAG="${G_NAME}")
+
+    # Headless EGL frontend: the real renderer, offscreen, writing frames as PNGs. Not an
+    # APK: it validates the GL ES renderer on a device over adb, and shows the stereo path
+    # without anyone wearing the headset.
+    add_executable(${G_NAME}_egl ${ANDROID_SOURCES} ${AND_DIR}/egl_main.cpp)
+    _gcn_set_standards(${G_NAME}_egl)
+    target_include_directories(${G_NAME}_egl PRIVATE ${AND_DIR} ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR})
+    target_link_libraries(${G_NAME}_egl PRIVATE game_recomp EGL log aaudio)
+    target_compile_options(${G_NAME}_egl PRIVATE ${GCN_RUNTIME_WARNINGS})
+    target_compile_definitions(${G_NAME}_egl PRIVATE ${ANDROID_DEFS})
+
+    include(FetchContent)
+    FetchContent_Declare(openxr_aar
+      URL https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/1.1.63/openxr_loader_for_android-1.1.63.aar
+      URL_HASH SHA256=622419d2f6741c3443a3beb4779af0764318edd01830de967f24c741ebcded73
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(openxr_aar)
+    set(OPENXR_INCLUDE ${openxr_aar_SOURCE_DIR}/prefab/modules/headers/include)
+    set(OPENXR_LIB ${openxr_aar_SOURCE_DIR}/prefab/modules/openxr_loader/libs/android.${ANDROID_ABI}/libopenxr_loader.so)
+
+    add_library(native_app_glue STATIC
+      ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+    target_include_directories(native_app_glue PUBLIC
+      ${ANDROID_NDK}/sources/android/native_app_glue)
+
+    # The installable app: android.app.NativeActivity loads lib<name>.so and calls
+    # android_main(), so there is no Java source at all. The library name must match the
+    # manifest's android.app.lib_name, which the template below fills in.
+    add_library(${G_NAME} SHARED ${ANDROID_SOURCES} ${AND_DIR}/openxr_main.cpp)
+    _gcn_set_standards(${G_NAME})
+    target_include_directories(${G_NAME} PRIVATE ${AND_DIR} ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR} ${OPENXR_INCLUDE})
+    target_link_libraries(${G_NAME} PRIVATE game_recomp native_app_glue ${OPENXR_LIB} EGL android log aaudio)
+    target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
+    # No default image: the app finds game.iso or game.ciso in its own files directory.
+    set(APP_DEFS ${ANDROID_DEFS})
+    list(FILTER APP_DEFS EXCLUDE REGEX "^GCN_DEFAULT_ISO=")
+    target_compile_definitions(${G_NAME} PRIVATE ${APP_DEFS} GCN_DEFAULT_ISO="")
+    # NativeActivity resolves this symbol by name; without it the linker drops the glue.
+    target_link_options(${G_NAME} PRIVATE -u ANativeActivity_onCreate)
+
+    configure_file(${AND_DIR}/AndroidManifest.xml.in ${CMAKE_BINARY_DIR}/AndroidManifest.xml @ONLY)
   endif()
 
   # For a game project that adds frontends of its own -- a headset app, a headless harness

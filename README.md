@@ -34,7 +34,12 @@ gcn_add_game(
 ```
 
 That defines the game executable, a headless benchmark (`<name>_bench`) and a compile-only
-`runtime_check` target. The game project provides:
+`runtime_check` target. With `ANDROID_PACKAGE <id>`, an Android build (the NDK's toolchain
+file, `-DGCN_BENCH_ONLY=ON`) also builds the headset app, `lib<name>.so`, which
+`tools/package-apk.ps1` turns into an APK, and `<name>_egl`, the renderer headless on a
+device. A game tells those what it knows -- when to show stereo, how big its world is --
+through `vr::GameHooks` (`runtime/vr_game.h`) in its `SOURCES`.
+The game project provides:
 
 - `analysis/symbols.txt` — the DOL's function layout in decomp-toolkit's format, either
   from `dtk dol split` (`tools/fetch_dtk.sh` downloads it) or from a decompilation project.
@@ -56,6 +61,12 @@ That defines the game executable, a headless benchmark (`<name>_bench`) and a co
   `cpu.cpp`, `threads.cpp` and `hle_os.cpp` are the CPU and OS; `hw/` the hardware
   registers; `gx/` the graphics pipeline; `main.cpp` the SDL frontend and `bench_main.cpp`
   the benchmark.
+- `android/`: the headset frontends. `openxr_main.cpp` is the OpenXR app (the game on a
+  theater panel or in stereo, Touch controllers as the pad), `egl_main.cpp` the headless
+  harness and `audio_aaudio.cpp` the audio device. The `vr.txt` settings
+  (`runtime/vr_config.*`) and what a game tells the headset (`runtime/vr_game.h`) are in the
+  runtime, so the desktop can check a game's hooks too.
+- `tools/package-apk.ps1`: packages the app into an APK without Gradle, and installs it.
 - `docs/`: working notes on diagnostics and the renderer.
 
 ## Requirements
