@@ -18,7 +18,9 @@ game boots. Deleting the file is always safe. The startup line reports what happ
 ## Stereo scaffolding
 
 `gx/render_gl.cpp` and `gx/shadergen.cpp` carry the stereo machinery written for Wave Race:
-`render_execute_eye`, the theater/stereo morph, the world-pitch and first-person camera
-heuristics, and the eye grab/refraction handling. None of it runs from the desktop frontend.
-Much of it is specific to a chase-camera racing game and will need to become hooks a game
-project fills in, rather than code here that knows about skis.
+`render_execute_eye`, the theater/stereo morph, the world-pitch rotation, and the eye
+grab/refraction handling. The desktop frontend runs it through `--eye`. Where the eye stands
+beyond the chase camera is the game's business: `render_set_eye_hook` takes a per-frame
+callback that returns a view transform, a HUD transform and the draws to leave out, and
+bluestorm-recomp's `runtime/first_person.cpp` is the one that finds a jet ski and puts the eye
+on it. Nothing here knows what a hull is.

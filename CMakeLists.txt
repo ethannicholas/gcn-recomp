@@ -27,10 +27,14 @@ option(GCN_TRACE_CALLS "Maintain a guest call stack (diagnostics)" OFF)
 #   TABLES <dir>               hle.txt, names.txt, patches.txt, special_calls.txt
 #   FPS <n>                    the game's frame rate, for the benchmark's percentage
 #   [IMAGE_DIR <dir>]          where to look for the user's .iso/.ciso (default rom/)
+#   [SOURCES <files>...]       the game project's own runtime sources, compiled into the
+#                              game executable: hooks the runtime offers a game (see
+#                              render_set_eye_hook in runtime/gx/render_gl.h), installed
+#                              from a static initializer
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR" "" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR" "SOURCES" ${ARGN})
   foreach(req NAME TITLE DISC_ID DOL_SHA1 SYMBOLS TABLES FPS)
     if(NOT G_${req})
       message(FATAL_ERROR "gcn_add_game: ${req} is required")
@@ -230,7 +234,7 @@ function(gcn_add_game)
   endif()
 
   if(HAVE_GAME_ISO AND NOT GCN_BENCH_ONLY)
-    add_executable(${G_NAME} ${RUNTIME_SOURCES})
+    add_executable(${G_NAME} ${RUNTIME_SOURCES} ${G_SOURCES})
     _gcn_set_standards(${G_NAME})
     target_include_directories(${G_NAME} PRIVATE ${GLAD_INCLUDE_DIR})
     target_link_libraries(${G_NAME} PRIVATE game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS})

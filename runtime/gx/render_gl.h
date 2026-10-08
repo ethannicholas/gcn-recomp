@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #include "render.h"
 
 namespace gx {
@@ -55,18 +56,29 @@ void render_set_vr_morph(float t, const float panel[16]);
 // the headset's own space and stays where it is put. 0 renders what the game draws.
 void render_set_world_pitch(float pitch_rad);
 
-// First person: the eye is fixed to the player's ski instead of to the game's chase
-// camera, (x, y, z) game units from the hull's origin in the ski's own frame -- x to the
-// right, y up, z forward -- and the rider is not drawn. Applies to the eye passes; the
-// flat view is untouched. Where the ski is and which draws are the rider are read off
-// each batch (see first_person_prepare), and a frame with no racer in it falls back to
-// the chase camera.
-void render_set_first_person(bool on, float x, float y, float z);
-
-// How the first-person eye follows the ski: time constants, in seconds, for its height,
-// heading and pitch/roll (0 follows exactly), and how much of the hull's pitch and roll it
-// takes (1 all of it, 0 a level horizon).
-void render_set_first_person_smoothing(float height_s, float yaw_s, float tilt, float tilt_s);
+// The game's own eye. The renderer knows how to re-project a batch for an eye and how to
+// take the chase camera's pitch out of the world; where else an eye might stand -- on the
+// player's vehicle, say -- is a fact about a game, and comes from a hook the game project
+// installs. While first person is on (render_set_first_person) the hook is called once per
+// frame, before anything is drawn from the batch, with the off-screen passes already
+// marked in `offscreen` (one byte per command, as the renderer skips them) and the
+// renderer's frame count, which a hook can use to notice a gap. It fills in `out` and
+// returns true, or returns false to leave the eye with the chase camera for that frame:
+//   view_to_eye  what world geometry goes through before the eye's view, in place of the
+//                world-pitch rotation (column-major 4x4)
+//   hud_to_eye   what the HUD frame goes through before the eye's view: the identity, or
+//                a rotation that keeps it upright as the view tilts (column-major 4x4)
+//   hide         one byte per command, 1 to leave that draw out (the rider's own body,
+//                say); may be left empty. A hidden draw's textures are kept alive.
+// Applies to the eye passes only; the flat view is untouched.
+struct EyeOverride {
+    float view_to_eye[16];
+    float hud_to_eye[16];
+    std::vector<uint8_t> hide;
+};
+using EyeHook = bool (*)(const Batch& b, const std::vector<uint8_t>& offscreen, uint32_t frame, EyeOverride& out);
+void render_set_eye_hook(EyeHook hook);
+void render_set_first_person(bool on);
 
 // Draw one eye's view of a batch into `fbo`. Both eyes share the vertex buffer, the
 // CPU-side transform and any render-to-texture results, so only uniforms and draw

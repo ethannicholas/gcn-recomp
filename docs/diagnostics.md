@@ -46,10 +46,10 @@ presented frame as a PNG. `GCN_DUMP_RANGE=a-b` restricts that to a window of fra
 `--eye` renders through the stereo path into an offscreen target and shows that in the
 window instead of the flat frame: the eye sits where the game's camera is, looking straight
 ahead with a 90 degree field, so a change to the VR renderer can be looked at on a desktop
-before it goes near a headset. `--first-person[=x,y,z]` puts the eye on the player's vehicle
-instead (`render_set_first_person`, with the anchor in game units in the vehicle's frame), and
-`GCN_FPLOG=1` prints per frame where the vehicle was found and how many of the rider's draws
-were left out. With `--dump-dir`/`--dump-every` the eye's frames are written as `eye_NNNNN.png`.
+before it goes near a headset. `--first-person` puts the eye wherever the game project's eye
+hook says (`render_set_eye_hook` in `runtime/gx/render_gl.h`: the renderer asks the game, per
+frame, for a view transform and the draws to leave out, and a game without a hook keeps the
+chase camera). With `--dump-dir`/`--dump-every` the eye's frames are written as `eye_NNNNN.png`.
 
 ## Measuring the guest
 

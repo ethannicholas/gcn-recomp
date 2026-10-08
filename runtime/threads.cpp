@@ -391,8 +391,8 @@ void debug_sampler_start() {
                     if (prev < 0x80000000u || prev >= 0x81800000u || prev <= sp) break;
                     uint32_t ret = mem_r32(prev + 4);
                     char buf[16]; snprintf(buf, sizeof(buf), " %08X", ret); bt += buf;
-                    // Game code lives below the SDK; name the distinct ones.
-                    if (ret >= 0x80006000u && ret < 0x80100000u && ns < 8) {
+                    // Name the distinct ones that fall in the DOL's code.
+                    if (ret >= g_recomp_code_base && ret < g_recomp_code_end && ns < 8) {
                         bool dup = false;
                         for (int k = 0; k < ns; k++) dup |= seen[k] == ret;
                         if (!dup) {

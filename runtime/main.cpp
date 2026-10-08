@@ -30,9 +30,9 @@ bool write_png(const char* path, const uint8_t* rgba, int w, int h);
 // --eye renders through the stereo path into an offscreen target and shows that in the
 // window instead of the flat frame: the eye sits where the game's camera is, looking
 // straight ahead with a 90 degree field, so a VR change can be looked at here before it
-// goes anywhere near a headset. --first-person[=x,y,z] puts the eye on the player's
-// vehicle instead (see render_set_first_person), with the anchor in game units in the
-// vehicle's frame. --dump-dir/--dump-every write the eye's frames as PNGs.
+// goes anywhere near a headset. --first-person puts the eye wherever the game project's
+// eye hook says (render_set_first_person), on the player's vehicle for a racing game.
+// --dump-dir/--dump-every write the eye's frames as PNGs.
 // ---------------------------------------------------------------------------
 static bool g_eye_mode = false;
 static GLuint g_eye_fbo, g_eye_tex, g_eye_depth;
@@ -182,16 +182,12 @@ int main(int argc, char** argv) {
     if (iso_default.empty()) iso_default = plat_find_file("rom", ".ciso");
     const char* iso = iso_default.c_str();
     bool headless = false, hidden = false, input_log = true, first_person = false;
-    float fp[3] = {0.0f, 57.5f, -46.5f};
     std::string input_log_dir, replay_dir;
     int scale = 2;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--log-all")) for (auto& e : g_log_enabled) e = true;
         else if (!strcmp(argv[i], "--eye")) g_eye_mode = true;
-        else if (!strncmp(argv[i], "--first-person", 14)) {
-            first_person = true;
-            if (argv[i][14] == '=') sscanf(argv[i] + 15, "%f,%f,%f", &fp[0], &fp[1], &fp[2]);
-        }
+        else if (!strcmp(argv[i], "--first-person")) first_person = true;
         else if (!strcmp(argv[i], "--no-input-log")) input_log = false;
         else if (!strncmp(argv[i], "--input-log=", 12)) input_log_dir = argv[i] + 12;
         else if (!strncmp(argv[i], "--replay=", 9)) replay_dir = argv[i] + 9;
@@ -282,7 +278,7 @@ int main(int argc, char** argv) {
     gx::render_set_shader_cache("saves/shaders.bin");
     gx::render_init(scale);
     if (g_eye_mode) eye_init();
-    if (first_person) gx::render_set_first_person(true, fp[0], fp[1], fp[2]);
+    if (first_person) gx::render_set_first_person(true);
     if (gx::g_dump_dir) plat_make_dirs(gx::g_dump_dir);
 
     audio_open();
