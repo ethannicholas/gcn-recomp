@@ -119,6 +119,16 @@ black for a shadow and then white in the same frame gets both.)
   `GCN_COUNT=addr,...` (call counts per function, printed on interrupt) and
   `GCN_WATCH_ADDR=<hex>` (report every change to that word).
 - `--log-all` enables every log category, including the DSP mailbox and DVD reads.
+- Build with `-DGCN_GUEST_CHECKS=ON` to call the game project's consistency check (a
+  function installed with `debug_set_guest_check`, which inspects the guest's own data
+  structures and reports the first thing wrong) at every interrupt poll, after every
+  runtime write into guest memory (DVD, ARAM and locked-cache DMA) and at every presented
+  frame. The first failure prints what was wrong, where in the runtime it was noticed and
+  the thread dump, then exits (`GCN_GUEST_CHECK_CONTINUE=1` to carry on instead). Since a
+  replay is exact, the way to a heap corruption is: replay the run with the checks on,
+  read the corrupted word's address off the report, replay again on a `-DGCN_WATCH` build
+  with `GCN_WATCH_ADDR=<that>` and the store that did it is named. A check that fires
+  right after a DMA names the runtime itself.
 
 ## Panics and faults
 

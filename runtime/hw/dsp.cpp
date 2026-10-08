@@ -88,6 +88,7 @@ static void aram_dma() {
         const uint32_t real = std::min(moved, in_aram);
         if (real) memcpy(phys_ptr(g_ar_mm), g_aram + aram, real);
         if (moved > real) memset(phys_ptr(g_ar_mm) + real, 0, moved - real);
+        debug_guest_check("after ARAM->MRAM DMA");
     } else if (in_aram) {
         memcpy(g_aram + aram, phys_ptr(g_ar_mm), std::min(moved, in_aram));
     }

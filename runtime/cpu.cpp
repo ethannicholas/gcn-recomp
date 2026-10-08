@@ -193,7 +193,7 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
             if (len == 0) len = 128;
             uint32_t mem = dmau & ~0x1Fu, lc = v & ~0x1Fu;
             if (v & 0x10) memcpy(HOST(lc), HOST(mem), len * 32);   // load: mem -> LC
-            else memcpy(HOST(mem), HOST(lc), len * 32);            // store: LC -> mem
+            else { memcpy(HOST(mem), HOST(lc), len * 32); debug_guest_check("after locked-cache DMA"); }  // store: LC -> mem
             c->spr[spr] &= ~2u;
         }
         return;

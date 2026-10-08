@@ -69,6 +69,25 @@ void irq_request();          // make the running guest thread poll at its next b
 uint64_t host_ns();          // wall clock since start, for diagnostics
 void rtc_set_base(time_t utc);  // what the RTC reads at guest time zero (hw/exi.cpp)
 
+// Guest consistency checks (builds with GCN_GUEST_CHECKS). A game project may install a
+// function that inspects the guest's own data structures -- its heap, say -- and returns
+// nullptr when they are intact or a description of the first thing wrong. The runtime
+// calls it at every interrupt poll, after each of its own writes into guest memory (DVD,
+// ARAM and locked-cache DMA) and at every presented frame, and on the first failure
+// prints the description with the thread dump and stops, so that a corruption is caught
+// within a few hundred microseconds of the write that caused it rather than at the crash
+// it leads to. With an exact replay that is enough to find the writer: note the word the
+// check names, replay with GCN_WATCH_ADDR set to it. The checks are a function of guest
+// state only, so they do not perturb a replay. Without the build option the calls
+// compile to nothing and the hook is never called.
+using GuestCheck = const char* (*)();
+void debug_set_guest_check(GuestCheck fn);
+#ifdef GCN_GUEST_CHECKS
+void debug_guest_check(const char* where);
+#else
+inline void debug_guest_check(const char*) {}
+#endif
+
 // Scheduled hardware events, run on the guest thread holding the baton.
 using EventFn = std::function<void()>;
 void event_schedule(uint64_t at_ticks, EventFn fn);

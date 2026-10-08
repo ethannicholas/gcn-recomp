@@ -72,8 +72,10 @@ static void di_execute() {
         uint32_t len = g_dilen;
         LOG(LOG_DVD, "read off=%09llX len=%X -> %08X", (unsigned long long)offset, len, g_dimar);
         const uint32_t fit = dma_fit("DVD", g_dimar, len);
+        debug_guest_check("before DVD read");
         if (fit && !iso_read(offset, phys_ptr(g_dimar), fit))
             LOG(LOG_DVD, "read past end of image");
+        debug_guest_check("after DVD read");
         g_dimar += len;
         g_dilen = 0;
         delay += (uint64_t)len * TB_FREQ / (64 << 20);  // ~64MB/s

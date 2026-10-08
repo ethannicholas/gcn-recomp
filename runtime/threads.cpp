@@ -246,6 +246,7 @@ static void irq_deliver(CPU* c, uint32_t exc) {
 
 extern "C" void irq_poll(CPU* c) {
     if (g_quit) plat_thread_exit();
+    debug_guest_check("interrupt poll");
     clock_pace();
     events_run_due();
     uint64_t now = now_ticks();
@@ -289,6 +290,24 @@ void threads_start_boot(uint32_t entry) {
     if (!plat_thread_start(Boot::main, h, HOST_STACK))
         fatal("could not start the boot thread");
 }
+
+static GuestCheck g_guest_check;
+void debug_set_guest_check(GuestCheck fn) { g_guest_check = fn; }
+
+#ifdef GCN_GUEST_CHECKS
+uint32_t gx_frames_submitted();
+void debug_dump_threads();
+void debug_guest_check(const char* where) {
+    if (!g_guest_check) return;
+    const char* what = g_guest_check();
+    if (!what) return;
+    fprintf(stderr, "\nGUEST CHECK FAILED at %s, frame %u, guest time %.4f s:\n  %s\n", where,
+            (unsigned)gx_frames_submitted(), (double)now_ticks() / TB_FREQ, what);
+    debug_dump_threads();
+    if (getenv("GCN_GUEST_CHECK_CONTINUE")) { g_guest_check = nullptr; return; }
+    plat_exit_now(3);
+}
+#endif
 
 void threads_request_quit() {
     g_quit = true;

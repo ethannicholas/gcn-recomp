@@ -1076,6 +1076,7 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
         g_frame_counter++;
         texture_evict();
         g_frames_submitted++;
+        debug_guest_check("frame");
         heap_trace_frame(g_frames_submitted.load());
         g_have_last_state = false;
         flush_batch();

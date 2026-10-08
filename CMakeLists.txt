@@ -17,6 +17,7 @@ option(GCN_BENCH_ONLY "Build only the headless benchmark (no SDL2, no renderer)"
 # See ENTER()/RET() in runtime/recomp.h. ON maintains a guest call stack, which answers
 # "which guest function did that?" and gives a crash dump something to print.
 option(GCN_TRACE_CALLS "Maintain a guest call stack (diagnostics)" OFF)
+option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every poll, DMA and frame (diagnostics)" OFF)
 
 # gcn_add_game(
 #   NAME <target>              executable name; the benchmark is <target>_bench
@@ -201,6 +202,9 @@ function(gcn_add_game)
     GCN_GAME_TITLE="${G_TITLE}"
     GCN_DISC_ID="${G_DISC_ID}"
     GCN_GAME_FPS=${G_FPS})
+  if(GCN_GUEST_CHECKS)
+    list(APPEND GCN_GAME_DEFS GCN_GUEST_CHECKS)
+  endif()
 
   # Headless benchmark: reports how fast the guest advances, with no graphics or audio
   # in the way. Used to compare host CPUs.
