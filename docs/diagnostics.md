@@ -123,7 +123,8 @@ black for a shadow and then white in the same frame gets both.)
   dump (`GCN_TRACE_DEPTH` sets how many frames). Compiling with `-DGCN_WATCH` adds
   `GCN_COUNT=addr,...` (call counts per function, printed on interrupt) and
   `GCN_WATCH_ADDR=<hex>` (report every change to that word).
-- `--log-all` enables every log category, including the DSP mailbox and DVD reads.
+- `--log-all` enables every log category, including the DSP mailbox and DVD reads;
+  `--log=exi,dsp` enables just those (`cpu os hw dvd gx vi si exi dsp ai thr`).
 - Build with `-DGCN_GUEST_CHECKS=ON` to call the game project's consistency check (a
   function installed with `debug_set_guest_check`, which inspects the guest's own data
   structures and reports the first thing wrong) at every interrupt poll, after every

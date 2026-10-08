@@ -6,6 +6,7 @@
 #include "ax.h"
 #include <algorithm>
 #include <initializer_list>
+#include <string>
 
 namespace {
 
@@ -157,23 +158,35 @@ void process_voice(PB& pb, int offset) {
         pb.w[PB_VOL] = (uint16_t)(v + (int16_t)pb.w[PB_VOL_DELTA]);
     }
     // Old (2001) ucode mixer control: main L/R always; bit0 AuxA, bit1 AuxB,
-    // bit2 surround, bit3 volume ramps.
+    // bit2 surround, bit3 volume ramps. Bit4 selects Dolby Pro Logic II mixing, where
+    // the low bits mean something else (as Dolphin reads them).
     uint16_t mc = pb.w[PB_MIXER_CONTROL];
     bool ramp = mc & 8;
+    bool auxa, auxb, surround;
+    if (mc & 0x10) {
+        auxb = (mc & 6) == 0;
+        auxa = (mc & 7) == 1;
+        surround = false;
+    } else {
+        auxa = mc & 1;
+        auxb = mc & 2;
+        surround = mc & 4;
+    }
     mix_add(g_left + offset, samples, SPMS, pb, PB_MIXER + 0, ramp);
     mix_add(g_right + offset, samples, SPMS, pb, PB_MIXER + 2, ramp);
-    if (mc & 1) {
+    if (auxa) {
         mix_add(g_auxa_l + offset, samples, SPMS, pb, PB_MIXER + 4, ramp);
         mix_add(g_auxa_r + offset, samples, SPMS, pb, PB_MIXER + 6, ramp);
+        if (mc & 0x10) mix_add(g_auxa_s + offset, samples, SPMS, pb, PB_MIXER + 16, ramp);
     }
-    if (mc & 2) {
+    if (auxb) {
         mix_add(g_auxb_l + offset, samples, SPMS, pb, PB_MIXER + 8, ramp);
         mix_add(g_auxb_r + offset, samples, SPMS, pb, PB_MIXER + 10, ramp);
     }
-    if (mc & 4) {
+    if (surround) {
         mix_add(g_surround + offset, samples, SPMS, pb, PB_MIXER + 14, ramp);
-        if (mc & 1) mix_add(g_auxa_s + offset, samples, SPMS, pb, PB_MIXER + 16, ramp);
-        if (mc & 2) mix_add(g_auxb_s + offset, samples, SPMS, pb, PB_MIXER + 12, ramp);
+        if (auxa) mix_add(g_auxa_s + offset, samples, SPMS, pb, PB_MIXER + 16, ramp);
+        if (auxb) mix_add(g_auxb_s + offset, samples, SPMS, pb, PB_MIXER + 12, ramp);
     }
 }
 
@@ -209,6 +222,29 @@ void add_bufs(uint32_t addr, std::initializer_list<int32_t*> bufs) {
 void set_bufs(uint32_t addr, std::initializer_list<int32_t*> bufs) {
     for (int32_t* b : bufs)
         for (int i = 0; i < SPF; i++, addr += 4) b[i] = (int32_t)mem_r32(addr);
+}
+
+// Replace the main buffers with one downloaded mono buffer: L = R = in (0x07), or
+// L = -in, R = in (0x11); surround cleared either way.
+void set_main_from(uint32_t addr, bool opposite) {
+    for (int i = 0; i < SPF; i++, addr += 4) {
+        int32_t v = (int32_t)mem_r32(addr);
+        g_left[i] = opposite ? -v : v;
+        g_right[i] = v;
+        g_surround[i] = 0;
+    }
+}
+
+// 0x01: add nine downloaded buffers (main L/R/S, AuxA L/R/S, AuxB L/R/S, all read from
+// the same address in turn) scaled by a volume per group.
+void download_and_mix(uint32_t addr, uint16_t vol_main, uint16_t vol_auxa, uint16_t vol_auxb) {
+    int32_t* groups[3][3] = {{g_left, g_right, g_surround}, {g_auxa_l, g_auxa_r, g_auxa_s}, {g_auxb_l, g_auxb_r, g_auxb_s}};
+    uint16_t vols[3] = {vol_main, vol_auxa, vol_auxb};
+    for (int g = 0; g < 3; g++) {
+        uint32_t p = addr;
+        for (int b = 0; b < 3; b++)
+            for (int i = 0; i < SPF; i++, p += 4) groups[g][b][i] += (int32_t)(((int64_t)(int32_t)mem_r32(p) * vols[g]) >> 15);
+    }
 }
 
 void setup(uint32_t addr) {
@@ -250,7 +286,7 @@ void ax_process_cmdlist(uint32_t addr, uint16_t size) {
         uint16_t cmd = rd();
         switch (cmd) {
         case 0x00: setup(rd32()); break;
-        case 0x01: p += 10; break;  // download + volume mix (unused here)
+        case 0x01: { uint32_t a = rd32(); uint16_t vm = rd(), va = rd(), vb = rd(); download_and_mix(a, vm, va, vb); break; }
         case 0x02: pb_addr = rd32(); break;
         case 0x03: g_stat_voices = 0; process_pb_list(pb_addr); break;
         case 0x04: { uint32_t w = rd32(), r = rd32(); write_bufs(w, {g_auxa_l, g_auxa_r, g_auxa_s});
@@ -258,11 +294,10 @@ void ax_process_cmdlist(uint32_t addr, uint16_t size) {
         case 0x05: { uint32_t w = rd32(), r = rd32(); write_bufs(w, {g_auxb_l, g_auxb_r, g_auxb_s});
                      add_bufs(r, {g_left, g_right, g_surround}); break; }
         case 0x06: write_bufs(rd32(), {g_left, g_right, g_surround}); break;
-        case 0x07: p += 4; break;
+        case 0x07: set_main_from(rd32(), false); break;
         case 0x08: p += 20; break;
-        case 0x09: set_bufs(rd32(), {g_left, g_right, g_surround}); break;
-        case 0x0A: p += 4; break;
-        case 0x0B: case 0x0C: break;
+        case 0x09: add_bufs(rd32(), {g_left, g_right, g_surround}); break;  // mix AuxB back in, nothing uploaded
+        case 0x0A: case 0x0B: case 0x0C: break;
         case 0x0D: {  // continue in another command buffer: address, size
             uint32_t a = rd32();
             uint16_t sz = rd();
@@ -272,13 +307,38 @@ void ax_process_cmdlist(uint32_t addr, uint16_t size) {
         }
         case 0x0E: { uint32_t s = rd32(), lr = rd32(); output(s, lr); break; }
         case 0x0F: return;
-        case 0x10: case 0x11: case 0x12: case 0x13: p += 4; break;
-        default:
-            // Metroid Prime does not run AX at all: its ucode is MusyX, whose mails this
-            // parser misreads as AX command lists (see docs/dev/audio.md). Say so once.
+        case 0x10: {  // upload AuxB L/R, then download the CPU's version of them: add to main, keep as AuxB
+            uint32_t up = rd32(), dl = rd32();
+            write_bufs(up, {g_auxb_l, g_auxb_r});
+            set_bufs(dl, {g_auxb_l, g_auxb_r});
+            for (int i = 0; i < SPF; i++) { g_left[i] += g_auxb_l[i]; g_right[i] += g_auxb_r[i]; }
+            break;
+        }
+        case 0x11: set_main_from(rd32(), true); break;
+        case 0x12: p += 8; break;  // compressor: not in this ucode version
+        case 0x13: {  // upload AuxA L/R/S and AuxB S; download and add main L, main R, AuxB L, AuxB R
+            uint32_t auxa_up = rd32(), auxb_s_up = rd32(), main_l = rd32(), main_r = rd32(), auxb_l = rd32(), auxb_r = rd32();
+            write_bufs(auxa_up, {g_auxa_l, g_auxa_r, g_auxa_s});
+            write_bufs(auxb_s_up, {g_auxb_s});
+            add_bufs(main_l, {g_left});
+            add_bufs(main_r, {g_right});
+            add_bufs(auxb_l, {g_auxb_l});
+            add_bufs(auxb_r, {g_auxb_r});
+            break;
+        }
+        default: {
+            // Say so once, with the list itself, so a command this parser does not know
+            // (or whose length it has wrong) can be identified.
             static int reported;
-            if (reported++ < 4) LOG(LOG_DSP, "AX: unknown command %04X (not an AX ucode?)", cmd);
+            if (reported++ < 2) {
+                std::string words;
+                for (uint32_t q = addr; q < addr + 2 * size && q < addr + 128; q += 2) {
+                    char b[8]; snprintf(b, sizeof b, "%04X ", mem_r16(q)); words += b;
+                }
+                LOG(LOG_DSP, "AX: unknown command %04X at +%X in list %08X (%u words): %s", cmd, (unsigned)(p - 2 - addr), addr, size, words.c_str());
+            }
             return;
+        }
         }
     }
 }

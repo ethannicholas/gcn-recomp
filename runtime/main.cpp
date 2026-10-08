@@ -188,6 +188,9 @@ int main(int argc, char** argv) {
     int scale = 2;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--log-all")) for (auto& e : g_log_enabled) e = true;
+        else if (!strncmp(argv[i], "--log=", 6)) {
+            if (!log_enable_list(argv[i] + 6)) { fprintf(stderr, "--log: unknown category in %s (cpu,os,hw,dvd,gx,vi,si,exi,dsp,ai,thr)\n", argv[i] + 6); return 1; }
+        }
         else if (!strcmp(argv[i], "--eye")) g_eye_mode = true;
         else if (!strcmp(argv[i], "--first-person")) first_person = true;
         else if (!strcmp(argv[i], "--no-input-log")) input_log = false;

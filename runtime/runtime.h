@@ -11,6 +11,7 @@
 // ---- logging ----
 enum LogCat { LOG_CPU, LOG_OS, LOG_HW, LOG_DVD, LOG_GX, LOG_VI, LOG_SI, LOG_EXI, LOG_DSP, LOG_AI, LOG_THREAD, LOG_COUNT };
 extern bool g_log_enabled[LOG_COUNT];
+bool log_enable_list(const char* list);  // "exi,dsp" or "all"
 void log_msg(LogCat cat, const char* fmt, ...) GCN_PRINTF_FMT(2, 3);
 [[noreturn]] void fatal(const char* fmt, ...) GCN_PRINTF_FMT(1, 2);
 #define LOG(cat, ...) do { if (g_log_enabled[cat]) log_msg(cat, __VA_ARGS__); } while (0)

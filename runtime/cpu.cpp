@@ -19,6 +19,22 @@ bool g_log_enabled[LOG_COUNT] = {true, true, false, true, false, false, false, f
 static std::mutex g_log_mutex;
 static const char* kLogNames[LOG_COUNT] = {"CPU", "OS", "HW", "DVD", "GX", "VI", "SI", "EXI", "DSP", "AI", "THR"};
 
+// "exi,dsp" enables those categories (names as printed, case-insensitive); "all" enables
+// every one. Returns false if a name is unknown.
+bool log_enable_list(const char* list) {
+    std::string name;
+    for (const char* p = list;; p++) {
+        if (*p && *p != ',') { name.push_back((char)toupper((unsigned char)*p)); continue; }
+        bool found = false;
+        if (name == "ALL") { for (auto& e : g_log_enabled) e = true; found = true; }
+        for (int i = 0; i < LOG_COUNT && !found; i++)
+            if (name == kLogNames[i]) { g_log_enabled[i] = true; found = true; }
+        if (!found) return false;
+        name.clear();
+        if (!*p) return true;
+    }
+}
+
 void log_msg(LogCat cat, const char* fmt, ...) {
     std::lock_guard<std::mutex> lk(g_log_mutex);
     fprintf(stderr, "[%s] ", kLogNames[cat]);

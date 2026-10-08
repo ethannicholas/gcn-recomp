@@ -32,9 +32,18 @@ void dsp_hle_reset() {
     dsp_send_mail(0x8071FEED, false);
 }
 
+// The fingerprint Dolphin's DSP HLE identifies ucodes by (Common::HashEctor), so a
+// ucode seen here can be looked up in its list of known ones.
+static uint32_t ucode_hash(uint32_t mm, uint32_t len) {
+    uint32_t h = 0;
+    const uint8_t* p = phys_ptr(mm);
+    for (uint32_t i = 0; i < len; i++) { h ^= p[i]; h = (h << 3) | (h >> 29); }
+    return h;
+}
+
 static void boot_ucode() {
-    LOG(LOG_DSP, "boot ucode: iram mm=%08X dsp=%04X len=%X dram=%X start=%04X", g_boot_iram_mm, g_boot_iram_addr,
-        g_boot_iram_len, g_boot_dram_len, g_boot_start);
+    LOG(LOG_DSP, "boot ucode: iram mm=%08X dsp=%04X len=%X dram=%X start=%04X hash=%08X", g_boot_iram_mm, g_boot_iram_addr,
+        g_boot_iram_len, g_boot_dram_len, g_boot_start, ucode_hash(g_boot_iram_mm, g_boot_iram_len));
     g_upload_in_progress = false;
     g_next_is_cmdlist = false;
     // The first ucode the game boots is AX; anything else of a different size is the
