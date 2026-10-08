@@ -242,7 +242,7 @@ def main():
                 if br.link:
                     if t in special_calls:
                         # setjmp-style call site (OSSaveContext)
-                        call = (f'c->lr = 0x{pc + 4:08X}u; if (_setjmp(*hle_context_jmpbuf(c)) == 0) {cname(t)}(c);')
+                        call = (f'c->lr = 0x{pc + 4:08X}u; if (GCN_SETJMP(*hle_context_jmpbuf(c)) == 0) {cname(t)}(c);')
                     else:
                         call = emit_call(pc, t, True)
                     if cond:

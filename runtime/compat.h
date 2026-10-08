@@ -49,3 +49,15 @@ static __inline uint32_t GCN_CLZ32(uint32_t v) {
 static inline uint32_t GCN_CLZ32(uint32_t v) { return v ? (uint32_t)__builtin_clz(v) : 32u; }
 
 #endif
+
+/* Guest context switches: setjmp at an OSSaveContext call site, longjmp to resume it. POSIX
+   setjmp/longjmp save and restore the signal mask, a syscall per switch, so the mask-free
+   _setjmp/_longjmp are used there. Windows' pair never touches a signal mask, and its CRT
+   has no _longjmp. Expand where <setjmp.h> is included. */
+#if defined(_WIN32)
+#define GCN_SETJMP(b) setjmp(b)
+#define GCN_LONGJMP(b, v) longjmp(b, v)
+#else
+#define GCN_SETJMP(b) _setjmp(b)
+#define GCN_LONGJMP(b, v) _longjmp(b, v)
+#endif

@@ -127,7 +127,7 @@ static Binding* wait_for_baton(HostThread* self) {
     if (b->kind == BIND_SAVED) self->cpu.r[3] = 1;
     b->kind = BIND_NONE;
     irq_request();  // re-evaluate pending interrupts after a switch
-    _longjmp(b->jb, 1);  // the mask-free variants: setjmp/longjmp would make a syscall per switch
+    GCN_LONGJMP(b->jb, 1);  // the mask-free variant off Windows; see compat.h
 }
 
 // Hand the baton to `target` (resuming at binding b) and block until we get it back.
@@ -233,7 +233,7 @@ static void irq_deliver(CPU* c, uint32_t exc) {
     b->snapshot = *c;
     cpu_to_context(c, ctx, 0);
     mem_w16(ctx + CTX_STATE, mem_r16(ctx + CTX_STATE) | OS_CONTEXT_STATE_EXC);
-    if (_setjmp(b->jb) != 0) return;  // resumed by OSLoadContext(ctx)
+    if (GCN_SETJMP(b->jb) != 0) return;  // resumed by OSLoadContext(ctx)
     c->spr[26] = 0;          // SRR0
     c->spr[27] = c->msr;     // SRR1
     c->msr &= ~MSR_EE;
