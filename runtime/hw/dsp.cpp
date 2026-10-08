@@ -70,14 +70,31 @@ static uint16_t mail_out_lo() {
 static void aram_dma() {
     uint32_t len = g_ar_cnt & 0x7FFFFFFF;
     bool to_mram = g_ar_cnt & 0x80000000u;
-    uint32_t aram = g_ar_aram & (ARAM_SIZE - 1);
-    if (aram + len > ARAM_SIZE) len = ARAM_SIZE - aram;
-    // The ARAM side is clamped above; this is the main-memory side, which nothing was
-    // checking. `len` itself is left alone so that the log line and the completion delay
-    // still describe the transfer the guest asked for.
+    // The ARAM address is not masked to the 16 MB that exists. ARInit probes for expansion
+    // ARAM by writing patterns at 16, 18, 20 and 32 MB and reading them back; with the
+    // address wrapped, the probe read its own pattern out of the low 16 MB and the game
+    // believed it had more ARAM than it does. Metroid Prime then streamed assets through
+    // addresses above 16 MB, which landed on top of whatever was below, and models whose
+    // textures had been parked there -- the gunship, Samus -- came back as noise. Real
+    // hardware reads zeros past the end and ignores writes there, so that is what this
+    // does, and the probe finds 16 MB.
+    const uint32_t aram = g_ar_aram;
+    const bool present = aram < ARAM_SIZE;
+    const uint32_t in_aram = present ? std::min<uint32_t>(len, ARAM_SIZE - aram) : 0;
+    // The main-memory side, which nothing was checking. `len` itself is left alone so
+    // that the log line and the completion delay still describe the transfer asked for.
     const uint32_t moved = dma_fit(to_mram ? "ARAM->MRAM" : "MRAM->ARAM", g_ar_mm, len);
-    if (to_mram) memcpy(phys_ptr(g_ar_mm), g_aram + aram, moved);
-    else memcpy(g_aram + aram, phys_ptr(g_ar_mm), moved);
+    if (to_mram) {
+        const uint32_t real = std::min(moved, in_aram);
+        if (real) memcpy(phys_ptr(g_ar_mm), g_aram + aram, real);
+        if (moved > real) memset(phys_ptr(g_ar_mm) + real, 0, moved - real);
+    } else if (in_aram) {
+        memcpy(g_aram + aram, phys_ptr(g_ar_mm), std::min(moved, in_aram));
+    }
+    if (!present) {
+        static int reported;
+        if (reported++ < 4) LOG(LOG_DSP, "ARAM DMA past the end of ARAM: ar=%08X len=%X (%s)", aram, len, to_mram ? "reads zeros" : "ignored");
+    }
     LOG(LOG_DSP, "ARAM DMA %s mm=%08X ar=%08X len=%X", to_mram ? "ARAM->MRAM" : "MRAM->ARAM", g_ar_mm, g_ar_aram, len);
     g_ar_cnt &= 0x80000000u;
     g_dspcr |= CR_DMA;

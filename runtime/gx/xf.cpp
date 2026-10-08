@@ -172,6 +172,7 @@ static uint32_t read_color(const uint8_t* p, uint32_t fmt) {
 static uint32_t color_size(uint32_t fmt) { static const uint32_t s[8] = {2, 3, 4, 2, 3, 4, 4, 4}; return s[fmt & 7]; }
 
 struct InVertex {
+    uint32_t pos_idx;             // the position's array index, for GCN_VTXLOG
     float pos[3];
     float nrm[3], bin[3], tan[3];
     uint32_t col[2];
@@ -230,11 +231,12 @@ static const Layout& layout_for(int vat) {
 }
 
 // Resolve an attribute pointer: direct data or indexed array element.
-static const uint8_t* attr_ptr(const uint8_t*& p, uint32_t desc, int array, uint32_t direct_size) {
-    if (desc == 1) { const uint8_t* r = p; p += direct_size; return r; }
+static const uint8_t* attr_ptr(const uint8_t*& p, uint32_t desc, int array, uint32_t direct_size, uint32_t* idx_out = nullptr) {
+    if (desc == 1) { const uint8_t* r = p; p += direct_size; if (idx_out) *idx_out = ~0u; return r; }
     uint32_t idx;
     if (desc == 2) idx = *p++;
     else { idx = rd16(p); p += 2; }
+    if (idx_out) *idx_out = idx;
     uint32_t base = g_state.cp[0xA0 + array], stride = g_state.cp[0xB0 + array];
     return phys_ptr(base + idx * stride);
 }
@@ -249,8 +251,9 @@ static void decode_vertex(const Layout& L, const uint8_t*& p, InVertex& v) {
     if (L.texmtx)
         for (int i = 0; i < 8; i++)
             if (L.texmtx & (1u << i)) v.texmtx[i] = *p++;
+    v.pos_idx = ~0u;
     if (L.pos_desc) {
-        const uint8_t* q = attr_ptr(p, L.pos_desc, 0, L.pos_cnt * comp_size(L.pos_fmt));
+        const uint8_t* q = attr_ptr(p, L.pos_desc, 0, L.pos_cnt * comp_size(L.pos_fmt), &v.pos_idx);
         v.pos[0] = read_comp(q, L.pos_fmt, L.pos_scale);
         v.pos[1] = read_comp(q, L.pos_fmt, L.pos_scale);
         v.pos[2] = L.pos_cnt == 3 ? read_comp(q, L.pos_fmt, L.pos_scale) : 0.0f;
@@ -726,6 +729,37 @@ static void draw_impl(const DrawCall& dc) {
     load_xf_plan();
     const uint8_t* p = dc.data;
     for (uint32_t i = 0; i < dc.count; i++) decode_vertex(L, p, g_in[i]);
+    // GCN_VTXLOG=<frame> prints each draw of that frame as the front end sees it: the
+    // primitive, vertex layout, the first vertices' raw indices and positions, and the
+    // position matrix each of them selects -- what the renderer's draw log cannot show,
+    // since it only sees the transformed result.
+    static const uint32_t vtxlog = getenv("GCN_VTXLOG") ? (uint32_t)atoi(getenv("GCN_VTXLOG")) : 0;
+    if (vtxlog && g_frame_counter == vtxlog) {
+        static uint32_t n;
+        fprintf(stderr, "[vtx] %u prim=%02X vat=%u count=%u pnmtx=%u pos(desc=%u fmt=%u cnt=%u scale=%g) nrm(desc=%u) tex0(desc=%u) base0=%08X stride0=%u tex0addr=%08X\n",
+                n++, dc.prim, dc.vat, dc.count, L.pnmtx, L.pos_desc, L.pos_fmt, L.pos_cnt, L.pos_scale, L.nrm_desc,
+                L.tex_desc[0], g_state.cp[0xA0], g_state.cp[0xB0], (g_state.bp[0x94] & 0x1FFFFF) << 5);
+        {
+            // The first bytes of the position array, so a vertex buffer full of nonsense
+            // can be told from an index pointing at the wrong one.
+            const uint8_t* q = phys_ptr(g_state.cp[0xA0]);
+            fprintf(stderr, "      posarray:");
+            for (int i = 0; i < 32; i++) fprintf(stderr, "%s%02X", (i % 4) ? "" : " ", q[i]);
+            fprintf(stderr, "\n");
+        }
+        uint32_t seen = 0xFFFFFFFF;
+        for (uint32_t i = 0; i < dc.count && i < 12; i++) {
+            const InVertex& v = g_in[i];
+            fprintf(stderr, "      v%u pnmtx=%u idx=%u pos=%.2f,%.2f,%.2f\n", i, v.pnmtx, v.pos_idx, v.pos[0], v.pos[1], v.pos[2]);
+            if (v.pnmtx != seen) {
+                seen = v.pnmtx;
+                const uint32_t m = (v.pnmtx & 63) * 4;
+                fprintf(stderr, "      mtx%u | %.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f\n", v.pnmtx,
+                        xf_f(m), xf_f(m + 1), xf_f(m + 2), xf_f(m + 3), xf_f(m + 4), xf_f(m + 5), xf_f(m + 6), xf_f(m + 7),
+                        xf_f(m + 8), xf_f(m + 9), xf_f(m + 10), xf_f(m + 11));
+            }
+        }
+    }
     // Transformed straight into the batch, each vertex once; the primitive's shape is
     // expressed by the indices below.
     Batch& b = batch();

@@ -1,6 +1,7 @@
 // GX FIFO command stream parser.
 #include "../runtime.h"
 #include "gx.h"
+#include "texture.h"
 #include <cmath>
 
 const char* func_name(uint32_t addr);
@@ -79,22 +80,24 @@ static void load_cp(uint8_t reg, uint32_t v) {
 
 static void load_xf(uint32_t addr, uint32_t n, const uint8_t* data) {
 #ifdef GCN_CALL_TRACE
-    // GCN_POSMTX_STACK=<z> prints the guest call stack whenever a position matrix with
-    // that view-space Z is loaded, which names the code placing the object. Needs a
-    // build with GCN_TRACE_CALLS; see ENTER()/RET() in recomp.h.
-    static const char* want_z = getenv("GCN_POSMTX_STACK");
-    if (want_z && n == 12 && (addr & 3) == 0 && addr < 0x100) {
-        float tz, ty;
-        const uint32_t w = be32(data + 44), wy = be32(data + 28);
-        memcpy(&tz, &w, 4);
-        memcpy(&ty, &wy, 4);
+    // GCN_POSMTX_STACK=<x>,<y>,<z> prints the guest call stack the first few times a
+    // position matrix with that view-space translation (within 0.5) is loaded, which
+    // names the code placing the object. Needs a build with GCN_TRACE_CALLS; see
+    // ENTER()/RET() in recomp.h.
+    static const char* want = getenv("GCN_POSMTX_STACK");
+    if (want && n == 12 && (addr & 3) == 0 && addr < 0x100) {
+        float wx = 0, wy = 0, wz = 0;
+        sscanf(want, "%f,%f,%f", &wx, &wy, &wz);
+        float tx, ty, tz;
+        const uint32_t w0 = be32(data + 12), w1 = be32(data + 28), w2 = be32(data + 44);
+        memcpy(&tx, &w0, 4);
+        memcpy(&ty, &w1, 4);
+        memcpy(&tz, &w2, 4);
         static int shown;
-        // The rig descends while it turns, so its Y is anywhere in a range; Z is exact.
-        if (fabsf(tz - (float)atof(want_z)) < 0.05f && ty > 25.0f && ty < 65.0f &&
-            shown++ < 4) {
+        if (fabsf(tx - wx) < 0.5f && fabsf(ty - wy) < 0.5f && fabsf(tz - wz) < 0.5f && shown++ < 3) {
             CPU* c = cpu_current();
-            fprintf(stderr, "[posmtx] id=%u ty=%.1f tz=%.1f, guest call stack innermost first:\n",
-                    addr / 4, (double)ty, (double)tz);
+            fprintf(stderr, "[posmtx] frame %u id=%u t=%.2f,%.2f,%.2f, guest call stack innermost first:\n",
+                    g_frame_counter, addr / 4, (double)tx, (double)ty, (double)tz);
             const uint32_t have = c && c->depth < 256 ? c->depth : 0;
             for (uint32_t i = 1; i <= have; i++)
                 fprintf(stderr, "[posmtx]   %08X %s\n", c->stack[have - i],
@@ -102,6 +105,19 @@ static void load_xf(uint32_t addr, uint32_t n, const uint8_t* data) {
         }
     }
 #endif
+    // With GCN_VTXLOG=<frame>, every position-matrix load of that frame is printed as
+    // the game sent it, so a matrix that reaches a draw wrong can be traced to the load.
+    static const uint32_t vtxlog = getenv("GCN_VTXLOG") ? (uint32_t)atoi(getenv("GCN_VTXLOG")) : 0;
+    if (vtxlog && g_frame_counter == vtxlog && addr < 0x100) {
+        fprintf(stderr, "[xfload] addr=%03X n=%u:", addr, n);
+        for (uint32_t i = 0; i < n; i++) {
+            const uint32_t w = be32(data + 4 * i);
+            float f;
+            memcpy(&f, &w, 4);
+            fprintf(stderr, " %.2f", f);
+        }
+        fprintf(stderr, "\n");
+    }
     for (uint32_t i = 0; i < n; i++, addr++) {
         uint32_t v = be32(data + 4 * i);
         if (addr < 0x800) g_state.xf_mem[addr] = v;

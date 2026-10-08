@@ -2394,9 +2394,17 @@ static bool execute_batch(Batch& b, bool do_present) {
                     if (z < zlo) zlo = z;
                     if (z > zhi) zhi = z;
                 }
-                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c z=%.0f..%.0f",
+                // Vertices within a unit of the view-space origin sit on top of the camera,
+                // and a polygon that uses one is drawn as a sliver radiating from the
+                // screen's centre; counted so such draws can be found.
+                uint32_t at_origin = 0;
+                for (uint32_t v = 0; v < c.count; v++) {
+                    const float* p = b.verts[b.indices[c.first + v]].pos;
+                    if (fabsf(p[0]) < 1.0f && fabsf(p[1]) < 1.0f && fabsf(p[2]) < 1.0f) at_origin++;
+                }
+                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c z=%.0f..%.0f origin=%u",
                         draw_index, c.count, c.state, st.num_texgens,
-                        (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi);
+                        (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi, at_origin);
                 for (int i = 0; i < 8; i++)
                     if (st.tex_id[i]) fprintf(stderr, " t%d=%u%s", i, st.tex_id[i],
                                               st.tex_is_efb[i] ? "*" : "");

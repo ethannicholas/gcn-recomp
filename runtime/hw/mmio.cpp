@@ -35,7 +35,12 @@ uint32_t pi_read32(uint32_t off) {
     }
 }
 
+void gp_flush_partial();
+
 void pi_write32(uint32_t off, uint32_t v) {
+    // Repointing the CPU FIFO: anything still in the write-gather buffer belongs to the
+    // old destination, so it goes out first. See gp_flush_partial.
+    if (off == 0x0C || off == 0x10 || off == 0x14) gp_flush_partial();
     switch (off) {
     case 0x00:  // writes acknowledge (clear) some causes
         g_pi_intsr.fetch_and(~(v & (INT_PI | INT_RSW | INT_DEBUG | INT_HSP)));
@@ -43,7 +48,11 @@ void pi_write32(uint32_t off, uint32_t v) {
         break;
     case 0x04: g_pi_intmr = v; pi_update(); break;
     case 0x0C: g_pi_fifo_base = v & 0x03FFFFE0; LOG(LOG_GX, "PI fifo base %08X", v); break;
-    case 0x10: g_pi_fifo_end = v & 0x03FFFFE0; break;
+    // Bit 26 is kept: GXRedirectWriteGatherPipe sets the end to 64 MB (0x04000000) so
+    // that a stream into a game buffer never wraps, and masking it to 24 MB turned that
+    // into an end of zero, which wrapped every line of the stream to base 0 instead of
+    // the buffer. Metroid Prime's CPU-skinned models arrived as whatever the buffer held.
+    case 0x10: g_pi_fifo_end = v & 0x07FFFFE0; break;
     case 0x14: g_pi_fifo_wptr = v & 0x07FFFFE0; LOG(LOG_GX, "PI fifo wptr %08X", v); break;
     case 0x24: LOG(LOG_HW, "PI reset register write %08X", v); break;
     default: LOG(LOG_HW, "PI write %02X = %08X", off, v); break;
