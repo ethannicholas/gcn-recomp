@@ -1,8 +1,10 @@
 # Working notes for this repository
 
 This is the shared GameCube recompilation layer used by the per-game projects
-(`~/Source/prime-recomp`, and `~/Source/bluestorm-recomp` once it is rebased onto this). It
-was split out of bluestorm-recomp on 2026-10-07.
+(`~/Source/prime-recomp` and `~/Source/bluestorm-recomp`). It was split out of
+bluestorm-recomp on 2026-10-07, and bluestorm-recomp was rebased onto it the next day; the
+Android and OpenXR frontends still live there, with the game's own gates in them, and are the
+next thing to move here once a second game wants a headset build.
 
 **Nothing game-specific belongs here.** No disc IDs, guest addresses, game names or
 per-game heuristics in code; those arrive through `gcn_add_game()` and the game project's
