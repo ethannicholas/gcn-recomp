@@ -73,8 +73,8 @@ struct Cmd {
     uint32_t state;     // index into Batch::states
     uint32_t first, count;  // range of Batch::indices
     // The draw's position matrix: an index into Batch::mtxs. The vertices arrive already
-    // transformed by it, so nothing here needs it to draw; it is kept for what the stereo
-    // path reads off it -- which draws are the player's racer, and where the ski is. The
+    // transformed by it, so nothing here needs it to draw; it is kept for what a game's
+    // eye hook reads off it -- which draws are the player's, and where they stand. The
     // index only changes when the matrix does, so a run of draws sharing one shares it.
     uint32_t mtx;
     EfbCopyCmd copy;

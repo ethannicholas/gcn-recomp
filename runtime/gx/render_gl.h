@@ -68,7 +68,7 @@ void render_set_world_pitch(float pitch_rad);
 //                world-pitch rotation (column-major 4x4)
 //   hud_to_eye   what the HUD frame goes through before the eye's view: the identity, or
 //                a rotation that keeps it upright as the view tilts (column-major 4x4)
-//   hide         one byte per command, 1 to leave that draw out (the rider's own body,
+//   hide         one byte per command, 1 to leave that draw out (the player's own model,
 //                say); may be left empty. A hidden draw's textures are kept alive.
 // Applies to the eye passes only; the flat view is untouched.
 struct EyeOverride {

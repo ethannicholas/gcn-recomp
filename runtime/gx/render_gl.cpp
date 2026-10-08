@@ -89,7 +89,7 @@ static EyeHook g_eye_hook = nullptr;
 static bool g_fp_on = false;
 static bool g_eye_overridden = false;
 // Per command of the batch being drawn: 1 for a draw the game's eye leaves out (the
-// rider's own body, say). Empty when nothing is hidden.
+// player's own model, say). Empty when nothing is hidden.
 static std::vector<uint8_t> g_hide;
 // The morph between theater and stereo; see render_set_vr_morph. 1 is plain stereo.
 static float g_morph = 1.0f;
@@ -1698,7 +1698,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     if (do_copies) {
         // Where the eye stands and what it leaves out are read off the batch, so they
         // are settled before anything is drawn from it -- the flat pass included, which
-        // leaves the rider out of the EFB too.
+        // leaves the hidden draws out of the EFB too.
         eye_prepare(b, skip);
         compose_world_view();
         g_vr_active = false;
@@ -1953,8 +1953,8 @@ static bool execute_batch(Batch& b, bool do_present) {
         case CmdType::Draw: {
             if (!g_hide.empty() && g_hide[ci]) {
                 // Not drawn, but still the game's: its textures must not age out. The game
-                // goes on referencing them, so it never sends them again, and the rider
-                // came back from first person with his hair untextured.
+                // goes on referencing them, so it never sends them again, and a hidden
+                // model came back from first person with parts of it untextured.
                 touch_textures(b.states[c.state]);
                 break;
             }
