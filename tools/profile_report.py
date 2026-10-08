@@ -35,12 +35,34 @@ def main():
     offsets = sorted({r[3] for r in rows if r[2] == module})
     names = {}
     chunk = 2000
-    for i in range(0, len(offsets), chunk):
-        part = offsets[i:i + chunk]
-        out = subprocess.run([addr2line, '-f', '-C', '-e', binary] + [hex(o) for o in part],
-                             capture_output=True, text=True).stdout.splitlines()
-        for j, o in enumerate(part):
-            names[o] = out[2 * j] if 2 * j < len(out) else '?'
+    if 'symbolizer' in opts:
+        # --symbolizer=<llvm-symbolizer> with --outer names each sample by the outermost
+        # function of its inline chain: the recompiled function a load was inlined into,
+        # rather than LD32.
+        import json
+        outer = '--outer' in sys.argv or opts.get('outer') == '1'
+        for i in range(0, len(offsets), chunk):
+            part = offsets[i:i + chunk]
+            out = subprocess.run([opts['symbolizer'], '--output-style=JSON', '--demangle',
+                                  '--obj=' + binary] + [hex(o) for o in part],
+                                 capture_output=True, text=True).stdout
+            entries = []
+            for line in out.splitlines():
+                if not line.strip():
+                    continue
+                v = json.loads(line)
+                entries.extend(v if isinstance(v, list) else [v])
+            for j, e in enumerate(entries[:len(part)]):
+                frames = e.get('Symbol', [])
+                fr = frames[-1] if (outer and frames) else (frames[0] if frames else {})
+                names[part[j]] = fr.get('FunctionName', '?') or '?'
+    else:
+        for i in range(0, len(offsets), chunk):
+            part = offsets[i:i + chunk]
+            out = subprocess.run([addr2line, '-f', '-C', '-e', binary] + [hex(o) for o in part],
+                                 capture_output=True, text=True).stdout.splitlines()
+            for j, o in enumerate(part):
+                names[o] = out[2 * j] if 2 * j < len(out) else '?'
 
     by_fn = collections.Counter()
     by_tid = collections.defaultdict(collections.Counter)

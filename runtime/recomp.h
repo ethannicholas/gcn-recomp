@@ -126,8 +126,32 @@ static inline uint64_t LD64(uint32_t a) {
     if (UNLIKELY(IS_MMIO(a))) return ((uint64_t)mmio_read32(a) << 32) | mmio_read32(a + 4);
     uint64_t v; memcpy(&v, HOST(a), 8); return GCN_BSWAP64(v);
 }
+/* The write-gather pipe. A game's CPU-skinning loops store every vertex they produce
+   through it -- Metroid Prime's PSMTXROMultS16VecArrayGathered among them -- and taking each
+   of those stores through mmio_write32's register decode was a measurable part of a frame.
+   A 32-bit store to the pipe's own address appends to the line buffer here, and a full
+   line goes to gp_flush_line(), exactly as gp_write32 does it; other widths, mirrors of
+   the address and call-tracing builds (which probe each word) keep the general path. */
+extern uint8_t g_gp_buf[64];
+extern uint32_t g_gp_len;
+void gp_flush_line(void);
+static inline int gp_store32(uint32_t a, uint32_t v) {
+#ifndef GCN_CALL_TRACE
+    if ((a & 0xFFFFF000u) == 0xCC008000u) {
+        v = GCN_BSWAP32(v);
+        memcpy(g_gp_buf + g_gp_len, &v, 4);
+        g_gp_len += 4;
+        if (g_gp_len >= 32) gp_flush_line();
+        return 1;
+    }
+#else
+    (void)a; (void)v;
+#endif
+    return 0;
+}
+
 static inline void ST32(uint32_t a, uint32_t v) {
-    if (UNLIKELY(IS_MMIO(a))) { mmio_write32(a, v); return; }
+    if (UNLIKELY(IS_MMIO(a))) { if (gp_store32(a, v)) return; mmio_write32(a, v); return; }
     v = GCN_BSWAP32(v); memcpy(HOST(a), &v, 4);
 }
 static inline void ST16(uint32_t a, uint32_t v) {

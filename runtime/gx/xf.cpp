@@ -153,19 +153,22 @@ static inline float xfr_f(uint32_t reg) {
 // The transform reads XF state from snapshots taken when each draw arrived, not from
 // g_state, because it runs after the frame is submitted and on other threads: see XfDraw.
 // Each region's snapshot is indexed from the region's first word.
-struct XfView { const uint32_t* r[XF_REGIONS]; };
+// A region's snapshot is a page table: one offset into the frame's snapshot words per
+// sixteen-word block, each block copied only when it changed (see State::xf_block_gen).
+struct XfView {
+    const uint32_t* base;
+    const uint32_t* pt[XF_REGIONS];
+};
 static thread_local XfView t_xf;
+static inline uint32_t tw(XfRegion region, uint32_t i) {
+    return t_xf.base[t_xf.pt[region][i >> 4] + (i & 15)];
+}
 static inline float tf(XfRegion region, uint32_t i) {
+    const uint32_t w = tw(region, i);
     float f;
-    memcpy(&f, t_xf.r[region] + i, 4);
+    memcpy(&f, &w, 4);
     return f;
 }
-static inline uint32_t tw(XfRegion region, uint32_t i) { return t_xf.r[region][i]; }
-// Where each region starts in XF memory (the registers for XF_REGS), and how much of it a
-// snapshot copies. The copy runs a little past the region, because a matrix index can
-// address a few words beyond it and the transform must read what the hardware would.
-static constexpr uint32_t kXfBase[XF_REGIONS] = {0x000, 0x400, 0x500, 0x600, 0x00};
-static constexpr uint32_t kXfLen[XF_REGIONS] = {0x110, 0x110, 0x110, 0x090, 0x60};
 
 static inline uint16_t rd16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
 static inline uint32_t rd32(const uint8_t* p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
@@ -212,12 +215,50 @@ struct InVertex {
     uint8_t texmtx[8];
 };
 
+// Reads `N` components of one format into floats, exactly as read_comp would, one
+// specialisation per format and count. Which one an attribute uses is fixed by the vertex
+// layout, so it is chosen once per layout (make_layout) rather than switched on for every
+// component of every vertex -- the decode is the largest thing left on the guest thread.
+using CompReader = void (*)(const uint8_t* q, float* dst, float scale);
+template <uint32_t FMT>
+static inline float read_one(const uint8_t* q, float scale) {
+    if constexpr (FMT == 0) return (float)q[0] * scale;
+    else if constexpr (FMT == 1) return (float)(int8_t)q[0] * scale;
+    else if constexpr (FMT == 2) { uint16_t v; memcpy(&v, q, 2); return (float)GCN_BSWAP16(v) * scale; }
+    else if constexpr (FMT == 3) { uint16_t v; memcpy(&v, q, 2); return (float)(int16_t)GCN_BSWAP16(v) * scale; }
+    else if constexpr (FMT == 4) { uint32_t v; memcpy(&v, q, 4); v = GCN_BSWAP32(v); float f; memcpy(&f, &v, 4); return f; }
+    else return 0.0f;
+}
+template <uint32_t FMT, int N>
+static void read_n(const uint8_t* q, float* dst, float scale) {
+    constexpr uint32_t sz = FMT == 4 ? 4 : FMT >= 2 && FMT <= 3 ? 2 : FMT <= 1 ? 1 : 0;
+    for (int i = 0; i < N; i++) dst[i] = read_one<FMT>(q + i * sz, scale);
+}
+template <int N>
+static CompReader reader_for(uint32_t fmt) {
+    switch (fmt) {
+    case 0: return read_n<0, N>;
+    case 1: return read_n<1, N>;
+    case 2: return read_n<2, N>;
+    case 3: return read_n<3, N>;
+    case 4: return read_n<4, N>;
+    default: return read_n<5, N>;
+    }
+}
+static CompReader reader_for_count(uint32_t fmt, uint32_t n) {
+    return n == 1 ? reader_for<1>(fmt) : n == 2 ? reader_for<2>(fmt) : reader_for<3>(fmt);
+}
+
 struct Layout {
     uint32_t pnmtx, texmtx;       // presence bits
     uint32_t pos_desc, pos_fmt, pos_cnt; float pos_scale;
     uint32_t nrm_desc, nrm_fmt; bool nbt, idx3; float nrm_scale;
     uint32_t col_desc[2], col_fmt[2];
     uint32_t tex_desc[8], tex_fmt[8], tex_cnt[8]; float tex_scale[8];
+    // Resolved from the above by make_layout: see CompReader.
+    CompReader pos_rd, nrm_rd, tex_rd[8];
+    uint32_t pos_size, nrm_csz, col_size[2], tex_size[8];
+    uint32_t tex_used;            // bit t: texcoord t present
 };
 
 static Layout make_layout(int vat) {
@@ -240,6 +281,17 @@ static Layout make_layout(int vat) {
         L.tex_cnt[i] = tc[i] ? 2 : 1;
         L.tex_fmt[i] = tf[i];
         L.tex_scale[i] = 1.0f / (float)(1u << ts[i]);
+    }
+    L.pos_rd = reader_for_count(L.pos_fmt, L.pos_cnt);
+    L.pos_size = L.pos_cnt * comp_size(L.pos_fmt);
+    L.nrm_rd = reader_for_count(L.nrm_fmt, 3);
+    L.nrm_csz = comp_size(L.nrm_fmt);
+    for (int ci = 0; ci < 2; ci++) L.col_size[ci] = color_size(L.col_fmt[ci]);
+    L.tex_used = 0;
+    for (int i = 0; i < 8; i++) {
+        L.tex_rd[i] = reader_for_count(L.tex_fmt[i], L.tex_cnt[i]);
+        L.tex_size[i] = L.tex_cnt[i] * comp_size(L.tex_fmt[i]);
+        if (L.tex_desc[i]) L.tex_used |= 1u << i;
     }
     return L;
 }
@@ -284,39 +336,38 @@ static void decode_vertex(const Layout& L, const uint8_t*& p, InVertex& v) {
             if (L.texmtx & (1u << i)) v.texmtx[i] = *p++;
     v.pos_idx = ~0u;
     if (L.pos_desc) {
-        const uint8_t* q = attr_ptr(p, L.pos_desc, 0, L.pos_cnt * comp_size(L.pos_fmt), &v.pos_idx);
-        v.pos[0] = read_comp(q, L.pos_fmt, L.pos_scale);
-        v.pos[1] = read_comp(q, L.pos_fmt, L.pos_scale);
-        v.pos[2] = L.pos_cnt == 3 ? read_comp(q, L.pos_fmt, L.pos_scale) : 0.0f;
+        const uint8_t* q = attr_ptr(p, L.pos_desc, 0, L.pos_size, &v.pos_idx);
+        v.pos[2] = 0.0f;
+        L.pos_rd(q, v.pos, L.pos_scale);
     }
     if (L.nrm_desc) {
-        uint32_t csz = comp_size(L.nrm_fmt);
+        const uint32_t csz = L.nrm_csz;
         if (L.nbt && L.idx3 && L.nrm_desc != 1) {
             float* dst[3] = {v.nrm, v.bin, v.tan};
             for (int k = 0; k < 3; k++) {
                 const uint8_t* q = attr_ptr(p, L.nrm_desc, 1, 0);
-                q += k * 3 * csz;
-                for (int j = 0; j < 3; j++) dst[k][j] = read_comp(q, L.nrm_fmt, L.nrm_scale);
+                L.nrm_rd(q + k * 3 * csz, dst[k], L.nrm_scale);
             }
         } else {
             const uint8_t* q = attr_ptr(p, L.nrm_desc, 1, (L.nbt ? 9 : 3) * csz);
-            for (int j = 0; j < 3; j++) v.nrm[j] = read_comp(q, L.nrm_fmt, L.nrm_scale);
+            L.nrm_rd(q, v.nrm, L.nrm_scale);
             if (L.nbt) {
-                for (int j = 0; j < 3; j++) v.bin[j] = read_comp(q, L.nrm_fmt, L.nrm_scale);
-                for (int j = 0; j < 3; j++) v.tan[j] = read_comp(q, L.nrm_fmt, L.nrm_scale);
+                L.nrm_rd(q + 3 * csz, v.bin, L.nrm_scale);
+                L.nrm_rd(q + 6 * csz, v.tan, L.nrm_scale);
             }
         }
     }
     for (int ci = 0; ci < 2; ci++) {
         if (!L.col_desc[ci]) { v.col[ci] = 0xFFFFFFFF; continue; }
-        const uint8_t* q = attr_ptr(p, L.col_desc[ci], 2 + ci, color_size(L.col_fmt[ci]));
+        const uint8_t* q = attr_ptr(p, L.col_desc[ci], 2 + ci, L.col_size[ci]);
         v.col[ci] = read_color(q, L.col_fmt[ci]);
     }
-    for (int t = 0; t < 8; t++) {
-        if (!L.tex_desc[t]) { v.tex[t][0] = v.tex[t][1] = 0; continue; }
-        const uint8_t* q = attr_ptr(p, L.tex_desc[t], 4 + t, L.tex_cnt[t] * comp_size(L.tex_fmt[t]));
-        v.tex[t][0] = read_comp(q, L.tex_fmt[t], L.tex_scale[t]);
-        v.tex[t][1] = L.tex_cnt[t] == 2 ? read_comp(q, L.tex_fmt[t], L.tex_scale[t]) : 0.0f;
+    // Texcoords absent from the layout are zero; each present one is read in one call.
+    memset(v.tex, 0, sizeof(v.tex));
+    for (uint32_t used = L.tex_used; used; used &= used - 1) {
+        const int t = __builtin_ctz(used);
+        const uint8_t* q = attr_ptr(p, L.tex_desc[t], 4 + t, L.tex_size[t]);
+        L.tex_rd[t](q, v.tex[t], L.tex_scale[t]);
     }
 }
 
@@ -772,13 +823,19 @@ struct Pending {
     std::vector<InVertex> in;
     std::vector<XfDraw> draws;
     std::vector<uint32_t> snap;
-    uint32_t snap_gen[XF_REGIONS] = {};   // the generation of each region's latest snapshot
-    uint32_t snap_off[XF_REGIONS] = {};
+    // Each region's latest page table, and the generation it was built at; each block's
+    // latest copy, and the generation that was. ~0 is a generation never seen.
+    uint32_t snap_gen[XF_REGIONS];
+    uint32_t snap_off[XF_REGIONS];
+    uint32_t blk_gen[XF_REGIONS][17];
+    uint32_t blk_off[XF_REGIONS][17];
+    Pending() { clear(); }
     void clear() {
         in.clear();
         draws.clear();
         snap.clear();
-        for (int r = 0; r < XF_REGIONS; r++) snap_gen[r] = 0;
+        memset(snap_gen, 0xFF, sizeof(snap_gen));
+        memset(blk_gen, 0xFF, sizeof(blk_gen));
     }
 };
 
@@ -812,7 +869,8 @@ static void recycle_pending(std::unique_ptr<Pending> p) {
 }
 
 static void transform_draw(const Pending& pd, const XfDraw& d, GpuVertex* verts) {
-    for (int r = 0; r < XF_REGIONS; r++) t_xf.r[r] = pd.snap.data() + d.snap[r];
+    t_xf.base = pd.snap.data();
+    for (int r = 0; r < XF_REGIONS; r++) t_xf.pt[r] = pd.snap.data() + d.snap[r];
     t_draw_seq = d.seq;
     load_xf_plan();
     const InVertex* in = pd.in.data() + d.first_in;
@@ -1035,8 +1093,16 @@ static void draw_impl(const DrawCall& dc) {
     for (int r = 0; r < XF_REGIONS; r++) {
         if (pd.snap_gen[r] != g_state.xf_gen[r]) {
             const uint32_t* src = (r == XF_REGS ? g_state.xf_regs : g_state.xf_mem) + kXfBase[r];
+            const uint32_t* gens = g_state.xf_block_gen + (r == XF_REGS ? kXfRegBlocks : 0) + kXfBase[r] / 16;
+            const uint32_t nb = kXfLen[r] / 16;
+            for (uint32_t k = 0; k < nb; k++) {
+                if (pd.blk_gen[r][k] == gens[k]) continue;
+                pd.blk_off[r][k] = (uint32_t)pd.snap.size();
+                pd.snap.insert(pd.snap.end(), src + 16 * k, src + 16 * k + 16);
+                pd.blk_gen[r][k] = gens[k];
+            }
             pd.snap_off[r] = (uint32_t)pd.snap.size();
-            pd.snap.insert(pd.snap.end(), src, src + kXfLen[r]);
+            pd.snap.insert(pd.snap.end(), pd.blk_off[r], pd.blk_off[r] + nb);
             pd.snap_gen[r] = g_state.xf_gen[r];
         }
         d.snap[r] = pd.snap_off[r];
@@ -1048,7 +1114,17 @@ static void draw_impl(const DrawCall& dc) {
     // GCN_MTXLOG=<n> prints the position matrix and projection of every draw in the nth
     // presented frame. The timebase is wall-clock driven, so frame N is a slightly
     // different moment in every run; pick a frame well inside a steady scene.
-    uint32_t state = snapshot_state(pos_matrix_is_view_space(g_in[0].pnmtx));
+    // Whether the draw's position matrix places it in view space, and which entry of the
+    // batch's matrix list it is: both functions of the matrix alone, so they are kept while
+    // neither the matrix index nor XF's matrix memory has changed -- the common case, since
+    // a model's draws follow one another under one matrix.
+    static uint32_t c_gen = 0, c_pnmtx = ~0u, c_mtx = 0;
+    static size_t c_mtxs_size = ~(size_t)0;
+    static bool c_view_space = false;
+    const uint32_t pnmtx0 = g_in[0].pnmtx;
+    const bool mtx_cached = c_gen == g_state.xf_gen[XF_MTX] && c_pnmtx == pnmtx0 && c_mtxs_size == b.mtxs.size();
+    if (!mtx_cached) c_view_space = pos_matrix_is_view_space(pnmtx0);
+    uint32_t state = snapshot_state(c_view_space);
     if (g_mtxlog) {
         // GCN_WATCH=a,b,c prints those guest addresses every frame. Sparse snapshots cannot
         // tell a steady flag from one that blinks, so this samples every frame.
@@ -1123,8 +1199,11 @@ static void draw_impl(const DrawCall& dc) {
     // The draw's position matrix, from its first vertex -- see pos_matrix_is_view_space
     // for why that one stands for the draw. Appended only when it differs from the last
     // one appended, so the draws of one rigid object share an index.
-    uint32_t mtx = (uint32_t)b.mtxs.size() / 12;
-    {
+    uint32_t mtx;
+    if (mtx_cached) {
+        mtx = c_mtx;
+    } else {
+        mtx = (uint32_t)b.mtxs.size() / 12;
         const uint32_t m = (g_in[0].pnmtx & 63) * 4;
         float cur[12];
         for (int i = 0; i < 12; i++) cur[i] = xf_f(m + i);
@@ -1133,10 +1212,27 @@ static void draw_impl(const DrawCall& dc) {
         } else {
             b.mtxs.insert(b.mtxs.end(), cur, cur + 12);
         }
+        c_gen = g_state.xf_gen[XF_MTX];
+        c_pnmtx = pnmtx0;
+        c_mtx = mtx;
+        c_mtxs_size = b.mtxs.size();
     }
     uint32_t first = (uint32_t)b.indices.size();
     uint8_t prim = 0;
-    auto push = [&](uint32_t i) { b.indices.push_back(base + i); };
+    // Sized once and written through a pointer: a push_back per index, with its capacity
+    // check, was a measurable part of a frame of twenty thousand small draws.
+    uint32_t nidx = 0;
+    switch (dc.prim) {
+    case PRIM_QUADS: case PRIM_QUADS2: nidx = dc.count / 4 * 6; break;
+    case PRIM_TRIANGLES: nidx = dc.count / 3 * 3; break;
+    case PRIM_TRISTRIP: case PRIM_TRIFAN: nidx = dc.count >= 3 ? (dc.count - 2) * 3 : 0; break;
+    case PRIM_LINES: nidx = dc.count / 2 * 2; break;
+    case PRIM_LINESTRIP: nidx = dc.count >= 2 ? (dc.count - 1) * 2 : 0; break;
+    case PRIM_POINTS: nidx = dc.count; break;
+    }
+    b.indices.resize(first + nidx);
+    uint32_t* ip = b.indices.data() + first;
+    auto push = [&](uint32_t i) { *ip++ = base + i; };
     switch (dc.prim) {
     case PRIM_QUADS: case PRIM_QUADS2:
         for (uint32_t i = 0; i + 3 < dc.count; i += 4) { push(i); push(i + 1); push(i + 2); push(i); push(i + 2); push(i + 3); }
@@ -1166,7 +1262,8 @@ static void draw_impl(const DrawCall& dc) {
         for (uint32_t i = 0; i < dc.count; i++) push(i);
         break;
     }
-    uint32_t count = (uint32_t)b.indices.size() - first;
+    uint32_t count = (uint32_t)(ip - (b.indices.data() + first));
+    b.indices.resize(first + count);
     if (!count) return;
     // Merge with the previous draw when state and primitive type match.
     if (!b.cmds.empty()) {
@@ -1330,9 +1427,13 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
         }
         g_frame_counter++;
         texture_evict();
-        g_frames_submitted++;
-        debug_guest_check("frame");
-        heap_trace_frame(g_frames_submitted.load());
+        // With the front end on its own thread these are the guest's business, and the
+        // skim does them where the guest issued the copy: see SkimSync::Frame in fifo.cpp.
+        if (!g_fe_threaded) {
+            g_frames_submitted++;
+            debug_guest_check("frame");
+            heap_trace_frame(g_frames_submitted.load());
+        }
         g_have_last_state = false;
         flush_batch();
     }

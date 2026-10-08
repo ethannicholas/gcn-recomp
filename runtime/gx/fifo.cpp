@@ -1,6 +1,11 @@
 // Command Processor / Pixel Engine registers, write-gather pipe and FIFO feeding.
 #include "../runtime.h"
 #include "gx.h"
+#include "render.h"
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 uint32_t pi_fifo_base();
@@ -12,8 +17,12 @@ static uint32_t g_cp_base, g_cp_end, g_cp_hiwm, g_cp_lowm, g_cp_rwdist, g_cp_wpt
 static uint16_t g_pe_ctrl, g_pe_token;
 static uint16_t g_pe_regs[0x20];
 
-static uint8_t g_gp_buf[64];
-static uint32_t g_gp_len;
+// Shared with the generated code, which appends 32-bit stores to the pipe itself: see
+// gp_store32 in recomp.h.
+extern "C" {
+uint8_t g_gp_buf[64];
+uint32_t g_gp_len;
+}
 static std::vector<uint8_t> g_pending;  // unconsumed partial command bytes
 
 // CP control: bit1 = breakpoint enable, bit5 = breakpoint interrupt enable (Dolphin UCPCtrlReg)
@@ -37,15 +46,128 @@ void pe_signal_finish() {
 
 void cp_init() {}
 
+// ---------------------------------------------------------------------------
+// The front end on its own thread.
+//
+// Parsing the command stream, decoding vertices and building pixel state was about half
+// of the guest thread's time in Metroid Prime's intro on a Quest 3. The hardware runs its
+// GPU alongside the CPU off the same FIFO, and a game synchronises with it only through
+// what the GPU signals back -- PE tokens and draw-done -- so the front end can run on a
+// thread of its own as long as those signals stay where they were.
+//
+// So the guest thread skims (gx::skim): it walks the commands, copies every complete one
+// into a queue -- display lists inlined, since their memory may be reused -- and keeps
+// the frame protocol: at a token or a finish it waits until the front end has caught up
+// to that command, then raises the signal itself, at the same guest instruction as when
+// the front end ran inline, which keeps replays exact. Vertex arrays and textures are
+// still read when the front end gets to the draw, as the hardware reads them; a game that
+// rewrites one before the GPU has signalled that it is done with it is already racing
+// the hardware. The display copy that ends a frame is counted by the skim too, since
+// scripted input and the guest checks key on it.
+//
+// GCN_GX_SYNC=1 runs the front end inline, as before.
+// ---------------------------------------------------------------------------
+static bool fe_threaded() {
+    static const bool on = !getenv("GCN_GX_SYNC");
+    return on;
+}
+
+static std::mutex g_fe_mutex;
+static std::condition_variable g_fe_cv;
+static std::deque<std::vector<uint8_t>> g_fe_queue;
+static std::vector<std::vector<uint8_t>> g_fe_spare;   // emptied chunks, capacity kept
+static size_t g_fe_bytes;            // queued, not yet processed
+static bool g_fe_busy;               // the thread is processing a chunk
+static constexpr size_t kFeMaxBytes = 8u << 20;
+static std::vector<uint8_t> g_skim_out;
+
+static void fe_thread_main() {
+    for (;;) {
+        std::vector<uint8_t> chunk;
+        {
+            std::unique_lock<std::mutex> lk(g_fe_mutex);
+            g_fe_cv.wait(lk, [] { return !g_fe_queue.empty(); });
+            chunk = std::move(g_fe_queue.front());
+            g_fe_queue.pop_front();
+            g_fe_busy = true;
+        }
+        gx::process(chunk.data(), (uint32_t)chunk.size(), false);
+        {
+            std::lock_guard<std::mutex> lk(g_fe_mutex);
+            g_fe_bytes -= chunk.size();
+            g_fe_busy = false;
+            chunk.clear();
+            if (g_fe_spare.size() < 8) g_fe_spare.push_back(std::move(chunk));
+            g_fe_cv.notify_all();
+        }
+    }
+}
+
+// Hands what the skim has gathered to the front end, waiting while too much is queued.
+static void fe_submit() {
+    if (g_skim_out.empty()) return;
+    static const bool started = [] {
+        gx::g_fe_threaded = true;
+        std::thread(fe_thread_main).detach();
+        return true;
+    }();
+    (void)started;
+    std::unique_lock<std::mutex> lk(g_fe_mutex);
+    g_fe_cv.wait(lk, [] { return g_fe_bytes < kFeMaxBytes; });
+    g_fe_bytes += g_skim_out.size();
+    g_fe_queue.push_back(std::move(g_skim_out));
+    g_skim_out.clear();
+    if (!g_fe_spare.empty()) {
+        g_skim_out = std::move(g_fe_spare.back());
+        g_fe_spare.pop_back();
+    }
+    g_fe_cv.notify_all();
+}
+
+// Waits until the front end has processed everything handed to it.
+static void fe_wait_idle() {
+    std::unique_lock<std::mutex> lk(g_fe_mutex);
+    g_fe_cv.wait(lk, [] { return g_fe_queue.empty() && !g_fe_busy; });
+}
+
+static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) {
+    switch (kind) {
+    case gx::SkimSync::Token:
+    case gx::SkimSync::TokenInt:
+    case gx::SkimSync::Finish:
+        fe_submit();
+        fe_wait_idle();
+        if (kind == gx::SkimSync::Finish) pe_signal_finish();
+        else pe_signal_token((uint16_t)value, kind == gx::SkimSync::TokenInt);
+        break;
+    case gx::SkimSync::Frame:
+        fe_submit();
+        gx::g_frames_submitted++;
+        debug_guest_check("frame");
+        heap_trace_frame(gx::g_frames_submitted.load());
+        break;
+    }
+}
+
+static uint32_t cp_consume(const uint8_t* data, uint32_t len) {
+    if (!fe_threaded()) return gx::process(data, len, true);
+    const uint32_t used = gx::skim(data, len, true, g_skim_out, skim_sync);
+    // Handed over in batches: this runs for every 32-byte line out of the gather pipe, and
+    // a hand-off per line would cost more than the line. The syncs and the end of a frame
+    // hand over whatever is gathered regardless.
+    if (g_skim_out.size() >= (64u << 10)) fe_submit();
+    return used;
+}
+
 // Feed bytes to the command processor, handling commands split across chunks.
 static void cp_feed(const uint8_t* data, uint32_t len) {
     if (g_pending.empty()) {
-        uint32_t used = gx::process(data, len, true);
+        uint32_t used = cp_consume(data, len);
         if (used < len) g_pending.assign(data + used, data + len);
         return;
     }
     g_pending.insert(g_pending.end(), data, data + len);
-    uint32_t used = gx::process(g_pending.data(), (uint32_t)g_pending.size(), true);
+    uint32_t used = cp_consume(g_pending.data(), (uint32_t)g_pending.size());
     g_pending.erase(g_pending.begin(), g_pending.begin() + used);
     static size_t warned = 1 << 16;
     if (g_pending.size() > warned) {
@@ -108,6 +230,8 @@ static void gp_flush32() {
     memmove(g_gp_buf, g_gp_buf + 32, g_gp_len - 32);
     g_gp_len -= 32;
 }
+
+extern "C" void gp_flush_line() { gp_flush32(); }
 
 uint32_t gp_pending() { return g_gp_len; }
 

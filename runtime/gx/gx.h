@@ -33,17 +33,31 @@ struct State {
     // one: the transform runs after the frame is submitted, off the guest thread, from
     // those snapshots. See XfDraw in xf.cpp.
     uint32_t xf_gen[5] = {1, 1, 1, 1, 1};
+    // And one per sixteen-word block, XF memory's 128 then the registers' first six, so
+    // that a region that has changed is copied a block at a time rather than whole: a
+    // matrix load touches one or two blocks of a region of seventeen.
+    uint32_t xf_block_gen[0x86] = {};
 };
 
 extern State g_state;
 
-// The regions of XF state the vertex transform reads, each snapshotted on its own.
+// The regions of XF state the vertex transform reads, each snapshotted on its own. A region
+// runs a little past what it is named for, because a matrix index can address a few words
+// beyond it and the transform must read what the hardware would.
 enum XfRegion { XF_MTX, XF_NRM, XF_POST, XF_LIGHT, XF_REGS, XF_REGIONS };
+constexpr uint32_t kXfBase[XF_REGIONS] = {0x000, 0x400, 0x500, 0x600, 0x00};
+constexpr uint32_t kXfLen[XF_REGIONS] = {0x110, 0x110, 0x110, 0x090, 0x60};
+constexpr uint32_t kXfRegBlocks = 0x80;  // xf_block_gen index of the registers' first block
 inline void xf_mem_written(uint32_t addr) {
-    if (addr < 0x100) g_state.xf_gen[XF_MTX]++;
-    else if (addr >= 0x400 && addr < 0x500) g_state.xf_gen[XF_NRM]++;
-    else if (addr >= 0x500 && addr < 0x600) g_state.xf_gen[XF_POST]++;
-    else if (addr >= 0x600 && addr < 0x680) g_state.xf_gen[XF_LIGHT]++;
+    g_state.xf_block_gen[addr >> 4]++;
+    for (int r = 0; r < XF_REGS; r++)
+        if (addr - kXfBase[r] < kXfLen[r]) g_state.xf_gen[r]++;
+}
+inline void xf_reg_written(uint32_t reg) {
+    if (reg < kXfLen[XF_REGS]) {
+        g_state.xf_block_gen[kXfRegBlocks + (reg >> 4)]++;
+        g_state.xf_gen[XF_REGS]++;
+    }
 }
 
 // Byte-size of one vertex for the given VAT index, based on current VCD/VAT.
@@ -52,6 +66,22 @@ uint32_t vertex_size(int vat);
 // Process a buffer of FIFO commands. Returns bytes consumed (may stop early on a
 // partial command when `partial_ok`).
 uint32_t process(const uint8_t* data, uint32_t len, bool partial_ok);
+
+// The guest thread's side of a front end that runs on its own thread (fifo.cpp). Walks the
+// same commands process() would, but executes none of them: it keeps its own copy of the
+// CP registers (for vertex sizes) and of the BP registers (for the write mask), appends
+// every complete command to `out` -- display lists inlined, since the memory they live in
+// may be reused before the front end gets to them -- and calls `sync` at each command
+// whose effect the guest can observe, after appending it: a PE token or finish, and the
+// copy that ends a frame. Returns bytes consumed, as process() does.
+enum class SkimSync { Token, TokenInt, Finish, Frame };
+using SkimSyncFn = void (*)(SkimSync kind, uint32_t value, std::vector<uint8_t>& out);
+uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync);
+
+// Set when the front end runs on its own thread: process() then leaves the PE signals and
+// the frame count to the guest thread's skim, which raises them at the same guest
+// instruction as before.
+extern bool g_fe_threaded;
 
 // Callbacks to the renderer (weakly defined null implementations in cmd.cpp).
 struct DrawCall {

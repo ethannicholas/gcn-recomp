@@ -2,12 +2,34 @@
 
 The renderer is an **OpenGL 3.3 core profile** back end behind a GX front end that runs
 vertex decoding, transform, lighting and texgen on the CPU, and generates one fragment
-shader per TEV configuration. Decoding happens on the guest thread as each draw arrives;
-transform, lighting and texgen run after the frame is submitted, on worker threads, from
-per-draw snapshots of the XF state (`XfDraw` in `gx/xf.cpp`). That took the heaviest
-stretch of Metroid Prime's intro on a Quest 3 from 38-50 frames a second, unpaced, to about
-60, with byte-identical output. On macOS the system framework is linked directly; elsewhere a
+shader per TEV configuration. On macOS the system framework is linked directly; elsewhere a
 vendored glad loader resolves the entry points.
+
+## Threads
+
+Four threads share a frame, besides the renderer's:
+
+- **The guest** runs the game, and skims the GX command stream as the game writes it
+  (`gx::skim`, `gx/cmd.cpp`): it walks the commands, copies each complete one into a queue
+  with display lists inlined, and keeps the frame protocol itself. At a PE token or a
+  draw-done it waits for the front end to catch up and then raises the signal, at the same
+  guest instruction as when everything ran inline, so replays stay exact; it also counts
+  frames at the display copy, which scripted input and the guest checks key on.
+- **The front end** (`gx/fifo.cpp`) runs `gx::process` on the queue: register loads,
+  vertex decoding, pixel-state snapshots, textures. Vertex arrays and textures are read when
+  it reaches the draw, as the hardware reads them.
+- **Two transform workers** (`XfDraw` in `gx/xf.cpp`) transform and light each submitted
+  frame from per-draw snapshots of the XF state, copied a sixteen-word block at a time as
+  it changes.
+
+On a Quest 3 this took the heaviest stretch of Metroid Prime's intro from 38-50 frames a
+second, unpaced, to about 100, with byte-identical frames throughout. `GCN_GX_SYNC=1` runs
+the front end inline on the guest thread again, `GCN_XF_SYNC=1` the transform; the
+diagnostics that read transformed vertices early select the latter themselves.
+
+Stores to the write-gather pipe's address are appended to its line buffer inline in the
+generated code (`gp_store32` in `recomp.h`) rather than through the MMIO decode; a game's
+CPU skinning stores every vertex that way.
 
 ## Shader cache
 

@@ -90,15 +90,22 @@ in the env file replays an input log relative to that directory. Its log is
 
 ## Measuring the guest
 
-`GCN_PROFILE=<file>` (Linux and Android) samples the host's program counters at 1 kHz of CPU
-time while `<game>_bench` or `<game>_egl` runs and writes a histogram at the end; it needs no
-perf permissions, which a Quest's shell does not have. `GCN_PROFILE_DELAY=<seconds>` starts
+`GCN_PROFILE=<file>` (Linux and Android) samples the host's program counters with a profiling
+timer while `<game>_bench` or `<game>_egl` runs and writes a histogram at the end; it needs no
+perf permissions, which a Quest's shell does not have. The kernel rounds the timer, so the
+counts are proportions rather than milliseconds. `GCN_PROFILE_DELAY=<seconds>` starts
 sampling later, to profile one stretch of a route. `tools/profile_report.py <file>
 <unstripped binary> --addr2line=<llvm-addr2line>` sums it by function, overall and per
-thread. Both device tools take `GCN_REPLAY=<dir>` to drive a run with an input log, and the
-harness `--fast` to run unpaced. The vertex transform runs on worker threads after a frame is
-submitted (see `graphics.md`); `GCN_XF_SYNC=1` runs it per draw on the guest thread instead,
-and `GCN_XF_THREADS=N` sets how many threads share a frame (2 by default).
+thread; with `--symbolizer=<llvm-symbolizer> --outer=1` instead it names each sample by the
+outermost function of its inline chain -- the recompiled function a guest load was inlined
+into, rather than `LD32`. Symbolise against the binary that was profiled: any other build
+puts samples in the wrong functions. Both device tools take `GCN_REPLAY=<dir>` to drive a run
+with an input log, and the harness `--fast` to run unpaced.
+
+The GX front end runs on a thread of its own and the vertex transform on worker threads (see
+"Threads" in `graphics.md`). `GCN_GX_SYNC=1` puts the front end back on the guest thread,
+`GCN_XF_SYNC=1` runs the transform per draw there, and `GCN_XF_THREADS=N` sets how many
+threads share the transform of a frame (2 by default).
 
 `<game>_bench` runs the game with no graphics, audio or input, unpaced, and reports how fast
 the guest advances; `--warmup=N` (default 8) excludes boot from the steady-state figure. Its

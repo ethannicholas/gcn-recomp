@@ -27,8 +27,9 @@ static inline uint32_t attr_size(uint32_t desc, uint32_t direct_size) {
     }
 }
 
-static uint32_t vertex_size_uncached(int vat) {
-    const uint32_t* cp = g_state.cp;
+bool g_fe_threaded = false;
+
+static uint32_t vertex_size_from(const uint32_t* cp, int vat) {
     uint32_t vcd_lo = cp[0x50], vcd_hi = cp[0x60];
     uint32_t a = cp[0x70 + vat], b = cp[0x80 + vat], c = cp[0x90 + vat];
     uint32_t size = 0;
@@ -73,6 +74,8 @@ static uint32_t vertex_size_uncached(int vat) {
     return size;
 }
 
+static uint32_t vertex_size_uncached(int vat) { return vertex_size_from(g_state.cp, vat); }
+
 static void load_cp(uint8_t reg, uint32_t v) {
     g_state.cp[reg] = v;
     g_state.cp_gen++;
@@ -84,8 +87,10 @@ static void load_xf(uint32_t addr, uint32_t n, const uint8_t* data) {
     // position matrix with that view-space translation (within 0.5) is loaded, which
     // names the code placing the object. Needs a build with GCN_TRACE_CALLS; see
     // ENTER()/RET() in recomp.h.
+    // The guest's call stack is only there to read while the front end runs inline
+    // (GCN_GX_SYNC=1); on its own thread it is somewhere else entirely by now.
     static const char* want = getenv("GCN_POSMTX_STACK");
-    if (want && n == 12 && (addr & 3) == 0 && addr < 0x100) {
+    if (want && !g_fe_threaded && n == 12 && (addr & 3) == 0 && addr < 0x100) {
         float wx = 0, wy = 0, wz = 0;
         sscanf(want, "%f,%f,%f", &wx, &wy, &wz);
         float tx, ty, tz;
@@ -130,7 +135,7 @@ static void load_xf(uint32_t addr, uint32_t n, const uint8_t* data) {
             uint32_t& r = g_state.xf_regs[reg];
             if (r == v) continue;
             r = v;
-            if (reg < 0x60) g_state.xf_gen[XF_REGS]++;
+            xf_reg_written(reg);
             // The ones the pixel state is built from: colour channel count, viewport,
             // projection, texgen count. The rest feed the vertex transform only.
             if (reg == 0x09 || (reg >= 0x1A && reg <= 0x26) || reg == 0x3F) g_state.pixel_dirty = true;
@@ -168,10 +173,10 @@ static void load_bp(uint32_t w) {
     g_state.bp[reg] = v;
     switch (reg) {
     case 0x45:  // PE_DONE
-        if (v & 2) pe_signal_finish();
+        if ((v & 2) && !g_fe_threaded) pe_signal_finish();
         break;
-    case 0x47: pe_signal_token((uint16_t)v, false); break;
-    case 0x48: pe_signal_token((uint16_t)v, true); break;
+    case 0x47: if (!g_fe_threaded) pe_signal_token((uint16_t)v, false); break;
+    case 0x48: if (!g_fe_threaded) pe_signal_token((uint16_t)v, true); break;
     case 0x52: {  // copy execute
         uint32_t dest = (g_state.bp[0x4B] & 0x1FFFFF) << 5;
         renderer_efb_copy(dest, (v >> 14) & 1);
@@ -195,6 +200,103 @@ uint32_t vertex_size(int vat) {
         valid |= 1u << vat;
     }
     return cached[vat];
+}
+
+// ---- skim (see gx.h) ----
+static uint32_t s_cp[256];
+static uint32_t s_cp_gen = 1;
+static uint32_t s_bp[256];
+static uint32_t s_bp_mask = 0xFFFFFF;
+
+static uint32_t skim_vertex_size(int vat) {
+    static uint32_t cached[8];
+    static uint32_t valid, gen;
+    if (gen != s_cp_gen) { valid = 0; gen = s_cp_gen; }
+    if (!(valid & (1u << vat))) {
+        cached[vat] = vertex_size_from(s_cp, vat);
+        valid |= 1u << vat;
+    }
+    return cached[vat];
+}
+
+// The BP write's effect as far as the guest can see it, with the write mask applied the
+// way load_bp applies it.
+static void skim_bp(uint32_t w, std::vector<uint8_t>& out, SkimSyncFn sync) {
+    const uint32_t reg = w >> 24;
+    uint32_t v = w & 0xFFFFFF;
+    if (reg == 0xFE) { s_bp_mask = v; return; }
+    if (s_bp_mask != 0xFFFFFF) {
+        v = (s_bp[reg] & ~s_bp_mask) | (v & s_bp_mask);
+        s_bp_mask = 0xFFFFFF;
+    }
+    s_bp[reg] = v;
+    switch (reg) {
+    case 0x45: if (v & 2) sync(SkimSync::Finish, v, out); break;
+    case 0x47: sync(SkimSync::Token, v, out); break;
+    case 0x48: sync(SkimSync::TokenInt, v, out); break;
+    case 0x52: if ((v >> 14) & 1) sync(SkimSync::Frame, v, out); break;  // display copy
+    }
+}
+
+uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync) {
+    uint32_t pos = 0;
+    while (pos < len) {
+        const uint8_t* p = data + pos;
+        const uint32_t avail = len - pos;
+        const uint8_t cmd = p[0];
+        uint32_t need;
+        switch (cmd) {
+        case 0x00: case 0x48: case 0x44: need = 1; break;
+        case 0x08:
+            if (avail < 6) goto partial;
+            s_cp[p[1]] = be32(p + 2);
+            s_cp_gen++;
+            need = 6;
+            break;
+        case 0x10: {
+            if (avail < 5) goto partial;
+            const uint32_t n = ((be32(p + 1) >> 16) & 0xF) + 1;
+            need = 5 + 4 * n;
+            if (avail < need) goto partial;
+            break;
+        }
+        case 0x20: case 0x28: case 0x30: case 0x38:
+            if (avail < 5) goto partial;
+            need = 5;
+            break;
+        case 0x40: {
+            if (avail < 9) goto partial;
+            // Inlined: the list's memory may be rewritten before the front end reads it.
+            const uint32_t addr = be32(p + 1) & 0x03FFFFFF, size = be32(p + 5);
+            skim(phys_ptr(addr), size, false, out, sync);
+            pos += 9;
+            continue;
+        }
+        case 0x61:
+            if (avail < 5) goto partial;
+            out.insert(out.end(), p, p + 5);
+            skim_bp(be32(p + 1), out, sync);
+            pos += 5;
+            continue;
+        default:
+            if (cmd & 0x80) {
+                if (avail < 3) goto partial;
+                const uint32_t count = be16(p + 1);
+                need = 3 + skim_vertex_size(cmd & 7) * count;
+                if (avail < need) goto partial;
+                break;
+            }
+            need = 1;  // process() logs it and skips a byte; so will the front end
+            break;
+        }
+        out.insert(out.end(), p, p + need);
+        pos += need;
+        continue;
+    partial:
+        // A display list's truncated last command is dropped, as process() drops it.
+        return partial_ok ? pos : len;
+    }
+    return pos;
 }
 
 uint32_t process(const uint8_t* data, uint32_t len, bool partial_ok) {
