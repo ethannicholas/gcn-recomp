@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
         const double sd = elapsed - t_warmed;
         const double fps = (frames - frames_warmed) / sd;
         printf("steady state: %u frames in %.1f s = %.2f fps = %.0f%% of the game's %d fps\n",
-               frames - frames_warmed, sd, fps, (int)GCN_GAME_FPS, 100.0 * fps / (double)GCN_GAME_FPS);
+               frames - frames_warmed, sd, fps, 100.0 * fps / (double)GCN_GAME_FPS, (int)GCN_GAME_FPS);
         printf("              %.0fk vertices/s\n", (verts - verts_warmed) / sd / 1000.0);
     } else {
         printf("steady state: not measured (warmup %ds was not shorter than the %ds run)\n",
