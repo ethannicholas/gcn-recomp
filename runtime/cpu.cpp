@@ -151,11 +151,14 @@ static int64_t g_tb_offset;
 void dec_write(CPU* c, uint32_t v);
 uint32_t dec_read(CPU* c);
 
+void gp_reset();  // gx/fifo.cpp
+
 extern "C" uint32_t hle_mfspr(CPU* c, uint32_t spr) {
     switch (spr) {
     case SPR_WPAR:
         // Bit 0 reports a non-empty gather buffer; the SDK spins on it before it moves
-        // the FIFO. It always reads as empty here; see hle_sync.
+        // the FIFO. It always reads as empty here: full lines go out as they fill, and
+        // what is left is padding the SDK's next WPAR write discards (gp_reset).
         return c->spr[spr] & ~1u;
     case SPR_TBL_R: return (uint32_t)(now_ticks() + g_tb_offset);
     case SPR_TBU_R: return (uint32_t)((now_ticks() + g_tb_offset) >> 32);
@@ -185,6 +188,14 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
         return;
     }
     case SPR_DEC: dec_write(c, v); return;
+    case SPR_WPAR:
+        // Writing WPAR sets the gather address and empties the gather buffer. The SDK
+        // writes it only after padding the pipe with zero bytes and waiting for the
+        // buffer-not-empty bit to clear, on both sides of a redirect; what is left in the
+        // buffer then is padding that must not reach memory. See gp_reset.
+        gp_reset();
+        c->spr[spr] = v;
+        return;
     case SPR_DMAL: {
         c->spr[spr] = v;
         if (v & 2) {  // trigger locked-cache DMA

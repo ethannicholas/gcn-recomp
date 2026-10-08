@@ -40,7 +40,17 @@ void gp_flush_partial();
 void pi_write32(uint32_t off, uint32_t v) {
     // Repointing the CPU FIFO: anything still in the write-gather buffer belongs to the
     // old destination, so it goes out first. See gp_flush_partial.
-    if (off == 0x0C || off == 0x10 || off == 0x14) gp_flush_partial();
+    if (off == 0x0C || off == 0x10 || off == 0x14) {
+        // GCN_GATHERLOG=1: every repointing of the pipe, with what was pending in it.
+        static bool log = getenv("GCN_GATHERLOG") != nullptr;
+        if (log) {
+            extern uint32_t gx_frames_submitted();
+            extern uint32_t gp_pending();
+            fprintf(stderr, "[gather] frame %u: PI reg %02X <- %08X (base %08X end %08X wptr %08X, %u bytes pending)\n",
+                    gx_frames_submitted(), off, v, g_pi_fifo_base, g_pi_fifo_end, g_pi_fifo_wptr, gp_pending());
+        }
+        gp_flush_partial();
+    }
     switch (off) {
     case 0x00:  // writes acknowledge (clear) some causes
         g_pi_intsr.fetch_and(~(v & (INT_PI | INT_RSW | INT_DEBUG | INT_HSP)));

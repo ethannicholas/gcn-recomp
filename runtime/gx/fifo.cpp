@@ -109,19 +109,34 @@ static void gp_flush32() {
     g_gp_len -= 32;
 }
 
-// Write out whatever the gather buffer holds short of a full line. The hardware drains a
-// partial buffer on its own once the CPU stops writing, and the SDK waits for that before
-// it repoints the FIFO: GXRedirectWriteGatherPipe sends the pipe at a buffer of the game's
-// choosing, which Metroid Prime uses to stream CPU-skinned vertices straight into a vertex
-// array. Keeping the partial line here and prepending it to the redirected stream put
-// every float in that array a few bytes off. Called before the PI FIFO registers change,
-// so the bytes land where the game expected them.
+uint32_t gp_pending() { return g_gp_len; }
+
+// A write to WPAR empties the gather buffer; see hle_mtspr. Found the hard way: Metroid
+// Prime streams CPU-skinned vertices through the redirected pipe into a heap block sized
+// exactly for them, and GXRestoreWriteGatherPipe's 31 bytes of zero padding, written out
+// as a partial line at the PI register write that follows, zeroed the next block's
+// header (the allocator crash of 2026-10-08, caught by the heap check and named by the
+// watch replay). On the hardware those bytes never reach memory: the SDK waits for the
+// pipe to report empty and then rewrites WPAR, which discards them.
+void gp_reset() {
+    if (g_gp_len) LOG(LOG_GX, "gather buffer reset with %u bytes pending at wptr %08X", g_gp_len, pi_fifo_wptr());
+    g_gp_len = 0;
+}
+
+// Write out whatever the gather buffer holds short of a full line, before the PI FIFO
+// registers change, so that nothing from the old destination is prepended to the new
+// one. Along the SDK's own path (GXRedirectWriteGatherPipe, GXRestoreWriteGatherPipe)
+// this never has anything to write: the SDK pads the pipe with zero bytes, waits for it
+// to report empty and rewrites WPAR, and the WPAR write empties the buffer (gp_reset).
+// Writing the padding out instead was wrong on both sides. Prepended to the redirected
+// stream it put every float of Metroid Prime's CPU-skinned vertex arrays a few bytes
+// off; written after the stream it ran past the array -- sized to the line -- into the
+// next heap block's header, which the allocator found twelve minutes later.
 //
-// Only there. Draining at other points the hardware would -- sync, a WPAR or pointer read,
-// an idle tick -- was tried and leaves the write pointer mid-line, and the game's frame
-// protocol (a GP breakpoint set at a pointer it reads back) then stops the GP short of
-// the token it waits for, or desyncs the command parser outright. The SDK pads the pipe
-// with NOPs before it moves the pointers, so the line left here is never data.
+// Draining at other points the hardware might -- sync, a WPAR or pointer read, an idle
+// tick -- was tried and leaves the write pointer mid-line, and the game's frame protocol
+// (a GP breakpoint set at a pointer it reads back) then stops the GP short of the token
+// it waits for, or desyncs the command parser outright.
 void gp_flush_partial() {
     if (!g_gp_len) return;
     LOG(LOG_GX, "gather buffer drained with %u bytes pending at wptr %08X", g_gp_len, pi_fifo_wptr());

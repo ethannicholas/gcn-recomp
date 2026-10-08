@@ -13,6 +13,7 @@
 //     ourselves), or spawns a new host thread for a never-run context.
 #include "runtime.h"
 #include "platform.h"
+#include "input_log.h"
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -303,6 +304,7 @@ void debug_guest_check(const char* where) {
     if (!what) return;
     fprintf(stderr, "\nGUEST CHECK FAILED at %s, frame %u, guest time %.4f s:\n  %s\n", where,
             (unsigned)gx_frames_submitted(), (double)now_ticks() / TB_FREQ, what);
+    input_log_end();
     debug_dump_threads();
     if (getenv("GCN_GUEST_CHECK_CONTINUE")) { g_guest_check = nullptr; return; }
     plat_exit_now(3);

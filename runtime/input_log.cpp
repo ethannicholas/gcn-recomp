@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
 #include <mutex>
 #include <vector>
 
@@ -51,7 +52,7 @@ size_t g_replay_pos;             // first entry not yet applied
 PadState g_replay_state[4];
 bool g_replay_loaded;
 bool g_replay_by_frame;          // a v1 log
-uint32_t g_replay_last_key;
+uint32_t g_replay_last_key;      // the last change, or the end marker when the log has one
 
 uint32_t replay_key() { return g_replay_by_frame ? gx_frames_submitted() : g_poll_seq; }
 
@@ -93,6 +94,13 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
 }
 
 
+void input_log_end() {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_out) return;
+    fprintf(g_out, "# end %u %u\n", g_poll_seq, gx_frames_submitted());
+    fflush(g_out);
+}
+
 bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     const std::string path = dir + "/inputs.txt";
     FILE* f = fopen(path.c_str(), "rb");
@@ -102,11 +110,14 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     }
     char line[256];
     int version = 1;
+    uint32_t end_key = 0;
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#') {
             long long epoch;
+            unsigned end_poll, end_frame;
             if (sscanf(line, "# gcn-recomp input log v%d", &version) == 1) continue;
             if (sscanf(line, "# epoch %lld", &epoch) == 1) rtc_set_base((time_t)epoch);
+            if (sscanf(line, "# end %u %u", &end_poll, &end_frame) == 2) end_key = version >= 2 ? end_poll : end_frame;
             continue;
         }
         if (line[0] == '\n') continue;
@@ -132,7 +143,7 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         fprintf(stderr, "[input] %s holds no input\n", path.c_str());
         return false;
     }
-    g_replay_last_key = g_replay.back().key;
+    g_replay_last_key = std::max(g_replay.back().key, end_key);
     g_replay_by_frame = version < 2;
     for (auto& s : g_replay_state) { s = PadState(); s.connected = true; }
     g_replay_loaded = true;

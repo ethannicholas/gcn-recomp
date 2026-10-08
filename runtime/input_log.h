@@ -31,6 +31,12 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path);
 // boot. Returns false if there is no inputs.txt.
 bool input_replay_load(const std::string& dir, std::string& memcard_out);
 
+// Marks where the run ended: the log's last line is otherwise the last *change*, and a
+// replay would hand control back to the live pad there, which can be well before the end.
+// Called on a normal exit and from the crash and check handlers, so that a replay holds
+// the last state up to the instant the run stopped.
+void input_log_end();
+
 // Called by the SI layer each time the guest polls a pad, with the live state in `s`.
 // While a replay is loaded and not yet past its end, overwrites `s` with the logged state
 // for `chan` and returns true; past the end the live controller takes over again and this

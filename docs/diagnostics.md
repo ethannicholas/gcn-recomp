@@ -32,7 +32,12 @@ replay approximately, as they always did.
 The log format is text: a header (version, game, start time and its epoch), then one line
 per change of a channel's state --
 `poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r`, in
-hex. Lines can be edited or written by hand; `frame` is for the reader.
+hex -- and, when the run ended in a way the runtime saw (a normal exit, a fault, a failed
+guest check or an interrupt), a final `# end <poll> <frame>`. A replay holds the last
+state up to that end before handing over to the live pad; without the marker it hands over
+at the last change, which can be well before where the run stopped, so a log that lacks
+one (a run killed from outside) can be given one by hand. Lines can be edited or written
+by hand; `frame` is for the reader.
 
 ## Scripted input
 

@@ -95,6 +95,7 @@ static void eye_dump(uint32_t n) {
 
 static void on_interrupt() {
     plat_watchdog(2, 2);  // never hang in here (stdio locks may be held by other threads)
+    input_log_end();
     debug_dump_threads();
     plat_exit_now(1);
 }
@@ -106,6 +107,7 @@ static void on_fault(const void* fault_addr, int code) {
     else
         fprintf(stderr, "\nFAULT: host address %p (code %d)\n", fault_addr, code);
     plat_watchdog(2, 2);
+    input_log_end();
     plat_backtrace_print();
     debug_dump_threads();
     plat_exit_now(1);
@@ -335,6 +337,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+    input_log_end();
     threads_request_quit();
     plat_exit_now(0);
 }
