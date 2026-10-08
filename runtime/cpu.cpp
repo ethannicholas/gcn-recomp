@@ -149,6 +149,10 @@ uint32_t dec_read(CPU* c);
 
 extern "C" uint32_t hle_mfspr(CPU* c, uint32_t spr) {
     switch (spr) {
+    case SPR_WPAR:
+        // Bit 0 reports a non-empty gather buffer; the SDK spins on it before it moves
+        // the FIFO. It always reads as empty here; see hle_sync.
+        return c->spr[spr] & ~1u;
     case SPR_TBL_R: return (uint32_t)(now_ticks() + g_tb_offset);
     case SPR_TBU_R: return (uint32_t)((now_ticks() + g_tb_offset) >> 32);
     case SPR_DEC: return dec_read(c);

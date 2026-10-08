@@ -506,7 +506,11 @@ static void load_xf_plan() {
     g_mtx_cached = 0xFFFFFFFFu;
 }
 
+static uint32_t g_draw_seq;  // front-end draws so far, stamped into each vertex
+
 static void transform_vertex(const InVertex& v, GpuVertex& o, bool has_nrm) {
+    o.src_idx = v.pos_idx;
+    o.src_draw = g_draw_seq;
     if (v.pnmtx != g_mtx_cached) load_matrices(v.pnmtx);
     const float* pm = g_posmtx;
     const float px = v.pos[0], py = v.pos[1], pz = v.pos[2];
@@ -728,6 +732,7 @@ static void draw_impl(const DrawCall& dc) {
     if (g_in.size() < dc.count) g_in.resize(dc.count);
     load_xf_plan();
     const uint8_t* p = dc.data;
+    g_draw_seq++;
     for (uint32_t i = 0; i < dc.count; i++) decode_vertex(L, p, g_in[i]);
     // GCN_VTXLOG=<frame> prints each draw of that frame as the front end sees it: the
     // primitive, vertex layout, the first vertices' raw indices and positions, and the
@@ -747,6 +752,22 @@ static void draw_impl(const DrawCall& dc) {
             for (int i = 0; i < 32; i++) fprintf(stderr, "%s%02X", (i % 4) ? "" : " ", q[i]);
             fprintf(stderr, "\n");
         }
+        // Near-duplicate positions within the draw: two vertices closer than 0.05 units
+        // but not identical. Printed with their raw bytes, so a pair the model really
+        // holds can be told from one the decode produced.
+        for (uint32_t i = 0; i < dc.count; i++)
+            for (uint32_t j = i + 1; j < dc.count; j++) {
+                const float dx = g_in[i].pos[0] - g_in[j].pos[0], dy = g_in[i].pos[1] - g_in[j].pos[1], dz = g_in[i].pos[2] - g_in[j].pos[2];
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > 0.0f && d2 < 0.05f * 0.05f && L.pos_desc >= 2 && g_in[i].pos_idx != g_in[j].pos_idx) {
+                    const uint8_t* a = phys_ptr(g_state.cp[0xA0] + g_in[i].pos_idx * g_state.cp[0xB0]);
+                    const uint8_t* bq = phys_ptr(g_state.cp[0xA0] + g_in[j].pos_idx * g_state.cp[0xB0]);
+                    fprintf(stderr, "      neardup v%u(idx %u) v%u(idx %u) d=%.4f raw %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X | %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
+                            i, g_in[i].pos_idx, j, g_in[j].pos_idx, sqrtf(d2),
+                            a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11],
+                            bq[0], bq[1], bq[2], bq[3], bq[4], bq[5], bq[6], bq[7], bq[8], bq[9], bq[10], bq[11]);
+                }
+            }
         uint32_t seen = 0xFFFFFFFF;
         for (uint32_t i = 0; i < dc.count && i < 12; i++) {
             const InVertex& v = g_in[i];

@@ -19,6 +19,10 @@ struct GpuVertex {
     float pos[3];
     uint8_t col[2][4];
     float tex[8][3];
+    // Where the vertex came from, for the draw log: its position array index (~0 for
+    // direct data) and the front-end draw that produced it. Diagnostics only.
+    uint32_t src_idx;
+    uint32_t src_draw;
 };
 
 // Decoded texture (RGBA8, all mip levels), immutable once created.

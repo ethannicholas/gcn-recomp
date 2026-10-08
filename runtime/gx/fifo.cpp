@@ -114,9 +114,14 @@ static void gp_flush32() {
 // it repoints the FIFO: GXRedirectWriteGatherPipe sends the pipe at a buffer of the game's
 // choosing, which Metroid Prime uses to stream CPU-skinned vertices straight into a vertex
 // array. Keeping the partial line here and prepending it to the redirected stream put
-// every float in that array a few bytes off, and the skinned models -- Samus, the gunship
-// -- came out as slivers radiating from wherever the garbage landed. Called before the PI
-// FIFO registers change, so the bytes land where the game expected them.
+// every float in that array a few bytes off. Called before the PI FIFO registers change,
+// so the bytes land where the game expected them.
+//
+// Only there. Draining at other points the hardware would -- sync, a WPAR or pointer read,
+// an idle tick -- was tried and leaves the write pointer mid-line, and the game's frame
+// protocol (a GP breakpoint set at a pointer it reads back) then stops the GP short of
+// the token it waits for, or desyncs the command parser outright. The SDK pads the pipe
+// with NOPs before it moves the pointers, so the line left here is never data.
 void gp_flush_partial() {
     if (!g_gp_len) return;
     LOG(LOG_GX, "gather buffer drained with %u bytes pending at wptr %08X", g_gp_len, pi_fifo_wptr());

@@ -2402,9 +2402,47 @@ static bool execute_batch(Batch& b, bool do_present) {
                     const float* p = b.verts[b.indices[c.first + v]].pos;
                     if (fabsf(p[0]) < 1.0f && fabsf(p[1]) < 1.0f && fabsf(p[2]) < 1.0f) at_origin++;
                 }
-                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c z=%.0f..%.0f origin=%u",
+                // Sliver triangles: longer than 40 units in view space with a height under
+                // a thousandth of their length. Geometry that is right never looks like
+                // that; a vertex that is wrong makes exactly that, drawn as a hairline
+                // across the screen. The first few are printed with their vertices.
+                uint32_t slivers = 0;
+                std::string sliver_text;
+                if (c.prim == 0) {
+                    for (uint32_t t = 0; t + 2 < c.count; t += 3) {
+                        const float* a = b.verts[b.indices[c.first + t]].pos;
+                        const float* bb = b.verts[b.indices[c.first + t + 1]].pos;
+                        const float* cc = b.verts[b.indices[c.first + t + 2]].pos;
+                        auto len = [](const float* p, const float* q) {
+                            return sqrtf((p[0]-q[0])*(p[0]-q[0]) + (p[1]-q[1])*(p[1]-q[1]) + (p[2]-q[2])*(p[2]-q[2]));
+                        };
+                        const float e0 = len(a, bb), e1 = len(bb, cc), e2 = len(cc, a);
+                        const float longest = std::max(e0, std::max(e1, e2));
+                        if (longest < 40.0f) continue;
+                        // Heron's formula for the area; height = 2A / longest.
+                        const float sp = (e0 + e1 + e2) * 0.5f;
+                        const float area2 = std::max(0.0f, sp * (sp - e0) * (sp - e1) * (sp - e2));
+                        const float height = 2.0f * sqrtf(area2) / longest;
+                        static const float ratio = getenv("GCN_SLIVER_RATIO") ? (float)atof(getenv("GCN_SLIVER_RATIO")) : 0.001f;
+                        if (height < longest * ratio) {
+                            if (slivers < 3) {
+                                char buf[200];
+                                const GpuVertex& va = b.verts[b.indices[c.first + t]];
+                                const GpuVertex& vb = b.verts[b.indices[c.first + t + 1]];
+                                const GpuVertex& vc = b.verts[b.indices[c.first + t + 2]];
+                                snprintf(buf, sizeof(buf), "\n        sliver src d%u:%d d%u:%d d%u:%d (%.3f,%.3f,%.3f) (%.3f,%.3f,%.3f) (%.3f,%.3f,%.3f) len=%.0f",
+                                         va.src_draw, (int)va.src_idx, vb.src_draw, (int)vb.src_idx, vc.src_draw, (int)vc.src_idx,
+                                         a[0], a[1], a[2], bb[0], bb[1], bb[2], cc[0], cc[1], cc[2], longest);
+                                sliver_text += buf;
+                            }
+                            slivers++;
+                        }
+                    }
+                }
+                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c z=%.0f..%.0f origin=%u slivers=%u%s",
                         draw_index, c.count, c.state, st.num_texgens,
-                        (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi, at_origin);
+                        (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi, at_origin, slivers, sliver_text.c_str());
+                if (slivers) fprintf(stderr, "\n       ");
                 for (int i = 0; i < 8; i++)
                     if (st.tex_id[i]) fprintf(stderr, " t%d=%u%s", i, st.tex_id[i],
                                               st.tex_is_efb[i] ? "*" : "");
