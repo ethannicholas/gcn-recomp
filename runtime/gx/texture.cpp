@@ -224,13 +224,31 @@ void tlut_load(uint32_t src_addr, uint32_t tmem_off, uint32_t bytes) {
 // ---------------------------------------------------------------------------
 // Cache
 // ---------------------------------------------------------------------------
-struct CacheEntry {
+// A cached texture is its texels -- keyed by where they are, their format and shape --
+// plus, for the indexed formats, one decode per palette those texels have been drawn
+// with. The palette is identified by the entries the texels actually use, because a
+// game loads what it likes: Metroid Prime's font is CI4, uses four entries, and loads a
+// sixteen-entry palette whose other twelve are whatever lies past its table in memory,
+// different on every load. Hashing the whole palette made each of those loads a new
+// texture; keying on the palette's TMEM slot alone (as this once did) made the game's
+// two passes over the font -- a palette that renders the glyphs black for the drop
+// shadow, then one that renders them white -- share a decode, and the shadow came out
+// white. Each pass lands in the same frame, so the variants have to coexist.
+struct Variant {
+    uint64_t pal_hash;
     std::shared_ptr<TexData> tex;
-    uint64_t hash;
+};
+struct CacheEntry {
+    uint64_t hash;             // the texels
     uint32_t last_frame;
     uint32_t checked_frame;
-    bool efb;
-    uint32_t efb_w, efb_h, efb_fmt;
+    uint64_t used[4];          // palette indices the texels reference (CI4, CI8)
+    std::vector<Variant> variants;
+};
+struct EfbCopyEntry {
+    std::shared_ptr<TexData> tex;
+    uint32_t last_frame;
+    uint32_t w, h, fmt;
 };
 
 struct Key {
@@ -242,7 +260,7 @@ struct KeyHash {
 };
 
 static std::unordered_map<Key, CacheEntry, KeyHash> g_cache;
-static std::unordered_map<uint32_t, CacheEntry> g_efb_copies;  // by address
+static std::unordered_map<uint32_t, EfbCopyEntry> g_efb_copies;  // by address
 
 uint32_t texture_register_efb_copy(uint32_t addr, uint32_t w, uint32_t h, uint32_t fmt) {
     addr &= 0x03FFFFFF;
@@ -251,21 +269,34 @@ uint32_t texture_register_efb_copy(uint32_t addr, uint32_t w, uint32_t h, uint32
     // Minting a fresh id every frame instead stranded one GL texture per copy per frame
     // -- around 2.5 MB a frame here, since EFB textures are exempt from eviction.
     auto it = g_efb_copies.find(addr);
-    if (it != g_efb_copies.end() && it->second.efb_w == w && it->second.efb_h == h &&
-        it->second.efb_fmt == fmt) {
+    if (it != g_efb_copies.end() && it->second.w == w && it->second.h == h && it->second.fmt == fmt) {
         it->second.last_frame = g_frame_counter;
         return it->second.tex->id;
     }
-    CacheEntry e{};
+    EfbCopyEntry e{};
     e.tex = std::make_shared<TexData>();
     e.tex->id = g_next_tex_id++;
     e.tex->width = w;
     e.tex->height = h;
-    e.efb = true;
-    e.efb_w = w; e.efb_h = h; e.efb_fmt = fmt;
+    e.w = w; e.h = h; e.fmt = fmt;
     e.last_frame = g_frame_counter;
     g_efb_copies[addr] = e;
     return e.tex->id;
+}
+
+// Which palette entries the texels of an indexed texture reference.
+static void scan_used_indices(const uint8_t* src, uint32_t total, uint32_t fmt, uint64_t used[4]) {
+    memset(used, 0, 4 * sizeof(uint64_t));
+    if (fmt == TF_CI4) {
+        uint32_t m = 0;
+        for (uint32_t i = 0; i < total; i++) m |= (1u << (src[i] >> 4)) | (1u << (src[i] & 15));
+        used[0] = m;
+    } else if (fmt == TF_CI8) {
+        for (uint32_t i = 0; i < total; i++) used[src[i] >> 6] |= 1ull << (src[i] & 63);
+    } else {
+        // CI14X2: 16384 entries; the whole palette stands for it.
+        used[0] = used[1] = used[2] = used[3] = ~0ull;
+    }
 }
 
 TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData>>& new_textures) {
@@ -276,16 +307,19 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
         eit->second.last_frame = g_frame_counter;
         return {eit->second.tex->id, true};
     }
-    uint32_t tlut_bytes = 0;
-    if (p.fmt == TF_CI4) tlut_bytes = 16 * 2;
-    else if (p.fmt == TF_CI8) tlut_bytes = 256 * 2;
-    else if (p.fmt == TF_CI14X2) tlut_bytes = 16384 * 2;
-    Key k{addr, p.fmt, p.width, p.height, p.levels, tlut_bytes ? p.tlut_off : 0, tlut_bytes ? p.tlut_fmt : 0};
+    uint32_t tlut_entries = 0;
+    if (p.fmt == TF_CI4) tlut_entries = 16;
+    else if (p.fmt == TF_CI8) tlut_entries = 256;
+    else if (p.fmt == TF_CI14X2) tlut_entries = 16384;
+    const bool indexed = tlut_entries != 0;
+    const uint32_t tlut_off = indexed && p.tlut_off < sizeof(g_tlut_mem) ? p.tlut_off : 0;
+    const uint8_t* pal = g_tlut_mem + tlut_off;
+    if (indexed) tlut_entries = std::min<uint32_t>(tlut_entries, (uint32_t)(sizeof(g_tlut_mem) - tlut_off) / 2);
+
+    Key k{addr, p.fmt, p.width, p.height, p.levels, indexed ? tlut_off : 0, indexed ? p.tlut_fmt : 0};
     CacheEntry& e = g_cache[k];
-    if (e.tex && e.checked_frame == g_frame_counter) {
-        e.last_frame = g_frame_counter;
-        return {e.tex->id, false};
-    }
+    e.last_frame = g_frame_counter;
+
     // Compute data size over all levels.
     uint32_t total = 0, w = p.width, h = p.height;
     for (uint32_t l = 0; l < p.levels; l++) {
@@ -295,12 +329,34 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
     }
     if (addr + total > RAM_SIZE) return {0, false};
     const uint8_t* src = phys_ptr(addr);
-    const uint8_t* pal = g_tlut_mem + (p.tlut_off < sizeof(g_tlut_mem) ? p.tlut_off : 0);
-    uint64_t hsh = hash_bytes(src, total, 0);
-    if (tlut_bytes) hsh = hash_bytes(pal, std::min<uint32_t>(tlut_bytes, sizeof(g_tlut_mem) - p.tlut_off), hsh);
-    e.checked_frame = g_frame_counter;
-    e.last_frame = g_frame_counter;
-    if (e.tex && e.hash == hsh) return {e.tex->id, false};
+
+    // The texels are checked once per frame, on the assumption that the game does not
+    // rewrite a texture between two draws of the same frame. GCN_TEXHASH_ALWAYS=1 checks
+    // on every lookup instead; if an artifact disappears under it, the game is doing
+    // exactly that and the texture needs telling apart some other way.
+    static const bool hash_always = getenv("GCN_TEXHASH_ALWAYS") != nullptr;
+    if (e.variants.empty() || e.checked_frame != g_frame_counter || hash_always) {
+        const uint64_t hsh = hash_bytes(src, total, 0);
+        e.checked_frame = g_frame_counter;
+        if (e.variants.empty() || hsh != e.hash) {
+            e.variants.clear();
+            e.hash = hsh;
+            if (indexed) scan_used_indices(src, total, p.fmt, e.used);
+        }
+    }
+
+    // The palette, as far as these texels can see it.
+    uint64_t pal_hash = 0;
+    if (indexed) {
+        if (p.fmt == TF_CI14X2) {
+            pal_hash = hash_bytes(pal, tlut_entries * 2, 0);
+        } else {
+            for (uint32_t i = 0; i < tlut_entries; i++)
+                if (e.used[i >> 6] & (1ull << (i & 63))) pal_hash = hash_bytes(pal + i * 2, 2, pal_hash ^ i);
+        }
+    }
+    for (const Variant& v : e.variants)
+        if (v.pal_hash == pal_hash) return {v.tex->id, false};
 
     auto td = std::make_shared<TexData>();
     td->id = g_next_tex_id++;
@@ -315,8 +371,7 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
         w = w > 1 ? w / 2 : 1;
         h = h > 1 ? h / 2 : 1;
     }
-    e.tex = td;
-    e.hash = hsh;
+    e.variants.push_back({pal_hash, td});
     new_textures.push_back(td);
     // GCN_TEXLOG=1 reports every texture decoded: where it came from, its shape, and how
     // much of its top level is anything but black -- which tells a texture the game never
@@ -325,8 +380,17 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
     if (texlog) {
         uint32_t nonzero = 0;
         for (uint32_t v : td->levels[0]) nonzero += (v & 0x00FFFFFF) != 0;
-        fprintf(stderr, "[tex] f%u id=%u addr=%08X fmt=%u %ux%u levels=%u nonblack=%u/%zu\n",
+        fprintf(stderr, "[tex] f%u id=%u addr=%08X fmt=%u %ux%u levels=%u nonblack=%u/%zu",
                 g_frame_counter, td->id, addr, p.fmt, p.width, p.height, p.levels, nonzero, td->levels[0].size());
+        if (indexed) {
+            // The palette entries the texels use, decoded: which ones a glyph lands on is
+            // what decides what colour it comes out.
+            fprintf(stderr, " tlut@%X fmt=%u variant=%zu:", p.tlut_off, p.tlut_fmt, e.variants.size());
+            for (uint32_t i = 0; i < 16 && i < tlut_entries; i++)
+                if (p.fmt == TF_CI14X2 || (e.used[i >> 6] & (1ull << (i & 63))))
+                    fprintf(stderr, " %u=%08X", i, decode_tlut(pal, i, p.tlut_fmt));
+        }
+        fprintf(stderr, "\n");
     }
     return {td->id, false};
 }

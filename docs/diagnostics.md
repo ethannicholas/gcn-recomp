@@ -67,13 +67,23 @@ time to issue it.
 
 `GCN_TEXLOG=1` prints a line per decoded texture: frame, id, guest address, format, size and
 how many top-level texels are not black -- which tells a texture the game never wrote (all
-zero) from one the shader mishandles. `GCN_TEXDUMP=<dir>` writes each texture's top level as
-`<dir>/tex_<id>.png`, alpha forced opaque.
+zero) from one the shader mishandles. For an indexed texture it adds the palette entries the
+texels use, decoded, and which palette variant this is. `GCN_TEXDUMP=<dir>` writes each
+texture's top level as `<dir>/tex_<id>.png`, alpha forced opaque.
+
+The texture cache checks a texture's texels once per frame, assuming a game does not rewrite
+a texture between two draws of one frame. `GCN_TEXHASH_ALWAYS=1` checks on every lookup; if
+an artifact goes away under it, the game is doing exactly that. (Palettes are not subject to
+this: an indexed texture is decoded once per distinct palette its texels see, so a font drawn
+black for a shadow and then white in the same frame gets both.)
 
 ## Finding a draw or a function
 
 - `GCN_DRAWLOG=<frame>` lists every draw in one frame with its index; `GCN_DRAW_SKIP=a-b`
   then drops a range of them, to attribute a piece of the image to the draws that made it.
+  `GCN_DRAWLOG_VERBOSE=1` adds each draw's TEV setup (stage orders, colour and alpha
+  combiners, konst selectors, the colour registers and konsts, alpha test, Z and blend
+  modes) and its first vertices with colours and texture coordinates.
 - `GCN_MTXLOG=<frame>` prints the position matrix and projection of every draw in that frame;
   `GCN_PNMLOG=a-b` lists the position matrices used over a window of frames.
 - `GCN_WATCH=a,b,c` (with `GCN_MTXLOG` set) prints those guest addresses every frame;

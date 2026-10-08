@@ -2401,6 +2401,31 @@ static bool execute_batch(Batch& b, bool do_present) {
                     if (st.tex_id[i]) fprintf(stderr, " t%d=%u%s", i, st.tex_id[i],
                                               st.tex_is_efb[i] ? "*" : "");
                 fprintf(stderr, "\n");
+                // GCN_DRAWLOG_VERBOSE=1 adds the TEV setup -- stage count, each stage's
+                // order, colour and alpha combiners and konst selectors, the colour
+                // registers and konsts -- and the first few vertices, so a draw's shading
+                // can be read off without a shader dump.
+                static const bool verbose = getenv("GCN_DRAWLOG_VERBOSE") != nullptr;
+                if (verbose) {
+                    const uint32_t* bp = st.bp;
+                    const uint32_t nstages = ((bp[0] >> 10) & 15) + 1;
+                    fprintf(stderr, "        genmode=%06X stages=%u colors=%u", bp[0], nstages, st.num_colors);
+                    for (uint32_t i = 0; i < nstages; i++)
+                        fprintf(stderr, "\n        st%u order=%06X cenv=%06X aenv=%06X ksel=%06X", i,
+                                bp[0x28 + i / 2], bp[0xC0 + 2 * i], bp[0xC1 + 2 * i], bp[0xF6 + i / 2]);
+                    fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X", bp[0xF3], bp[0x40], bp[0x41]);
+                    for (int r = 0; r < 4; r++)
+                        fprintf(stderr, "\n        reg%d=%08X %08X  konst%d=%08X %08X", r, st.tev_reg[r][0], st.tev_reg[r][1],
+                                r, st.tev_konst[r][0], st.tev_konst[r][1]);
+                    for (uint32_t v = 0; v < c.count && v < 24; v++) {
+                        const uint32_t ix = b.indices[c.first + v];
+                        const GpuVertex& gv = b.verts[ix];
+                        fprintf(stderr, "\n        i%u=%u pos=%.1f,%.1f,%.1f col0=%02X%02X%02X%02X col1=%02X%02X%02X%02X uv0=%.3f,%.3f", v, ix,
+                                gv.pos[0], gv.pos[1], gv.pos[2], gv.col[0][0], gv.col[0][1], gv.col[0][2], gv.col[0][3],
+                                gv.col[1][0], gv.col[1][1], gv.col[1][2], gv.col[1][3], gv.tex[0][0], gv.tex[0][1]);
+                    }
+                    fprintf(stderr, "\n");
+                }
             }
             const int this_draw = draw_index++;
             if (skip_lo >= 0 && this_draw >= skip_lo && this_draw <= skip_hi) break;
