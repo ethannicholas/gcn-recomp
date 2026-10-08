@@ -20,6 +20,10 @@ void log_msg(LogCat cat, const char* fmt, ...) GCN_PRINTF_FMT(2, 3);
 constexpr uint32_t RAM_SIZE = 0x01800000;
 constexpr uint32_t ARAM_SIZE = 0x01000000;
 constexpr uint32_t LC_BASE = 0x20000000;   // locked cache (guest 0xE0000000)
+// The locked cache is 16KB, but what backs the window is wider. Code that keeps a buffer
+// there can read its neighbours a row past the end -- on hardware that lands in ordinary
+// cache lines, and Dolphin maps 256KB here -- so commit as much, not a 16KB edge to fault on.
+constexpr uint32_t LC_SIZE = 0x40000;
 void mem_init();
 extern uint8_t* g_aram;
 

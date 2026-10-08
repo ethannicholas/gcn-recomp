@@ -77,7 +77,7 @@ void mem_init() {
     if (!p) fatal("mem reserve failed");
     g_mem = (uint8_t*)p;
     if (!plat_commit(g_mem, RAM_SIZE)) fatal("mem commit failed");
-    if (!plat_commit(g_mem + LC_BASE, 0x4000)) fatal("lc commit failed");
+    if (!plat_commit(g_mem + LC_BASE, LC_SIZE)) fatal("lc commit failed");
     g_aram = (uint8_t*)calloc(1, ARAM_SIZE);
 }
 
