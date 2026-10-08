@@ -12,6 +12,7 @@ public:
     uint8_t transfer(uint8_t in, bool reading);
     void flush();
     void format();
+    void write_serial(uint8_t* header);
 
 private:
     std::string path_;

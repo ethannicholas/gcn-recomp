@@ -3,6 +3,7 @@
 #include "../platform.h"
 #include "memcard.h"
 #include <cstdio>
+#include <ctime>
 
 enum : uint8_t {
     CMD_ID = 0x00, CMD_READ_ARRAY = 0x52, CMD_SET_INT = 0x81, CMD_READ_STATUS = 0x83, CMD_READ_ID = 0x85,
@@ -24,6 +25,16 @@ MemCard::MemCard(const std::string& path, uint32_t size_mbit) : path_(path), siz
         flush();
     }
     status_ = ST_UNLOCKED | ST_READY;
+    // A card formatted before 2026-10-08 has an all-zero serial, which a game can take
+    // to mean there is no card to save to (Metroid Prime's save stations do). Give it one.
+    bool zero = true;
+    for (int i = 0; i < 0x20; i++) if (data_[i]) zero = false;
+    if (zero) {
+        LOG(LOG_EXI, "memcard: %s has a zero serial; writing one", path.c_str());
+        write_serial(&data_[0]);
+        dirty_ = true;
+        flush();
+    }
 }
 
 static void put16(uint8_t* p, uint16_t v) { p[0] = v >> 8; p[1] = (uint8_t)v; }
@@ -40,8 +51,33 @@ static void card_checksum(const uint8_t* p, size_t len, uint16_t& cs, uint16_t& 
     if (csi == 0xFFFF) csi = 0;
 }
 
-// Equivalent of CARDFormat with formatTime = 0 and an all-zero SRAM flash ID,
-// which makes the serial all zeros (see VerifyID in the CARD library).
+static void put64(uint8_t* p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (56 - 8 * i)); }
+
+// The header's 32-byte serial, as CARDFormat writes it: the SRAM flash ID (all zero here,
+// see sram_init in exi.cpp) scrambled byte by byte with a linear congruential sequence
+// seeded by the format time, which VerifyID in the CARD library recomputes on every mount,
+// then the format time itself, the SRAM counter bias and language (both zero in our SRAM).
+// CARDGetSerialNo is the XOR of these 32 bytes as four 64-bit words, so the format time
+// must not be zero: it used to be, the serial came out zero, and Metroid Prime's save
+// stations took that as "no card" and never offered to save. Rewrites the header checksum.
+void MemCard::write_serial(uint8_t* h) {
+    uint64_t t = (uint64_t)(time(nullptr) - 946684800) * 40500000ull;  // an OSTime of now
+    if (!t) t = 1;
+    uint64_t rand = t;
+    for (int i = 0; i < 12; i++) {
+        rand = (rand * 1103515245ull + 12345ull) >> 16;
+        h[i] = (uint8_t)rand;
+        rand = ((rand * 1103515245ull + 12345ull) >> 16) & 0x7FFF;
+    }
+    put64(h + 12, t);
+    memset(h + 20, 0, 12);
+    uint16_t cs, csi;
+    card_checksum(h, 0x1FC, cs, csi);
+    put16(h + 0x1FC, cs);
+    put16(h + 0x1FE, csi);
+}
+
+// Equivalent of CARDFormat on a console with an all-zero SRAM flash ID.
 void MemCard::format() {
     const size_t B = 0x2000;
     memset(data_.data(), 0xFF, data_.size());
@@ -52,9 +88,7 @@ void MemCard::format() {
     put16(h + 0x20, 0);                      // device ID
     put16(h + 0x22, (uint16_t)size_mbit_);   // size in Mbit
     put16(h + 0x24, 0);                      // encoding: ANSI
-    card_checksum(h, 0x1FC, cs, csi);
-    put16(h + 0x1FC, cs);
-    put16(h + 0x1FE, csi);
+    write_serial(h);                         // also writes the checksum
     // Blocks 1-2: directory (127 empty entries)
     for (int k = 0; k < 2; k++) {
         uint8_t* d = &data_[B * (1 + k)];
