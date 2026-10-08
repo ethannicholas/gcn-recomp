@@ -41,6 +41,16 @@ a log.
 presented frame as a PNG. `GCN_DUMP_RANGE=a-b` restricts that to a window of frames.
 `--headless` runs the guest with no renderer at all.
 
+## The eye preview
+
+`--eye` renders through the stereo path into an offscreen target and shows that in the
+window instead of the flat frame: the eye sits where the game's camera is, looking straight
+ahead with a 90 degree field, so a change to the VR renderer can be looked at on a desktop
+before it goes near a headset. `--first-person[=x,y,z]` puts the eye on the player's vehicle
+instead (`render_set_first_person`, with the anchor in game units in the vehicle's frame), and
+`GCN_FPLOG=1` prints per frame where the vehicle was found and how many of the rider's draws
+were left out. With `--dump-dir`/`--dump-every` the eye's frames are written as `eye_NNNNN.png`.
+
 ## Measuring the guest
 
 `<game>_bench` runs the game with no graphics, audio or input and reports how fast the guest
@@ -80,5 +90,38 @@ zero) from one the shader mishandles. `GCN_TEXDUMP=<dir>` writes each texture's 
 ## Panics and faults
 
 A game's `OSPanic` should be listed in its `hle.txt`: the replacement prints the message and
-a guest backtrace and exits, instead of spinning in `PPCHalt` looking like a hang. A host
-fault inside guest memory prints the guest address and every thread's registers.
+a guest backtrace and exits, instead of spinning in `PPCHalt` looking like a hang. The report
+goes to stderr, to the crash record (first line only) and to `<save dir>/panic.txt`, which is
+the one to read on a device after the fact. A host fault inside guest memory prints the
+guest address and every thread's registers.
+
+## The guest heap
+
+The SDK's OSAlloc keeps no record of who owns a cell, so when a game panics on a failed
+`OSAllocFromHeap` the message is all there is. Two things fill that in, both in
+`runtime/heap_trace.cpp`:
+
+- Every panic report ends with the heaps walked out of guest memory: each heap's size, free
+  total, number of free blocks and largest free block, and the allocated total -- which
+  answers whether the heap was exhausted or fragmented. Any failed allocation prints the
+  same, whether or not the game then panics.
+- `GCN_HEAP=1` keeps a table of live cells keyed by the caller's return address and the one
+  above it (games reach the allocator through thin wrappers), and prints it grouped by
+  caller on any failed allocation or panic. `GCN_HEAP=<frames>` prints it every so many
+  presented frames, to watch a trend before the crash.
+
+Both need four one-line patches in the game's `patches.txt`, hooking `OSAllocFromHeap`'s
+entry and both of its returns and `OSFreeToHeap`'s entry; the entry hook takes the address
+of the SDK's `HeapArray` variable, which is where the report finds the heaps. Each line
+keeps the instruction it replaces -- the first instruction of `OSAllocFromHeap` is
+`mulli r0,r3,12` and `OSFreeToHeap`'s is `mflr r0`, and the returns are `blr`:
+
+```
+<OSAllocFromHeap>      heap_trace_alloc(c, <HeapArray var>); c->r[0] = (uint32_t)((int32_t)c->r[3] * 12);
+<its NULL return>      heap_trace_alloc_result(c, 0); RET();
+<its normal return>    heap_trace_alloc_result(c, 1); RET();
+<OSFreeToHeap>         heap_trace_free(c); c->r[0] = c->lr;
+```
+
+`HeapArray` is the small-data word `OSAllocFromHeap` loads first (`lwz r3, off(r13)`), and
+`r13` is set by `__start`. Without the hooks the panic report says the heaps were not traced.

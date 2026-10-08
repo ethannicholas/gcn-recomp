@@ -80,6 +80,13 @@ void debug_watch_check(CPU* c, uint32_t fn);
 #define EXIT() ((void)0)
 #endif
 
+/* Guest heap tracing (runtime/heap_trace.cpp). A game's patches.txt splices these into
+   OSAllocFromHeap's entry and both of its returns and into OSFreeToHeap's entry; the entry
+   hook also takes the address of the SDK's HeapArray variable. */
+void heap_trace_alloc(CPU* c, uint32_t heap_array_var);
+void heap_trace_alloc_result(CPU* c, int ok);
+void heap_trace_free(CPU* c);
+
 /* How a recompiled function returns. */
 #define RET() do { EXIT(); return; } while (0)
 

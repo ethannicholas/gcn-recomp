@@ -127,10 +127,25 @@ function(gcn_add_game)
   list(APPEND CORE_SOURCES ${RT}/audio_stub.cpp)
   set(BENCH_SOURCES ${CORE_SOURCES} ${RT}/bench_main.cpp)
 
-  # Render target: desktop OpenGL 3.3 core. GL entry points are resolved at runtime via
-  # a vendored glad loader; macOS links the system framework directly and needs neither.
-  set(GLAD_INCLUDE_DIR ${RT}/gx/glad/include)
-  set(GLAD_SOURCE ${RT}/gx/glad/src/gl.c)
+  # Render target: desktop OpenGL 3.3 core, or OpenGL ES 3.2 for Android and standalone
+  # headsets. One renderer source serves both; see runtime/gx/gl.h. GL entry points are
+  # resolved at runtime via a vendored glad loader; macOS links the system framework
+  # directly and needs neither.
+  if(ANDROID)
+    set(_gcn_gl_es_default ON)
+  else()
+    set(_gcn_gl_es_default OFF)
+  endif()
+  option(GCN_GL_ES "Target OpenGL ES 3.2 instead of desktop OpenGL 3.3 core" ${_gcn_gl_es_default})
+  if(GCN_GL_ES)
+    set(GLAD_INCLUDE_DIR ${RT}/gx/glad_es/include)
+    set(GLAD_SOURCE ${RT}/gx/glad_es/src/gles2.c)
+    set(GCN_GL_DEFS GCN_GL_ES)
+  else()
+    set(GLAD_INCLUDE_DIR ${RT}/gx/glad/include)
+    set(GLAD_SOURCE ${RT}/gx/glad/src/gl.c)
+    set(GCN_GL_DEFS "")
+  endif()
   if(NOT APPLE)
     list(APPEND RUNTIME_SOURCES ${GLAD_SOURCE})
   endif()
@@ -211,7 +226,7 @@ function(gcn_add_game)
     target_include_directories(runtime_check PRIVATE ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR})
     target_link_libraries(runtime_check PRIVATE ${GCN_SDL_TARGET})
     target_compile_options(runtime_check PRIVATE ${GCN_RUNTIME_WARNINGS})
-    target_compile_definitions(runtime_check PRIVATE ${GCN_GAME_DEFS})
+    target_compile_definitions(runtime_check PRIVATE ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
   endif()
 
   if(HAVE_GAME_ISO AND NOT GCN_BENCH_ONLY)
@@ -220,6 +235,25 @@ function(gcn_add_game)
     target_include_directories(${G_NAME} PRIVATE ${GLAD_INCLUDE_DIR})
     target_link_libraries(${G_NAME} PRIVATE game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS})
     target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
-    target_compile_definitions(${G_NAME} PRIVATE ${GCN_GAME_DEFS})
+    target_compile_definitions(${G_NAME} PRIVATE ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
   endif()
+
+  # For a game project that adds frontends of its own -- a headset app, a headless harness
+  # on a device -- the pieces such a target is assembled from. GCN_CORE_SOURCES is the
+  # guest and the hardware with no renderer, no SDL and the silent audio stub;
+  # GCN_AUDIO_SOURCES is the real mix (a frontend adds its own device backend);
+  # GCN_RENDER_SOURCES is the GL renderer. Every target also needs ${GCN_GLAD_SOURCE} off
+  # Apple, the include directories GCN_RT, GCN_GEN_DIR and GCN_GLAD_INCLUDE_DIR, and the
+  # definitions GCN_GAME_DEFS and GCN_GL_DEFS; it links game_recomp.
+  set(GCN_RT ${RT} PARENT_SCOPE)
+  set(GCN_GEN_DIR ${RECOMP_GEN_DIR} PARENT_SCOPE)
+  set(GCN_HAVE_GAME_ISO ${HAVE_GAME_ISO} PARENT_SCOPE)
+  set(GCN_CORE_SOURCES ${CORE_SOURCES} PARENT_SCOPE)
+  set(GCN_AUDIO_SOURCES ${RT}/audio.cpp PARENT_SCOPE)
+  set(GCN_RENDER_SOURCES ${RT}/gx/render_gl.cpp ${RT}/gx/shadergen.cpp ${RT}/gx/gl_load.cpp ${RT}/png.cpp PARENT_SCOPE)
+  set(GCN_GLAD_INCLUDE_DIR ${GLAD_INCLUDE_DIR} PARENT_SCOPE)
+  set(GCN_GLAD_SOURCE ${GLAD_SOURCE} PARENT_SCOPE)
+  set(GCN_RUNTIME_WARNINGS ${GCN_RUNTIME_WARNINGS} PARENT_SCOPE)
+  set(GCN_GAME_DEFS ${GCN_GAME_DEFS} PARENT_SCOPE)
+  set(GCN_GL_DEFS ${GCN_GL_DEFS} PARENT_SCOPE)
 endfunction()

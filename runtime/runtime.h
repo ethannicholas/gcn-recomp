@@ -86,6 +86,11 @@ void hle_os_report(CPU* c);
 std::string guest_format(CPU* c, uint32_t fmt_addr, int first_gpr, int first_fpr);
 std::string guest_str(uint32_t addr, size_t max = 4096);
 
+// Appends the SDK heaps' totals, block counts and largest free block, walked out of guest
+// memory (runtime/heap_trace.cpp); with GCN_HEAP set, also the live cells by caller.
+void heap_report(std::string& out);
+void heap_trace_frame(uint32_t frame);  // GCN_HEAP=<frames>: the report every so many frames
+
 // Names a guest address. func_name wants a function's first instruction; func_containing
 // takes any address inside one, which is what a return address off the stack is.
 const char* func_name(uint32_t addr);
