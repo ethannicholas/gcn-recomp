@@ -73,9 +73,9 @@ static void aram_dma() {
     // The ARAM address is not masked to the 16 MB that exists. ARInit probes for expansion
     // ARAM by writing patterns at 16, 18, 20 and 32 MB and reading them back; with the
     // address wrapped, the probe read its own pattern out of the low 16 MB and the game
-    // believed it had more ARAM than it does. Metroid Prime then streamed assets through
+    // believed it had more ARAM than it does. A game then streamed assets through
     // addresses above 16 MB, which landed on top of whatever was below, and models whose
-    // textures had been parked there -- the gunship, Samus -- came back as noise. Real
+    // textures had been parked there came back as noise. Real
     // hardware reads zeros past the end and ignores writes there, so that is what this
     // does, and the probe finds 16 MB.
     const uint32_t aram = g_ar_aram;

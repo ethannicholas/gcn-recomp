@@ -61,7 +61,7 @@ void pi_write32(uint32_t off, uint32_t v) {
     // Bit 26 is kept: GXRedirectWriteGatherPipe sets the end to 64 MB (0x04000000) so
     // that a stream into a game buffer never wraps, and masking it to 24 MB turned that
     // into an end of zero, which wrapped every line of the stream to base 0 instead of
-    // the buffer. Metroid Prime's CPU-skinned models arrived as whatever the buffer held.
+    // the buffer. A game's CPU-skinned models arrived as whatever the buffer held.
     case 0x10: g_pi_fifo_end = v & 0x07FFFFE0; break;
     case 0x14: g_pi_fifo_wptr = v & 0x07FFFFE0; LOG(LOG_GX, "PI fifo wptr %08X", v); break;
     case 0x24: LOG(LOG_HW, "PI reset register write %08X", v); break;

@@ -53,10 +53,12 @@ struct VrConfig {
     // gravity-aligned. 0 renders what the game draws. See render_set_world_pitch.
     float world_pitch_deg = 0.0f;
 
-    // How much to shrink the game's foreground layers towards the eye in stereo -- a
-    // weapon or a visor confined to the front of the depth buffer, which a game models
-    // large and far off -- keeping their angular size. 1 leaves them as modelled. See
-    // gx::render_set_foreground_scale.
+    // A game's depth layers in stereo, for a game that confines layers to bands of the depth
+    // buffer: draws from `background_band` to the back are drawn at infinity, and draws no
+    // further than `foreground_band` are scaled towards the eye by `foreground_scale`. 0
+    // turns a layer off. See gx::render_set_depth_layers.
+    float background_band = 0.0f;
+    float foreground_band = 0.0f;
     float foreground_scale = 1.0f;
 
     // How many samples the EFB keeps per hardware pixel, in each axis, in each view.

@@ -56,12 +56,14 @@ void render_set_vr_morph(float t, const float panel[16]);
 // the headset's own space and stays where it is put. 0 renders what the game draws.
 void render_set_world_pitch(float pitch_rad);
 
-// Scale a game's foreground layers towards the camera in stereo: perspective draws whose
-// viewport confines them to the front half of the depth buffer (a weapon, a visor). A game
-// models those large and far off, since a flat picture shows only their angular size;
-// scaled by `scale` they keep that angular size in each eye and read `scale` times as big.
-// 1 (the default) leaves them alone.
-void render_set_foreground_scale(float scale);
+// A game's depth layers in stereo, for a game that confines layers to bands of the depth
+// buffer through the viewport's z range. A perspective draw confined to depths from
+// `background_from` to 1 is background, drawn at infinity: turned with the head, the same in
+// both eyes. One confined to depths no further than `foreground_to` is foreground -- a weapon
+// or a visor, modelled large and far off because a flat picture shows only angular size --
+// and is scaled towards the camera by `foreground_scale`, keeping its angular size in each
+// eye. 0 turns either off, which is the default.
+void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale);
 
 // The game's own eye. The renderer knows how to re-project a batch for an eye and how to
 // take the chase camera's pitch out of the world; where else an eye might stand -- on the

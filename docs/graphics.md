@@ -22,8 +22,7 @@ Four threads share a frame, besides the renderer's:
   frame from per-draw snapshots of the XF state, copied a sixteen-word block at a time as
   it changes.
 
-On a Quest 3 this took the heaviest stretch of Metroid Prime's intro from 38-50 frames a
-second, unpaced, to about 100, with byte-identical frames throughout. `GCN_GX_SYNC=1` runs
+Frames are byte-identical either way. `GCN_GX_SYNC=1` runs
 the front end inline on the guest thread again, `GCN_XF_SYNC=1` the transform; the
 diagnostics that read transformed vertices early select the latter themselves.
 
@@ -43,34 +42,33 @@ game boots. Deleting the file is always safe. The startup line reports what happ
 
 ## Stereo scaffolding
 
-`gx/render_gl.cpp` and `gx/shadergen.cpp` carry the stereo machinery written for Wave Race:
-`render_execute_eye`, the theater/stereo morph, the world-pitch rotation, and the eye
-grab/refraction handling. The desktop frontend runs it through `--eye`. Where the eye stands
-beyond the chase camera is the game's business: `render_set_eye_hook` takes a per-frame
-callback that returns a view transform, a HUD transform and the draws to leave out, and
-bluestorm-recomp's `runtime/first_person.cpp` is the one that finds a jet ski and puts the eye
-on it. Nothing here knows what a hull is.
+`gx/render_gl.cpp` and `gx/shadergen.cpp` carry the stereo machinery: `render_execute_eye`,
+the theater/stereo morph, the world-pitch rotation, and the eye grab/refraction handling. The
+desktop frontend runs it through `--eye`. Where the eye stands beyond the game's camera is the
+game's business: `render_set_eye_hook` takes a per-frame callback that returns a view
+transform, a HUD transform and the draws to leave out, and a game project installs it.
+Nothing here knows what the game is.
 
 ## Depth bands in an eye
 
 GX has no depth-range call, but a viewport carries a z range, and a game can confine a draw
-to a band of the depth buffer with it. Metroid Prime does so by layer (`CGraphics::
-SetDepthRange`): the sky in 0.999-1, the world in 0.125-1, and nearer layers below that --
-in first-person play the visor frame, the arm cannon and the HUD in 0-1/512. The flat path has always applied the viewport's z terms; the eye path did not,
-so in stereo the sky -- modelled some 58 units out around the camera -- was depth-tested at
-that distance and stood in front of anything further away. An eye now maps its own depth into
-the draw's band, which keeps the game's layering and the eye's depth within each layer; a
-full-range viewport maps to itself.
+to a band of the depth buffer with it, layer by layer. The flat path has always applied the
+viewport's z terms; an eye now maps its own depth into the draw's band too, which keeps the
+game's layering and the eye's depth within each layer. A full-range viewport maps to itself.
 
-Two layers also need placing differently in stereo, keyed on the band:
+Two layers can also be placed differently in stereo, keyed on their band, for a game that
+names them (`render_set_depth_layers`; `background_band`, `foreground_band` and
+`foreground_scale` in `vr.txt`, usually set by the game's `config_defaults` hook). Both are
+off by default.
 
-- **Background** (a band starting at or past 0.99) is drawn at infinity: turned with the
-  head, not moved with it, and the same in both eyes. Otherwise its modelled distance gives
-  it enough disparity to read as near. `GCN_EYE_SKY=0` turns this off.
-- **Foreground** (a band ending at or before 0.5) is scaled towards the camera by
-  `render_set_foreground_scale`, `foreground_scale` in `vr.txt`. A game models a weapon or a
-  visor large and far off, because a flat picture shows only angular size; scaling about the
-  camera keeps that angular size in each eye and brings it nearer, so it reads smaller. Prime's
-  arm cannon is a unit long three units out, and reads twice its size at 1.
+- **Background** (a band starting at or past `background_band`) is drawn at infinity: turned
+  with the head, not moved with it, and the same in both eyes. A sky modelled a short way out
+  around the camera otherwise has the disparity of something near. `GCN_EYE_SKY=0` turns this
+  off.
+- **Foreground** (a band ending at or before `foreground_band`) is scaled towards the camera
+  by `foreground_scale`. A game models a weapon or a visor large and far off, because a flat
+  picture shows only angular size; scaling about the camera keeps that angular size in each
+  eye and brings it nearer, so it reads smaller.
 
-`GCN_DRAWLOG=<frame>` prints each draw's band and view-space box.
+`GCN_DRAWLOG=<frame>` prints each draw's band and view-space box, which is how a game's
+layers are found.

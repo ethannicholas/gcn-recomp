@@ -323,11 +323,11 @@ static double g_time_scale = 1.0;
 // work the guest can do per 60 Hz frame before it sees the retrace arrive late: with
 // TICKS_PER_EDGE ticks per loop iteration, a frame holds FIELD_TICKS / TICKS_PER_EDGE
 // iterations. It is a constant, not a measurement, because determinism is the point: the
-// same route must count the same ticks on every machine. Measured with GCN_CLOCKLOG on
-// Metroid Prime (2026-10-08): gameplay on the frigate is 45-60k back-edges of work per
-// frame and the intro cinematic peaks near 85k, so at 4 ticks per edge the cinematic took
-// half a field and at 2 a quarter. 2 leaves room for scenes heavier than those; the real
-// Gekko, at a few cycles per short loop iteration, is in the same range.
+// same route must count the same ticks on every machine. Measured with GCN_CLOCKLOG
+// (2026-10-08): a game's ordinary play ran 45-60k back-edges of work per frame and its
+// heaviest cinematic peaked near 85k, so at 4 ticks per edge that cinematic took half a
+// field and at 2 a quarter. 2 leaves room for scenes heavier than those; the real Gekko,
+// at a few cycles per short loop iteration, is in the same range.
 static constexpr uint64_t TICKS_PER_EDGE = 2;
 static bool g_virtual_clock = true;
 volatile uint64_t g_vcount;

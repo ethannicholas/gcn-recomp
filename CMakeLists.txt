@@ -22,7 +22,7 @@ option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every pol
 # gcn_add_game(
 #   NAME <target>              executable name; the benchmark is <target>_bench
 #   TITLE <string>             shown in the window title and messages
-#   DISC_ID <6 chars>          e.g. GM8E01; the image and the booted disc are checked against it
+#   DISC_ID <6 chars>          the game's disc ID; the image and the booted disc are checked against it
 #   DOL_SHA1 <hex>             the supported build's main.dol
 #   SYMBOLS <file>             decomp-toolkit symbols.txt for that DOL
 #   TABLES <dir>               hle.txt, names.txt, patches.txt, special_calls.txt, idle.txt

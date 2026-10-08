@@ -227,7 +227,7 @@ void tlut_load(uint32_t src_addr, uint32_t tmem_off, uint32_t bytes) {
 // A cached texture is its texels -- keyed by where they are, their format and shape --
 // plus, for the indexed formats, one decode per palette those texels have been drawn
 // with. The palette is identified by the entries the texels actually use, because a
-// game loads what it likes: Metroid Prime's font is CI4, uses four entries, and loads a
+// game loads what it likes: one game's font is CI4, uses four entries, and loads a
 // sixteen-entry palette whose other twelve are whatever lies past its table in memory,
 // different on every load. Hashing the whole palette made each of those loads a new
 // texture; keying on the palette's TMEM slot alone (as this once did) made the game's

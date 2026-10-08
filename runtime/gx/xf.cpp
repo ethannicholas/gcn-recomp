@@ -806,8 +806,7 @@ static uint32_t snapshot_state(bool view_space) {
 // records its decoded vertices and which snapshot of each XF region it saw (a region is
 // copied only when it has changed since the last draw), and the transform runs after the
 // frame is submitted, on worker threads, while the guest gets on with the next frame. The
-// output is the same either way; it was half of the guest thread's time in Metroid
-// Prime's intro on a Quest 3.
+// output is the same either way.
 //
 // GCN_XF_SYNC=1 transforms each draw as it arrives instead, which the diagnostics that
 // read transformed vertices on the guest thread (GCN_TRACE_FRAME, GCN_GXSTATS,

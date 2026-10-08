@@ -13,7 +13,7 @@ static bool g_busy;
 // The image is a plain .iso, or a CISO: a 0x8000-byte header -- "CISO", a little-endian
 // block size, then one byte per block saying whether that block is stored -- followed by
 // the stored blocks in order. A block that is not stored reads as zero. Dolphin writes
-// CISO for the trailing zero space of a disc, which is most of a Metroid Prime image.
+// CISO for the trailing zero space of a disc, which can be most of an image.
 static uint32_t g_ciso_block;             // 0 for a plain .iso
 static std::vector<int32_t> g_ciso_map;   // disc block -> stored block, -1 if absent
 

@@ -402,7 +402,7 @@ int main(int argc, char** argv) {
         eye_init();
         gpu_timer_init();
         gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
-        gx::render_set_foreground_scale(g_vrcfg.foreground_scale);
+        gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale);
         if (const char* s = getenv("GCN_EYE_MORPH")) {
             for (const char* q = s; *q;) {
                 g_morphs.push_back((float)atof(q));

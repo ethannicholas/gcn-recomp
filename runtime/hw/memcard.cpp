@@ -26,7 +26,7 @@ MemCard::MemCard(const std::string& path, uint32_t size_mbit) : path_(path), siz
     }
     status_ = ST_UNLOCKED | ST_READY;
     // A card formatted before 2026-10-08 has an all-zero serial, which a game can take
-    // to mean there is no card to save to (Metroid Prime's save stations do). Give it one.
+    // to mean there is no card to save to (at least one game's save points do). Give it one.
     bool zero = true;
     for (int i = 0; i < 0x20; i++) if (data_[i]) zero = false;
     if (zero) {
@@ -58,8 +58,8 @@ static void put64(uint8_t* p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (
 // seeded by the format time, which VerifyID in the CARD library recomputes on every mount,
 // then the format time itself, the SRAM counter bias and language (both zero in our SRAM).
 // CARDGetSerialNo is the XOR of these 32 bytes as four 64-bit words, so the format time
-// must not be zero: it used to be, the serial came out zero, and Metroid Prime's save
-// stations took that as "no card" and never offered to save. Rewrites the header checksum.
+// must not be zero: it used to be, the serial came out zero, and a game's save points
+// took that as "no card" and never offered to save. Rewrites the header checksum.
 void MemCard::write_serial(uint8_t* h) {
     uint64_t t = (uint64_t)(time(nullptr) - 946684800) * 40500000ull;  // an OSTime of now
     if (!t) t = 1;

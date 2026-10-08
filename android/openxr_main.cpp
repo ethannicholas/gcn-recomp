@@ -683,7 +683,7 @@ void android_main(android_app* app) {
     g_vrcfg = vr::load_config(dir);
     g_view_path = dir + "/view.txt";
     gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
-    gx::render_set_foreground_scale(g_vrcfg.foreground_scale);
+    gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale);
     static std::string dump_dir;
     if (g_vrcfg.dump_every > 0) {
         dump_dir = dir + "/frames";
@@ -904,7 +904,7 @@ void android_main(android_app* app) {
             // game's answer, so a click on the left thumbstick holds until the game next
             // changes its mind. A change is held for two game frames before the view
             // follows: the state behind it is written by the guest thread and read here, so
-            // a sample can land on a transient, and Blue Storm's race flag read that way was
+            // a sample can land on a transient: a game state flag read that way has been
             // caught non-zero for single frames over menus.
             if (wants_stereo) {
                 const int want_stereo = wants_stereo(*batch) ? 1 : 0;

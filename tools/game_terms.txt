@@ -1,0 +1,21 @@
+# Words that name one game, which nothing in this repository may contain outside the
+# allowed files (README.md and CLAUDE.md list the game projects by name). One
+# case-insensitive regular expression per line; tools/check_generic.py reads it.
+#
+# Add a game's title, disc ID and its most distinctive nouns when a project for it starts.
+
+# Metroid Prime (prime-recomp)
+metroid
+\bprime\b
+\bretro studios\b
+\bsamus\b
+\btallon\b
+\bchozo\b
+\bGM8E01\b
+
+# Wave Race: Blue Storm (bluestorm-recomp)
+wave ?race
+blue ?storm
+waverace
+\bjet ?ski
+\bGWRE01\b

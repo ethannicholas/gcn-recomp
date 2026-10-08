@@ -71,18 +71,19 @@ static float g_vr_proj[16], g_vr_view[16];
 // The eye's view with the world's pitch taken out, for world geometry. The HUD frame uses
 // g_vr_view untouched -- it is placed in the headset's space, not the game's.
 static float g_vr_view_world[16];
-// g_vr_view_world with its translation taken out, for background drawn at infinity: a
-// perspective draw whose viewport confines it to depths from kBackgroundBand to 1 (see
-// apply_state).
+// Depth layers in stereo (render_set_depth_layers). Both are off unless a game turns them
+// on, because where a game puts its layers in the depth buffer -- if it uses them at all --
+// is the game's own convention.
+//
+// Background: a perspective draw whose viewport confines it to depths from g_bg_from to
+// 1 is drawn at infinity, through g_vr_view_sky, g_vr_view_world with its translation
+// taken out. 0 is off.
 static float g_vr_view_sky[16];
-static constexpr float kBackgroundBand = 0.99f;
-// The foreground: perspective draws whose viewport confines them to depths no further
-// than kForegroundBand -- a weapon, a visor, a HUD built in 3D -- which a game models large
-// and far off because on a television only their angular size shows. Two eyes see the
-// distance, and a cannon a metre long held three metres out reads as enormous. So they
-// are scaled towards the camera by g_fg_scale (render_set_foreground_scale): the same
-// angular size in each eye, but that much nearer and that much smaller.
-static constexpr float kForegroundBand = 0.5f;
+static float g_bg_from = 0.0f;
+// Foreground: a perspective draw whose viewport confines it to depths no further than
+// g_fg_to is scaled towards the camera by g_fg_scale -- the same angular size in each eye,
+// but that much nearer and that much smaller. 0 is off.
+static float g_fg_to = 0.0f;
 static float g_fg_scale = 1.0f;
 static float g_vr_view_fg[16], g_vr_view_world_fg[16];
 static float g_world_pitch = 0.0f;
@@ -892,21 +893,21 @@ static void apply_state(const PixelState& st, int prim) {
     } else {
         P[0] = p[0]; P[12] = p[1]; P[5] = p[2]; P[13] = p[3]; P[10] = p[4]; P[14] = p[5]; P[15] = 1.0f;
     }
-    // Background. GX has no depth-range call, but a viewport carries a z range, and a game
-    // can confine a draw to a band of the depth buffer with it: Metroid Prime puts its sky
-    // in the last sliver before 1.0 and everything else nearer, so the sky stays behind
-    // the world whatever its geometry's real distance -- it is modelled a short way out
-    // around the camera. An eye keeps those bands (see the vertex shader), which puts the
-    // sky behind again; but the eyes would still see it at its modelled distance, close
-    // enough for its disparity to stand it in front of the room. So a draw confined to
-    // the last kBackgroundBand of depth is drawn at infinity instead: turned with the head,
-    // not moved with it, and the same in both eyes. GCN_EYE_SKY=0 turns that off.
+    // Depth layers. GX has no depth-range call, but a viewport carries a z range, and a game
+    // can confine a draw to a band of the depth buffer with it -- a sky kept behind the
+    // world whatever its geometry's real distance, a weapon kept in front of it. An eye
+    // keeps those bands (see the vertex shader). What it cannot keep is the illusion: a sky
+    // modelled a short way out around the camera has the disparity of something near, and
+    // a weapon modelled large and far off reads as large in two eyes. So a game can name
+    // its background and foreground bands (render_set_depth_layers): the background is
+    // drawn at infinity, turned with the head and the same in both eyes, and the
+    // foreground is scaled towards the camera. GCN_EYE_SKY=0 turns the background off.
     static const bool sky_at_infinity = !(getenv("GCN_EYE_SKY") && atoi(getenv("GCN_EYE_SKY")) == 0);
     const float band_lo = (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f;
-    const bool background = sky_at_infinity && perspective && !st.view_space && band_lo >= kBackgroundBand;
-    // And the foreground the other way: see kForegroundBand.
     const float band_hi = st.viewport[5] / 16777215.0f;
-    const bool foreground = perspective && g_fg_scale != 1.0f && band_hi <= kForegroundBand;
+    const bool background = sky_at_infinity && g_bg_from > 0.0f && perspective && !st.view_space &&
+                            band_lo >= g_bg_from;
+    const bool foreground = g_fg_to > 0.0f && g_fg_scale != 1.0f && perspective && band_hi <= g_fg_to;
     const bool same_proj = same && memcmp(st.proj, g_applied.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == g_applied.view_space && background == g_applied.background &&
                            foreground == g_applied.foreground;
@@ -1445,8 +1446,10 @@ void render_set_world_pitch(float pitch_rad) {
     compose_world_view();
 }
 
-void render_set_foreground_scale(float scale) {
-    g_fg_scale = scale > 0.0f ? scale : 1.0f;
+void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale) {
+    g_bg_from = background_from;
+    g_fg_to = foreground_to;
+    g_fg_scale = foreground_scale > 0.0f ? foreground_scale : 1.0f;
     compose_world_view();
 }
 
@@ -1735,7 +1738,7 @@ static bool samples_grab_copy(const PixelState& st) {
 bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     // The scene samples textures the game produces by copying them back out of the EFB:
     // the water reflection, the sprite sheet the spray uses. An eye pass never draws into
-    // the EFB, so on its own it would copy out an empty one -- which is what left the ski
+    // the EFB, so on its own it would copy out an empty one -- which once left a model
     // untextured and put a black quad on the water. So the first eye runs the whole frame
     // flat into the EFB exactly as the hardware would, minus the scanout, and the eyes
     // then re-project only the main scene on top of correct textures.

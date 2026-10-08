@@ -49,8 +49,8 @@ void cp_init() {}
 // ---------------------------------------------------------------------------
 // The front end on its own thread.
 //
-// Parsing the command stream, decoding vertices and building pixel state was about half
-// of the guest thread's time in Metroid Prime's intro on a Quest 3. The hardware runs its
+// Parsing the command stream, decoding vertices and building pixel state can be half of
+// the guest thread's time in a scene with many small draws. The hardware runs its
 // GPU alongside the CPU off the same FIFO, and a game synchronises with it only through
 // what the GPU signals back -- PE tokens and draw-done -- so the front end can run on a
 // thread of its own as long as those signals stay where they were.
@@ -235,8 +235,8 @@ extern "C" void gp_flush_line() { gp_flush32(); }
 
 uint32_t gp_pending() { return g_gp_len; }
 
-// A write to WPAR empties the gather buffer; see hle_mtspr. Found the hard way: Metroid
-// Prime streams CPU-skinned vertices through the redirected pipe into a heap block sized
+// A write to WPAR empties the gather buffer; see hle_mtspr. Found the hard way: a game can
+// stream CPU-skinned vertices through the redirected pipe into a heap block sized
 // exactly for them, and GXRestoreWriteGatherPipe's 31 bytes of zero padding, written out
 // as a partial line at the PI register write that follows, zeroed the next block's
 // header (the allocator crash of 2026-10-08, caught by the heap check and named by the
@@ -253,7 +253,7 @@ void gp_reset() {
 // this never has anything to write: the SDK pads the pipe with zero bytes, waits for it
 // to report empty and rewrites WPAR, and the WPAR write empties the buffer (gp_reset).
 // Writing the padding out instead was wrong on both sides. Prepended to the redirected
-// stream it put every float of Metroid Prime's CPU-skinned vertex arrays a few bytes
+// stream it put every float of such a game's CPU-skinned vertex arrays a few bytes
 // off; written after the stream it ran past the array -- sized to the line -- into the
 // next heap block's header, which the allocator found twelve minutes later.
 //
