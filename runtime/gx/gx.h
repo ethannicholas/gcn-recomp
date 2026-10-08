@@ -28,9 +28,23 @@ struct State {
     // cached against this counter, separately, so that neither can clear a flag the other
     // still needs. See layout_for() in xf.cpp and vertex_size() in cmd.cpp.
     uint32_t cp_gen = 1;
+    // Bumped whenever the part of XF the vertex transform reads changes, one counter per
+    // region (see XfRegion), so that a draw can snapshot only what moved since the last
+    // one: the transform runs after the frame is submitted, off the guest thread, from
+    // those snapshots. See XfDraw in xf.cpp.
+    uint32_t xf_gen[5] = {1, 1, 1, 1, 1};
 };
 
 extern State g_state;
+
+// The regions of XF state the vertex transform reads, each snapshotted on its own.
+enum XfRegion { XF_MTX, XF_NRM, XF_POST, XF_LIGHT, XF_REGS, XF_REGIONS };
+inline void xf_mem_written(uint32_t addr) {
+    if (addr < 0x100) g_state.xf_gen[XF_MTX]++;
+    else if (addr >= 0x400 && addr < 0x500) g_state.xf_gen[XF_NRM]++;
+    else if (addr >= 0x500 && addr < 0x600) g_state.xf_gen[XF_POST]++;
+    else if (addr >= 0x600 && addr < 0x680) g_state.xf_gen[XF_LIGHT]++;
+}
 
 // Byte-size of one vertex for the given VAT index, based on current VCD/VAT.
 uint32_t vertex_size(int vat);

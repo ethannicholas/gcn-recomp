@@ -16,6 +16,7 @@
 #include "platform.h"
 #include "gx/render.h"
 #include "input_script.h"
+#include "input_log.h"
 #include "hw/dtk.h"
 #include "hw/pad.h"
 #include <chrono>
@@ -75,8 +76,19 @@ int main(int argc, char** argv) {
     // held back to real time here (GCN_TIMESCALE still sets a pace if one is wanted).
     if (!getenv("GCN_TIMESCALE")) clock_set_scale(0);
     input_script_init();
+    // GCN_REPLAY=<dir> plays an input log back, as --replay does on the desktop: the way to
+    // drive a run on a device through a recorded route, exactly, under the virtual clock.
+    static std::string replay_card;
+    if (const char* r = getenv("GCN_REPLAY")) {
+        if (!input_replay_load(r, replay_card)) {
+            fprintf(stderr, "GCN_REPLAY: no input log at %s\n", r);
+            return 1;
+        }
+        if (!replay_card.empty()) g_memcard_path = replay_card.c_str();
+    }
     uint32_t entry = boot_load(iso.c_str());
     threads_start_boot(entry);
+    host_profile_start();
 
     printf("benchmarking %s for %d s\n", iso.c_str(), seconds);
     printf("  time   frames/s   verts/s   draws/s   edges/frame\n");
@@ -154,6 +166,7 @@ int main(int argc, char** argv) {
     }
     fflush(stdout);
 
+    host_profile_dump();
     // Guest threads are still running in longjmp-based contexts; don't unwind them.
     plat_exit_now(0);
 }

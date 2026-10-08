@@ -71,6 +71,20 @@ static float g_vr_proj[16], g_vr_view[16];
 // The eye's view with the world's pitch taken out, for world geometry. The HUD frame uses
 // g_vr_view untouched -- it is placed in the headset's space, not the game's.
 static float g_vr_view_world[16];
+// g_vr_view_world with its translation taken out, for background drawn at infinity: a
+// perspective draw whose viewport confines it to depths from kBackgroundBand to 1 (see
+// apply_state).
+static float g_vr_view_sky[16];
+static constexpr float kBackgroundBand = 0.99f;
+// The foreground: perspective draws whose viewport confines them to depths no further
+// than kForegroundBand -- a weapon, a visor, a HUD built in 3D -- which a game models large
+// and far off because on a television only their angular size shows. Two eyes see the
+// distance, and a cannon a metre long held three metres out reads as enormous. So they
+// are scaled towards the camera by g_fg_scale (render_set_foreground_scale): the same
+// angular size in each eye, but that much nearer and that much smaller.
+static constexpr float kForegroundBand = 0.5f;
+static float g_fg_scale = 1.0f;
+static float g_vr_view_fg[16], g_vr_view_world_fg[16];
 static float g_world_pitch = 0.0f;
 static float g_vr_hud[16];
 // What the HUD frame goes through before the eye's view: the identity, unless the game's
@@ -819,6 +833,8 @@ struct AppliedState {
     float tsz[16];
     int prim;
     bool hud_depth;
+    bool background;
+    bool foreground;
 };
 static AppliedState g_applied;
 static void gl_state_invalidate() { g_applied.valid = false; }
@@ -876,8 +892,24 @@ static void apply_state(const PixelState& st, int prim) {
     } else {
         P[0] = p[0]; P[12] = p[1]; P[5] = p[2]; P[13] = p[3]; P[10] = p[4]; P[14] = p[5]; P[15] = 1.0f;
     }
+    // Background. GX has no depth-range call, but a viewport carries a z range, and a game
+    // can confine a draw to a band of the depth buffer with it: Metroid Prime puts its sky
+    // in the last sliver before 1.0 and everything else nearer, so the sky stays behind
+    // the world whatever its geometry's real distance -- it is modelled a short way out
+    // around the camera. An eye keeps those bands (see the vertex shader), which puts the
+    // sky behind again; but the eyes would still see it at its modelled distance, close
+    // enough for its disparity to stand it in front of the room. So a draw confined to
+    // the last kBackgroundBand of depth is drawn at infinity instead: turned with the head,
+    // not moved with it, and the same in both eyes. GCN_EYE_SKY=0 turns that off.
+    static const bool sky_at_infinity = !(getenv("GCN_EYE_SKY") && atoi(getenv("GCN_EYE_SKY")) == 0);
+    const float band_lo = (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f;
+    const bool background = sky_at_infinity && perspective && !st.view_space && band_lo >= kBackgroundBand;
+    // And the foreground the other way: see kForegroundBand.
+    const float band_hi = st.viewport[5] / 16777215.0f;
+    const bool foreground = perspective && g_fg_scale != 1.0f && band_hi <= kForegroundBand;
     const bool same_proj = same && memcmp(st.proj, g_applied.proj, sizeof(st.proj)) == 0 &&
-                           st.view_space == g_applied.view_space;
+                           st.view_space == g_applied.view_space && background == g_applied.background &&
+                           foreground == g_applied.foreground;
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -897,7 +929,9 @@ static void apply_state(const PixelState& st, int prim) {
         } else if (g_vr_active && !on_hud_frame) {
             // A camera-placed 3D object is viewed with the head transform but without the
             // world's pitch correction; see view_space_3d above.
-            const float* view = view_space_3d ? g_vr_view : g_vr_view_world;
+            const float* view = background ? g_vr_view_sky
+                              : view_space_3d ? (foreground ? g_vr_view_fg : g_vr_view)
+                              : (foreground ? g_vr_view_world_fg : g_vr_view_world);
             // GCN_EYE_GAMEPROJ keeps the game's own frustum and applies only the head
             // transform, which tells apart "the eye sees less than it should" from "the game
             // never drew anything out there".
@@ -943,6 +977,8 @@ static void apply_state(const PixelState& st, int prim) {
         glUniform4fv(pr.u_zproj, 1, zp);
         memcpy(g_applied.proj, st.proj, sizeof(st.proj));
         g_applied.view_space = st.view_space;
+        g_applied.background = background;
+        g_applied.foreground = foreground;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(same && same_reg(0x59) && memcmp(vp, g_applied.viewport, sizeof(st.viewport)) == 0)) {
@@ -1390,6 +1426,11 @@ static void world_pitch_matrix(float R[16]) {
 
 static void compose_world_view() {
     mat4_mul(g_vr_view, g_world_xform, g_vr_view_world);
+    memcpy(g_vr_view_sky, g_vr_view_world, sizeof(g_vr_view_sky));
+    g_vr_view_sky[12] = g_vr_view_sky[13] = g_vr_view_sky[14] = 0.0f;
+    const float S[16] = {g_fg_scale, 0, 0, 0, 0, g_fg_scale, 0, 0, 0, 0, g_fg_scale, 0, 0, 0, 0, 1};
+    mat4_mul(g_vr_view, S, g_vr_view_fg);
+    mat4_mul(g_vr_view_world, S, g_vr_view_world_fg);
     mat4_mul(g_hud_xform, g_vr_hud, g_vr_hud_eff);
 }
 
@@ -1401,6 +1442,11 @@ static void hud_upright() {
 void render_set_world_pitch(float pitch_rad) {
     g_world_pitch = pitch_rad;
     if (!g_eye_overridden) world_pitch_matrix(g_world_xform);
+    compose_world_view();
+}
+
+void render_set_foreground_scale(float scale) {
+    g_fg_scale = scale > 0.0f ? scale : 1.0f;
     compose_world_view();
 }
 
@@ -1982,11 +2028,12 @@ static bool execute_batch(Batch& b, bool do_present) {
                 // fate in an eye: a perspective batch is re-projected as world geometry,
                 // anything else goes on the HUD frame. And a draw a few tens of units
                 // from the camera is in front of the viewer's face either way.
-                float zlo = 1e30f, zhi = -1e30f;
+                float zlo = 1e30f, zhi = -1e30f, xlo = 1e30f, xhi = -1e30f, ylo = 1e30f, yhi = -1e30f;
                 for (uint32_t v = 0; v < c.count; v++) {
-                    const float z = b.verts[b.indices[c.first + v]].pos[2];
-                    if (z < zlo) zlo = z;
-                    if (z > zhi) zhi = z;
+                    const float* q = b.verts[b.indices[c.first + v]].pos;
+                    zlo = std::min(zlo, q[2]); zhi = std::max(zhi, q[2]);
+                    xlo = std::min(xlo, q[0]); xhi = std::max(xhi, q[0]);
+                    ylo = std::min(ylo, q[1]); yhi = std::max(yhi, q[1]);
                 }
                 // Vertices within a unit of the view-space origin sit on top of the camera,
                 // and a polygon that uses one is drawn as a sliver radiating from the
@@ -2033,9 +2080,14 @@ static bool execute_batch(Batch& b, bool do_present) {
                         }
                     }
                 }
-                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c z=%.0f..%.0f origin=%u slivers=%u%s",
+                // The viewport's depth band, and the view-space box, to two decimals: a
+                // weapon held in front of the camera is a unit or two across.
+                const float band_hi = st.viewport[5] / 16777215.0f;
+                const float band_lo = band_hi - fabsf(st.viewport[2]) / 16777215.0f;
+                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c z=%.2f..%.2f x=%.2f..%.2f y=%.2f..%.2f band=%.5f..%.5f origin=%u slivers=%u%s",
                         draw_index, c.count, c.state, st.num_texgens,
-                        (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi, at_origin, slivers, sliver_text.c_str());
+                        (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi,
+                        at_origin, slivers, sliver_text.c_str());
                 if (slivers) fprintf(stderr, "\n       ");
                 for (int i = 0; i < 8; i++)
                     if (st.tex_id[i]) fprintf(stderr, " t%d=%u%s", i, st.tex_id[i],

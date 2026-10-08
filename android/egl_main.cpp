@@ -7,7 +7,7 @@
 // object and the frame dump reads that back, so the EGL surface only exists to make a
 // context current and can be 16x16.
 //
-// Usage: <game>_egl [--scale=N] [--frames=N] [--seconds=N]
+// Usage: <game>_egl [--scale=N] [--frames=N] [--seconds=N] [--fast]
 //                   [--dump-dir=DIR] [--dump-every=N] [path/to/game.iso]
 //
 // The VR settings are the headset's: the game's defaults (vr::GameHooks::config_defaults)
@@ -18,6 +18,7 @@
 #include "gx/render_gl.h"
 #include "vr_game.h"
 #include "input_script.h"
+#include "input_log.h"
 #include "gx/gl.h"
 #include "gx/gl_msrtt.h"
 #include "hw/pad.h"
@@ -48,6 +49,9 @@ static void* gl_proc(const char* name);
 // wrong place, missing render-to-texture results -- is a fault in the eye path.
 // ---------------------------------------------------------------------------
 static bool g_eye_mode = false;
+// --fast runs the guest unpaced, as fast as the device allows, for measuring; the game still
+// sees 60 Hz.
+static bool g_fast = false;
 static float g_eye_yaw = 0.0f;  // --eye-yaw: degrees of head turn, for spotting head-locked draws
 static float g_eye_pitch = 0.0f;  // --eye-pitch: degrees of looking down
 static GLuint g_eye_fbo, g_eye_tex, g_eye_depth;
@@ -343,6 +347,7 @@ int main(int argc, char** argv) {
         else if (!strncmp(argv[i], "--frames=", 9)) frames_wanted = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--seconds=", 10)) seconds = atoi(argv[i] + 10);
         else if (!strcmp(argv[i], "--eye")) g_eye_mode = true;
+        else if (!strcmp(argv[i], "--fast")) g_fast = true;
         else if (!strncmp(argv[i], "--eye-yaw=", 10)) g_eye_yaw = (float)atof(argv[i] + 10);
         else if (!strncmp(argv[i], "--eye-pitch=", 12)) g_eye_pitch = (float)atof(argv[i] + 12);
         else if (!strncmp(argv[i], "--eye-size=", 11)) sscanf(argv[i] + 11, "%dx%d", &g_eye_w, &g_eye_h);
@@ -367,7 +372,18 @@ int main(int argc, char** argv) {
 
     mem_init();
     timing_init();
+    if (g_fast) clock_set_scale(0);
     input_script_init();
+    // GCN_REPLAY=<dir> plays an input log back, as --replay does on the desktop: the way to
+    // drive a run on a device through a recorded route, exactly, under the virtual clock.
+    static std::string replay_card;
+    if (const char* r = getenv("GCN_REPLAY")) {
+        if (!input_replay_load(r, replay_card)) {
+            fprintf(stderr, "GCN_REPLAY: no input log at %s\n", r);
+            return 1;
+        }
+        if (!replay_card.empty()) g_memcard_path = replay_card.c_str();
+    }
 
     if (!egl_init()) return 1;
     int glver = gl_load_with(gl_proc);
@@ -386,6 +402,7 @@ int main(int argc, char** argv) {
         eye_init();
         gpu_timer_init();
         gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
+        gx::render_set_foreground_scale(g_vrcfg.foreground_scale);
         if (const char* s = getenv("GCN_EYE_MORPH")) {
             for (const char* q = s; *q;) {
                 g_morphs.push_back((float)atof(q));
@@ -415,6 +432,7 @@ int main(int argc, char** argv) {
 
     uint32_t entry = boot_load(iso.c_str());
     threads_start_boot(entry);
+    host_profile_start();
 
     printf("rendering (scale %d)%s...\n", scale,
            gx::g_dump_dir ? "" : "  [no --dump-dir, nothing will be written]");
@@ -583,5 +601,6 @@ int main(int argc, char** argv) {
     fflush(stdout);
 
     // Guest threads are parked in longjmp-based contexts; don't unwind them.
+    host_profile_dump();
     plat_exit_now(0);
 }

@@ -251,8 +251,21 @@ extern "C" void hle_stswi(CPU* c, uint32_t ea, int rs, int n) {
 // ---------------------------------------------------------------------------
 // Paired-single quantized load/store
 // ---------------------------------------------------------------------------
+// 2^n for the six-bit signed scale a GQR holds, by table: ldexpf is a libm call, and it
+// was being made for every element of every quantised load and store.
+static const float* pow2_table() {
+    static float t[128];
+    static bool init = [] {
+        for (int n = -64; n < 64; n++) t[n + 64] = ldexpf(1.0f, n);
+        return true;
+    }();
+    (void)init;
+    return t;
+}
+static inline float pow2(int n) { return pow2_table()[n + 64]; }
+
 static inline double dequant(uint32_t type, int scale, uint32_t ea, int idx) {
-    float s = ldexpf(1.0f, -scale);
+    float s = pow2(-scale);
     switch (type) {
     case 4: return (double)((float)(uint8_t)LD8(ea + idx) * s);
     case 5: return (double)((float)(uint16_t)LD16(ea + idx * 2) * s);
@@ -262,7 +275,7 @@ static inline double dequant(uint32_t type, int scale, uint32_t ea, int idx) {
     }
 }
 
-extern "C" void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr) {
+extern "C" void psq_load_quantised(CPU* c, uint32_t ea, int frd, int w, int gqr) {
     uint32_t g = c->gqr[gqr];
     uint32_t type = (g >> 16) & 7;
     int scale = (int)((g >> 24) & 0x3F);
@@ -274,7 +287,7 @@ extern "C" void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr) {
 }
 
 static inline void quant_store(uint32_t type, int scale, uint32_t ea, int idx, double v) {
-    float f = (float)v * ldexpf(1.0f, scale);
+    float f = (float)v * pow2(scale);
     auto clampi = [](float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); };
     switch (type) {
     case 4: ST8(ea + idx, (uint8_t)(int)clampi(f, 0, 255)); break;
@@ -285,7 +298,7 @@ static inline void quant_store(uint32_t type, int scale, uint32_t ea, int idx, d
     }
 }
 
-extern "C" void psq_store(CPU* c, uint32_t ea, int frs, int w, int gqr) {
+extern "C" void psq_store_quantised(CPU* c, uint32_t ea, int frs, int w, int gqr) {
     uint32_t g = c->gqr[gqr];
     uint32_t type = g & 7;
     int scale = (int)((g >> 8) & 0x3F);

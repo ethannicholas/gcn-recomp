@@ -152,7 +152,7 @@ struct Xr {
     bool running = false;
 
     XrActionSet action_set = XR_NULL_HANDLE;
-    XrAction a_btn, b_btn, x_btn, y_btn, menu, trig_l, trig_r, grip_r, stick_l, stick_r;
+    XrAction a_btn, b_btn, x_btn, y_btn, menu, trig_l, trig_r, grip_l, grip_r, stick_l, stick_r;
     XrAction toggle;   // right thumbstick click: the game's camera or its first person, in stereo
     XrAction stereo_toggle;   // left thumbstick click: theater or stereo, by hand
 };
@@ -479,6 +479,7 @@ static bool xr_create_actions() {
     g_xr.menu    = make_action("menu", "Start", XR_ACTION_TYPE_BOOLEAN_INPUT);
     g_xr.trig_l  = make_action("trigger_l", "Left trigger", XR_ACTION_TYPE_FLOAT_INPUT);
     g_xr.trig_r  = make_action("trigger_r", "Right trigger", XR_ACTION_TYPE_FLOAT_INPUT);
+    g_xr.grip_l  = make_action("grip_l", "D-pad mode", XR_ACTION_TYPE_FLOAT_INPUT);
     g_xr.grip_r  = make_action("grip_r", "Right grip", XR_ACTION_TYPE_FLOAT_INPUT);
     g_xr.stick_l = make_action("stick_l", "Left stick", XR_ACTION_TYPE_VECTOR2F_INPUT);
     g_xr.stick_r = make_action("stick_r", "Right stick", XR_ACTION_TYPE_VECTOR2F_INPUT);
@@ -493,6 +494,7 @@ static bool xr_create_actions() {
         {g_xr.menu,    xr_path("/user/hand/left/input/menu/click")},
         {g_xr.trig_l,  xr_path("/user/hand/left/input/trigger/value")},
         {g_xr.trig_r,  xr_path("/user/hand/right/input/trigger/value")},
+        {g_xr.grip_l,  xr_path("/user/hand/left/input/squeeze/value")},
         {g_xr.grip_r,  xr_path("/user/hand/right/input/squeeze/value")},
         {g_xr.stick_l, xr_path("/user/hand/left/input/thumbstick")},
         {g_xr.stick_r, xr_path("/user/hand/right/input/thumbstick")},
@@ -562,8 +564,19 @@ static void read_pad(PadState& p) {
         return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
     };
     const XrVector2f l = action_vec2(g_xr.stick_l), r = action_vec2(g_xr.stick_r);
-    p.stick_x = to_u8(l.x);
-    p.stick_y = to_u8(l.y);
+    // The Touch controllers have no D-pad, so holding the left grip turns the left
+    // thumbstick into one: pushed past halfway, its stronger axis is a D-pad direction, and
+    // the control stick reads centred meanwhile so that the press does not also walk.
+    if (action_float(g_xr.grip_l) > 0.5f) {
+        if (fmaxf(fabsf(l.x), fabsf(l.y)) > 0.5f) {
+            if (fabsf(l.x) > fabsf(l.y)) p.buttons |= l.x > 0 ? PAD_RIGHT : PAD_LEFT;
+            else p.buttons |= l.y > 0 ? PAD_UP : PAD_DOWN;
+        }
+        p.stick_x = p.stick_y = 128;
+    } else {
+        p.stick_x = to_u8(l.x);
+        p.stick_y = to_u8(l.y);
+    }
     p.cstick_x = to_u8(r.x);
     p.cstick_y = to_u8(r.y);
 }
@@ -670,6 +683,7 @@ void android_main(android_app* app) {
     g_vrcfg = vr::load_config(dir);
     g_view_path = dir + "/view.txt";
     gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
+    gx::render_set_foreground_scale(g_vrcfg.foreground_scale);
     static std::string dump_dir;
     if (g_vrcfg.dump_every > 0) {
         dump_dir = dir + "/frames";

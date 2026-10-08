@@ -170,6 +170,13 @@ void main() {
         // the GX viewport transform does not apply. No Y negation either -- that
         // exists only to cancel the flip the EFB blit does, and nothing blits here.
         gl_Position = u_proj * (u_view * vec4(a_pos, 1.0));
+        // Except for its depth range. A game can confine a draw to a band of the depth
+        // buffer through the viewport's z -- sky at the back, world in the middle, a
+        // weapon or a HUD in front -- so that the layers never cross whatever their
+        // geometry's real distances. The eye's own depth is mapped into the same band,
+        // which keeps that order and the eye's depth within each layer. A full-range
+        // viewport maps to itself. u_vp_b is (2*hi - 1, 2*(hi - lo)) for the band [lo, hi].
+        gl_Position.z = (u_vp_b.x - 0.5 * u_vp_b.y) * gl_Position.w + 0.5 * u_vp_b.y * gl_Position.z;
     } else if (u_vr == 2) {
         // A 2D element in an eye. u_proj here is not the game's projection alone but the
         // whole chain folded on the CPU: that projection, the frame the overlay is

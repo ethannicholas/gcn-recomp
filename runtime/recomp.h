@@ -218,8 +218,29 @@ void hle_dcbz_l(CPU* c, uint32_t ea);
 void hle_dcbi(CPU* c, uint32_t ea);
 void hle_lswi(CPU* c, uint32_t ea, int rd, int n);
 void hle_stswi(CPU* c, uint32_t ea, int rs, int n);
-void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr);
-void psq_store(CPU* c, uint32_t ea, int frs, int w, int gqr);
+/* Paired-single quantised loads and stores. The GQR picks a format; the plain float one
+   (types 0-3) needs no scaling and is by far the most common, so it is handled here,
+   inline in the generated code, and only the integer formats call out. They were a tenth
+   of the guest thread's time as calls, mostly spent computing a scale factor the float
+   format never uses. */
+void psq_load_quantised(CPU* c, uint32_t ea, int frd, int w, int gqr);
+void psq_store_quantised(CPU* c, uint32_t ea, int frs, int w, int gqr);
+static inline void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr) {
+    if (LIKELY(((c->gqr[gqr] >> 16) & 7) < 4)) {
+        c->f[frd].d = LDF32(ea);
+        c->ps1[frd] = w ? 1.0 : LDF32(ea + 4);
+        return;
+    }
+    psq_load_quantised(c, ea, frd, w, gqr);
+}
+static inline void psq_store(CPU* c, uint32_t ea, int frs, int w, int gqr) {
+    if (LIKELY((c->gqr[gqr] & 7) < 4)) {
+        STF32(ea, c->f[frs].d);
+        if (!w) STF32(ea + 4, c->ps1[frs]);
+        return;
+    }
+    psq_store_quantised(c, ea, frs, w, gqr);
+}
 jmp_buf* hle_context_jmpbuf(CPU* c);
 
 /* The guest clock. Every backward branch in recompiled code passes through IRQ_CHECK,

@@ -89,6 +89,11 @@ void debug_guest_check(const char* where);
 inline void debug_guest_check(const char*) {}
 #endif
 
+// GCN_PROFILE=<file>: sample the host's program counters while the game runs, and write the
+// histogram out at the end (host_profile.cpp). Linux and Android only.
+void host_profile_start();
+void host_profile_dump();
+
 // Scheduled hardware events, run on the guest thread holding the baton.
 using EventFn = std::function<void()>;
 void event_schedule(uint64_t at_ticks, EventFn fn);

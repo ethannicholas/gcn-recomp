@@ -120,12 +120,17 @@ static void load_xf(uint32_t addr, uint32_t n, const uint8_t* data) {
     }
     for (uint32_t i = 0; i < n; i++, addr++) {
         uint32_t v = be32(data + 4 * i);
-        if (addr < 0x800) g_state.xf_mem[addr] = v;
-        else if (addr >= 0x1000 && addr < 0x1100) {
+        if (addr < 0x800) {
+            if (g_state.xf_mem[addr] != v) {
+                g_state.xf_mem[addr] = v;
+                xf_mem_written(addr);
+            }
+        } else if (addr >= 0x1000 && addr < 0x1100) {
             const uint32_t reg = addr - 0x1000;
             uint32_t& r = g_state.xf_regs[reg];
             if (r == v) continue;
             r = v;
+            if (reg < 0x60) g_state.xf_gen[XF_REGS]++;
             // The ones the pixel state is built from: colour channel count, viewport,
             // projection, texgen count. The rest feed the vertex transform only.
             if (reg == 0x09 || (reg >= 0x1A && reg <= 0x26) || reg == 0x3F) g_state.pixel_dirty = true;
@@ -141,7 +146,13 @@ static void load_indexed(int array, uint32_t w) {
     uint32_t stride = g_state.cp[0xB0 + array];
     const uint8_t* src = phys_ptr(base + index * stride);
     for (uint32_t i = 0; i < size; i++) {
-        if (addr + i < 0x800) g_state.xf_mem[addr + i] = be32(src + 4 * i);
+        if (addr + i < 0x800) {
+            const uint32_t v = be32(src + 4 * i);
+            if (g_state.xf_mem[addr + i] != v) {
+                g_state.xf_mem[addr + i] = v;
+                xf_mem_written(addr + i);
+            }
+        }
     }
 }
 

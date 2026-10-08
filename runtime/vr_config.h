@@ -53,6 +53,12 @@ struct VrConfig {
     // gravity-aligned. 0 renders what the game draws. See render_set_world_pitch.
     float world_pitch_deg = 0.0f;
 
+    // How much to shrink the game's foreground layers towards the eye in stereo -- a
+    // weapon or a visor confined to the front of the depth buffer, which a game models
+    // large and far off -- keeping their angular size. 1 leaves them as modelled. See
+    // gx::render_set_foreground_scale.
+    float foreground_scale = 1.0f;
+
     // How many samples the EFB keeps per hardware pixel, in each axis, in each view.
     // In theater the EFB *is* the picture, so more samples are filtered down into the
     // panel as antialiasing. In stereo the eyes are drawn at the headset's resolution and

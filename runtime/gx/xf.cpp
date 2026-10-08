@@ -10,6 +10,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <deque>
+#include <thread>
 
 namespace gx {
 
@@ -119,9 +120,19 @@ static uint32_t g_mtx_draw;
 // Whether this is the frame GCN_MTXLOG dumps.
 static bool mtxlog_frame() { return g_mtxlog && g_frame_counter == g_mtxlog; }
 
+static void submit_for_transform(std::unique_ptr<Batch> b, std::unique_ptr<struct Pending> pd);
+static void recycle_pending(std::unique_ptr<struct Pending> p);
+static bool xf_sync();
+static std::unique_ptr<struct Pending> g_pending;
+
 static void flush_batch() {
-    if (g_batch && !g_batch->cmds.empty()) submit_batch(std::move(g_batch));
+    if (g_batch && !g_batch->cmds.empty()) {
+        // Transformed already (see xf_sync), or by the worker before the renderer sees it.
+        if (xf_sync() || !g_pending) submit_batch(std::move(g_batch));
+        else submit_for_transform(std::move(g_batch), std::move(g_pending));
+    }
     g_batch.reset();
+    if (g_pending) recycle_pending(std::move(g_pending));
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +150,23 @@ static inline float xfr_f(uint32_t reg) {
     memcpy(&f, &v, 4);
     return f;
 }
+// The transform reads XF state from snapshots taken when each draw arrived, not from
+// g_state, because it runs after the frame is submitted and on other threads: see XfDraw.
+// Each region's snapshot is indexed from the region's first word.
+struct XfView { const uint32_t* r[XF_REGIONS]; };
+static thread_local XfView t_xf;
+static inline float tf(XfRegion region, uint32_t i) {
+    float f;
+    memcpy(&f, t_xf.r[region] + i, 4);
+    return f;
+}
+static inline uint32_t tw(XfRegion region, uint32_t i) { return t_xf.r[region][i]; }
+// Where each region starts in XF memory (the registers for XF_REGS), and how much of it a
+// snapshot copies. The copy runs a little past the region, because a matrix index can
+// address a few words beyond it and the transform must read what the hardware would.
+static constexpr uint32_t kXfBase[XF_REGIONS] = {0x000, 0x400, 0x500, 0x600, 0x00};
+static constexpr uint32_t kXfLen[XF_REGIONS] = {0x110, 0x110, 0x110, 0x090, 0x60};
+
 static inline uint16_t rd16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
 static inline uint32_t rd32(const uint8_t* p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 
@@ -172,6 +200,9 @@ static uint32_t read_color(const uint8_t* p, uint32_t fmt) {
 static uint32_t color_size(uint32_t fmt) { static const uint32_t s[8] = {2, 3, 4, 2, 3, 4, 4, 4}; return s[fmt & 7]; }
 
 struct InVertex {
+    // Left uninitialised on purpose, as GpuVertex is: the frame's input vertices are grown
+    // with resize() and every field is written by decode_vertex straight after.
+    InVertex() {}
     uint32_t pos_idx;             // the position's array index, for GCN_VTXLOG
     float pos[3];
     float nrm[3], bin[3], tan[3];
@@ -336,17 +367,17 @@ struct LightParams {
     float col[4];
     Vec3 pos, dir, cosatt, distatt, distatt_n;
 };
-static LightParams g_lights[8];
-static uint32_t g_lights_loaded;   // which of g_lights are valid for the current draw
+static thread_local LightParams g_lights[8];
+static thread_local uint32_t g_lights_loaded;   // which of g_lights are valid for the current draw
 
 static void load_light(int i) {
-    const uint32_t base = 0x600 + i * 0x10;
+    const uint32_t base = i * 0x10;
     LightParams& L = g_lights[i];
-    unpack_rgba(g_state.xf_mem[base + 3], L.col);
-    L.pos = v3(xf_f(base + 10), xf_f(base + 11), xf_f(base + 12));
-    L.dir = v3(xf_f(base + 13), xf_f(base + 14), xf_f(base + 15));
-    L.cosatt = v3(xf_f(base + 4), xf_f(base + 5), xf_f(base + 6));
-    L.distatt = v3(xf_f(base + 7), xf_f(base + 8), xf_f(base + 9));
+    unpack_rgba(tw(XF_LIGHT, base + 3), L.col);
+    L.pos = v3(tf(XF_LIGHT, base + 10), tf(XF_LIGHT, base + 11), tf(XF_LIGHT, base + 12));
+    L.dir = v3(tf(XF_LIGHT, base + 13), tf(XF_LIGHT, base + 14), tf(XF_LIGHT, base + 15));
+    L.cosatt = v3(tf(XF_LIGHT, base + 4), tf(XF_LIGHT, base + 5), tf(XF_LIGHT, base + 6));
+    L.distatt = v3(tf(XF_LIGHT, base + 7), tf(XF_LIGHT, base + 8), tf(XF_LIGHT, base + 9));
     L.distatt_n = normalize(L.distatt);
 }
 
@@ -401,14 +432,14 @@ struct ChanParams {
     uint32_t cctrl, actrl;
     float mat[4], amb[4];
 };
-static ChanParams g_chan[2];
+static thread_local ChanParams g_chan[2];
 
 static void load_chan(int chan) {
     ChanParams& C = g_chan[chan];
-    C.cctrl = g_state.xf_regs[0x0E + chan];
-    C.actrl = g_state.xf_regs[0x10 + chan];
-    unpack_rgba(g_state.xf_regs[0x0C + chan], C.mat);
-    unpack_rgba(g_state.xf_regs[0x0A + chan], C.amb);
+    C.cctrl = tw(XF_REGS, 0x0E + chan);
+    C.actrl = tw(XF_REGS, 0x10 + chan);
+    unpack_rgba(tw(XF_REGS, 0x0C + chan), C.mat);
+    unpack_rgba(tw(XF_REGS, 0x0A + chan), C.amb);
 }
 
 static uint32_t compute_color(int chan, const InVertex& v, Vec3 pos, Vec3 nrm) {
@@ -455,40 +486,46 @@ struct GenParams {
 // Whether any texgen embosses, which is the only thing that uses the transformed
 // binormal and tangent. Without one, normalising them per vertex -- two square roots
 // and six divisions -- produced values nothing read.
-static bool g_need_tangents;
-static GenParams g_gen[8];
-static uint32_t g_numcol, g_ntex;
-static bool g_dualtex;
+static thread_local bool g_need_tangents;
+static thread_local GenParams g_gen[8];
+static thread_local uint32_t g_numcol, g_ntex;
+static thread_local bool g_dualtex;
 
 // The position and normal matrices for the pnmtx last seen, so a draw whose vertices all
 // index one matrix -- every draw in this game -- reads it out of XF memory once. Reset
 // per draw, since a matrix may be loaded between draws.
-static uint32_t g_mtx_cached;
-static float g_posmtx[12], g_nrmmtx[9];
+static thread_local uint32_t g_mtx_cached;
+static thread_local float g_posmtx[12], g_nrmmtx[9];
 
 static void load_matrices(uint8_t pnmtx) {
     const uint32_t m = (pnmtx & 63) * 4;
-    for (int i = 0; i < 12; i++) g_posmtx[i] = xf_f(m + i);
-    const uint32_t n = 0x400 + ((pnmtx & 31) * 3);
-    for (int i = 0; i < 9; i++) g_nrmmtx[i] = xf_f(n + i);
+    for (int i = 0; i < 12; i++) g_posmtx[i] = tf(XF_MTX, m + i);
+    const uint32_t n = (pnmtx & 31) * 3;
+    for (int i = 0; i < 9; i++) g_nrmmtx[i] = tf(XF_NRM, n + i);
     g_mtx_cached = pnmtx;
 }
 
-// Called once per draw, before the vertex loop.
-static void load_xf_plan() {
-    g_numcol = g_state.xf_regs[0x09] & 3;
-    g_ntex = g_state.xf_regs[0x3F] & 15;
-    g_dualtex = g_state.xf_regs[0x12] & 1;
+// The matrix indices a vertex falls back to are needed when it is decoded, on the guest
+// thread, from the live registers. Called once per draw, before decoding.
+static void load_decode_defaults() {
     const uint32_t mi0 = g_state.xf_regs[0x18], mi1 = g_state.xf_regs[0x19];
     g_defpnmtx = (uint8_t)(mi0 & 63);
     g_deftex[0] = (uint8_t)((mi0 >> 6) & 63);  g_deftex[1] = (uint8_t)((mi0 >> 12) & 63);
     g_deftex[2] = (uint8_t)((mi0 >> 18) & 63); g_deftex[3] = (uint8_t)((mi0 >> 24) & 63);
     g_deftex[4] = (uint8_t)(mi1 & 63);         g_deftex[5] = (uint8_t)((mi1 >> 6) & 63);
     g_deftex[6] = (uint8_t)((mi1 >> 12) & 63); g_deftex[7] = (uint8_t)((mi1 >> 18) & 63);
+}
+
+// Called once per draw, before the vertex loop, with t_xf pointing at the draw's
+// snapshots.
+static void load_xf_plan() {
+    g_numcol = tw(XF_REGS, 0x09) & 3;
+    g_ntex = tw(XF_REGS, 0x3F) & 15;
+    g_dualtex = tw(XF_REGS, 0x12) & 1;
     g_need_tangents = false;
     for (uint32_t t = 0; t < g_ntex && t < 8; t++) {
-        const uint32_t info = g_state.xf_regs[0x40 + t];
-        const uint32_t post = g_state.xf_regs[0x50 + t];
+        const uint32_t info = tw(XF_REGS, 0x40 + t);
+        const uint32_t post = tw(XF_REGS, 0x50 + t);
         GenParams& G = g_gen[t];
         G.proj = (info >> 1) & 1;
         G.form = (info >> 2) & 1;
@@ -507,10 +544,11 @@ static void load_xf_plan() {
 }
 
 static uint32_t g_draw_seq;  // front-end draws so far, stamped into each vertex
+static thread_local uint32_t t_draw_seq;  // the draw being transformed
 
 static void transform_vertex(const InVertex& v, GpuVertex& o, bool has_nrm) {
     o.src_idx = v.pos_idx;
-    o.src_draw = g_draw_seq;
+    o.src_draw = t_draw_seq;
     if (v.pnmtx != g_mtx_cached) load_matrices(v.pnmtx);
     const float* pm = g_posmtx;
     const float px = v.pos[0], py = v.pos[1], pz = v.pos[2];
@@ -554,9 +592,9 @@ static void transform_vertex(const InVertex& v, GpuVertex& o, bool has_nrm) {
         float s = 0, tt = 0, q = 1;
         if (type == 0) {  // regular
             uint32_t tm = (v.texmtx[t] & 63) * 4;
-            s = xf_f(tm + 0) * src[0] + xf_f(tm + 1) * src[1] + xf_f(tm + 2) * src[2] + xf_f(tm + 3);
-            tt = xf_f(tm + 4) * src[0] + xf_f(tm + 5) * src[1] + xf_f(tm + 6) * src[2] + xf_f(tm + 7);
-            if (proj) q = xf_f(tm + 8) * src[0] + xf_f(tm + 9) * src[1] + xf_f(tm + 10) * src[2] + xf_f(tm + 11);
+            s = tf(XF_MTX, tm + 0) * src[0] + tf(XF_MTX, tm + 1) * src[1] + tf(XF_MTX, tm + 2) * src[2] + tf(XF_MTX, tm + 3);
+            tt = tf(XF_MTX, tm + 4) * src[0] + tf(XF_MTX, tm + 5) * src[1] + tf(XF_MTX, tm + 6) * src[2] + tf(XF_MTX, tm + 7);
+            if (proj) q = tf(XF_MTX, tm + 8) * src[0] + tf(XF_MTX, tm + 9) * src[1] + tf(XF_MTX, tm + 10) * src[2] + tf(XF_MTX, tm + 11);
         } else if (type == 1) {  // emboss
             const uint32_t srcrow = G.srcrow, light = G.light;
             if (!(g_lights_loaded & (1u << light))) {
@@ -573,15 +611,15 @@ static void transform_vertex(const InVertex& v, GpuVertex& o, bool has_nrm) {
             tt = kU8toF[o.col[ch][1]];
         }
         if (dualtex && type == 0) {
-            const uint32_t ptm = 0x500 + G.post * 4;
+            const uint32_t ptm = G.post * 4;
             float in[3] = {s, tt, q};
             if (G.postnorm) {
                 float l = sqrtf(in[0] * in[0] + in[1] * in[1] + in[2] * in[2]);
                 if (l > 0) { in[0] /= l; in[1] /= l; in[2] /= l; }
             }
-            s = xf_f(ptm + 0) * in[0] + xf_f(ptm + 1) * in[1] + xf_f(ptm + 2) * in[2] + xf_f(ptm + 3);
-            tt = xf_f(ptm + 4) * in[0] + xf_f(ptm + 5) * in[1] + xf_f(ptm + 6) * in[2] + xf_f(ptm + 7);
-            q = xf_f(ptm + 8) * in[0] + xf_f(ptm + 9) * in[1] + xf_f(ptm + 10) * in[2] + xf_f(ptm + 11);
+            s = tf(XF_POST, ptm + 0) * in[0] + tf(XF_POST, ptm + 1) * in[1] + tf(XF_POST, ptm + 2) * in[2] + tf(XF_POST, ptm + 3);
+            tt = tf(XF_POST, ptm + 4) * in[0] + tf(XF_POST, ptm + 5) * in[1] + tf(XF_POST, ptm + 6) * in[2] + tf(XF_POST, ptm + 7);
+            q = tf(XF_POST, ptm + 8) * in[0] + tf(XF_POST, ptm + 9) * in[1] + tf(XF_POST, ptm + 10) * in[2] + tf(XF_POST, ptm + 11);
         }
         o.tex[t][0] = s; o.tex[t][1] = tt; o.tex[t][2] = q;
     }
@@ -708,9 +746,212 @@ static uint32_t snapshot_state(bool view_space) {
 }
 
 // ---------------------------------------------------------------------------
+// Deferred transform
+//
+// Decoding a vertex reads guest memory -- the arrays its indices point into -- which the
+// game may change as soon as the draw is issued, so it happens when the draw arrives, on
+// the guest thread. Transforming and lighting it reads only the decoded vertex and XF
+// state, and that XF state is small and changes rarely within a frame. So each draw
+// records its decoded vertices and which snapshot of each XF region it saw (a region is
+// copied only when it has changed since the last draw), and the transform runs after the
+// frame is submitted, on worker threads, while the guest gets on with the next frame. The
+// output is the same either way; it was half of the guest thread's time in Metroid
+// Prime's intro on a Quest 3.
+//
+// GCN_XF_SYNC=1 transforms each draw as it arrives instead, which the diagnostics that
+// read transformed vertices on the guest thread (GCN_TRACE_FRAME, GCN_GXSTATS,
+// GCN_MTXLOG) also select. GCN_XF_THREADS sets how many threads share a frame (default 2).
+// ---------------------------------------------------------------------------
+struct XfDraw {
+    uint32_t first_in, first_out, count, seq;
+    uint32_t snap[XF_REGIONS];   // offsets into Pending::snap
+    bool has_nrm;
+};
+
+struct Pending {
+    std::vector<InVertex> in;
+    std::vector<XfDraw> draws;
+    std::vector<uint32_t> snap;
+    uint32_t snap_gen[XF_REGIONS] = {};   // the generation of each region's latest snapshot
+    uint32_t snap_off[XF_REGIONS] = {};
+    void clear() {
+        in.clear();
+        draws.clear();
+        snap.clear();
+        for (int r = 0; r < XF_REGIONS; r++) snap_gen[r] = 0;
+    }
+};
+
+static bool xf_sync() {
+    static const bool sync = getenv("GCN_XF_SYNC") || getenv("GCN_TRACE_FRAME") ||
+                             getenv("GCN_GXSTATS") || getenv("GCN_MTXLOG");
+    return sync;
+}
+
+// Pendings are recycled with their capacity, as batches are.
+static std::mutex g_pend_pool_mutex;
+static std::vector<std::unique_ptr<Pending>> g_pend_pool;
+
+static Pending& pending() {
+    if (!g_pending) {
+        std::lock_guard<std::mutex> lk(g_pend_pool_mutex);
+        if (!g_pend_pool.empty()) {
+            g_pending = std::move(g_pend_pool.back());
+            g_pend_pool.pop_back();
+        } else {
+            g_pending = std::make_unique<Pending>();
+        }
+    }
+    return *g_pending;
+}
+
+static void recycle_pending(std::unique_ptr<Pending> p) {
+    p->clear();
+    std::lock_guard<std::mutex> lk(g_pend_pool_mutex);
+    if (g_pend_pool.size() < 4) g_pend_pool.push_back(std::move(p));
+}
+
+static void transform_draw(const Pending& pd, const XfDraw& d, GpuVertex* verts) {
+    for (int r = 0; r < XF_REGIONS; r++) t_xf.r[r] = pd.snap.data() + d.snap[r];
+    t_draw_seq = d.seq;
+    load_xf_plan();
+    const InVertex* in = pd.in.data() + d.first_in;
+    GpuVertex* out = verts + d.first_out;
+    for (uint32_t i = 0; i < d.count; i++) transform_vertex(in[i], out[i], d.has_nrm);
+}
+
+static void transform_range(const Pending& pd, size_t lo, size_t hi, GpuVertex* verts) {
+    for (size_t i = lo; i < hi; i++) transform_draw(pd, pd.draws[i], verts);
+}
+
+// Helpers that take a share of each frame alongside the worker.
+struct XfHelper {
+    std::thread thread;
+    std::mutex m;
+    std::condition_variable cv;
+    const Pending* pd = nullptr;
+    size_t lo = 0, hi = 0;
+    GpuVertex* verts = nullptr;
+    bool busy = false;
+};
+static std::vector<std::unique_ptr<XfHelper>> g_helpers;
+
+static void helper_main(XfHelper* h) {
+    for (;;) {
+        std::unique_lock<std::mutex> lk(h->m);
+        h->cv.wait(lk, [h] { return h->busy && h->pd; });
+        const Pending* pd = h->pd;
+        const size_t lo = h->lo, hi = h->hi;
+        GpuVertex* verts = h->verts;
+        lk.unlock();
+        transform_range(*pd, lo, hi, verts);
+        lk.lock();
+        h->pd = nullptr;
+        h->busy = false;
+        h->cv.notify_all();
+    }
+}
+
+static void transform_pending(const Pending& pd, Batch& b) {
+    static const int threads = [] {
+        const char* e = getenv("GCN_XF_THREADS");
+        const int n = e ? atoi(e) : 2;
+        return n < 1 ? 1 : n > 8 ? 8 : n;
+    }();
+    while ((int)g_helpers.size() < threads - 1) {
+        auto h = std::make_unique<XfHelper>();
+        h->thread = std::thread(helper_main, h.get());
+        h->thread.detach();
+        g_helpers.push_back(std::move(h));
+    }
+    const size_t n = pd.draws.size();
+    GpuVertex* verts = b.verts.data();
+    if (threads == 1 || n < 64) {
+        transform_range(pd, 0, n, verts);
+        return;
+    }
+    // Split by vertices rather than draws: a frame's draws range from one vertex to
+    // thousands.
+    const size_t total = pd.in.size();
+    std::vector<size_t> cut(threads + 1, n);
+    cut[0] = 0;
+    for (int k = 1; k < threads; k++) {
+        const size_t target = total * k / threads;
+        size_t lo = cut[k - 1], hi = n;
+        while (lo < hi) {
+            const size_t mid = (lo + hi) / 2;
+            if (pd.draws[mid].first_in < target) lo = mid + 1; else hi = mid;
+        }
+        cut[k] = lo;
+    }
+    for (int k = 1; k < threads; k++) {
+        XfHelper* h = g_helpers[k - 1].get();
+        std::lock_guard<std::mutex> lk(h->m);
+        h->pd = &pd;
+        h->lo = cut[k];
+        h->hi = cut[k + 1];
+        h->verts = verts;
+        h->busy = true;
+        h->cv.notify_all();
+    }
+    transform_range(pd, cut[0], cut[1], verts);
+    for (int k = 1; k < threads; k++) {
+        XfHelper* h = g_helpers[k - 1].get();
+        std::unique_lock<std::mutex> lk(h->m);
+        h->cv.wait(lk, [h] { return !h->busy; });
+    }
+}
+
+// The worker: transforms each submitted frame, then hands it to the renderer, in order.
+struct XfJob {
+    std::unique_ptr<Batch> batch;
+    std::unique_ptr<Pending> pending;
+};
+static std::mutex g_xf_mutex;
+static std::condition_variable g_xf_cv;
+static std::deque<XfJob> g_xf_jobs;
+static constexpr size_t kMaxXfJobs = 2;
+
+static void xf_worker() {
+    for (;;) {
+        XfJob job;
+        {
+            std::unique_lock<std::mutex> lk(g_xf_mutex);
+            g_xf_cv.wait(lk, [] { return !g_xf_jobs.empty(); });
+            job = std::move(g_xf_jobs.front());
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        transform_pending(*job.pending, *job.batch);
+        if (g_frametime)
+            fprintf(stderr, "[xf] %zu draws, %zu vertices transformed in %.2fms\n",
+                    job.pending->draws.size(), job.pending->in.size(), ms_since(t0));
+        recycle_pending(std::move(job.pending));
+        submit_batch(std::move(job.batch));
+        {
+            std::lock_guard<std::mutex> lk(g_xf_mutex);
+            g_xf_jobs.pop_front();
+            g_xf_cv.notify_all();
+        }
+    }
+}
+
+// Hands a finished frame to the worker, waiting while it has kMaxXfJobs in hand: like the
+// render queue, a bound and not a hint.
+static void submit_for_transform(std::unique_ptr<Batch> b, std::unique_ptr<Pending> pd) {
+    static const bool started = [] {
+        std::thread(xf_worker).detach();
+        return true;
+    }();
+    (void)started;
+    std::unique_lock<std::mutex> lk(g_xf_mutex);
+    g_xf_cv.wait(lk, [] { return g_xf_jobs.size() < kMaxXfJobs; });
+    g_xf_jobs.push_back({std::move(b), std::move(pd)});
+    g_xf_cv.notify_all();
+}
+
+// ---------------------------------------------------------------------------
 // Draw
 // ---------------------------------------------------------------------------
-static std::vector<InVertex> g_in;
 
 static void draw_impl(const DrawCall& dc);
 
@@ -725,14 +966,13 @@ void renderer_draw(const DrawCall& dc) {
 static void draw_impl(const DrawCall& dc) {
     if (dc.count == 0) return;
     const Layout& L = layout_for(dc.vat);
-    // Grown, never shrunk: resize() value-initialises whatever it adds, and this buffer
-    // is refilled from scratch by decode_vertex every draw, so letting it follow a draw
-    // count that swings between one and a few hundred spent its time zeroing bytes that
-    // were about to be overwritten.
-    if (g_in.size() < dc.count) g_in.resize(dc.count);
-    load_xf_plan();
+    load_decode_defaults();
     const uint8_t* p = dc.data;
     g_draw_seq++;
+    Pending& pd = pending();
+    const uint32_t first_in = (uint32_t)pd.in.size();
+    pd.in.resize(first_in + dc.count);
+    InVertex* const g_in = pd.in.data() + first_in;
     for (uint32_t i = 0; i < dc.count; i++) decode_vertex(L, p, g_in[i]);
     // GCN_VTXLOG=<frame> prints each draw of that frame as the front end sees it: the
     // primitive, vertex layout, the first vertices' raw indices and positions, and the
@@ -786,9 +1026,24 @@ static void draw_impl(const DrawCall& dc) {
     Batch& b = batch();
     const uint32_t base = (uint32_t)b.verts.size();
     b.verts.resize(base + dc.count);
+    XfDraw d;
+    d.first_in = first_in;
+    d.first_out = base;
+    d.count = dc.count;
+    d.seq = g_draw_seq;
+    d.has_nrm = L.nrm_desc != 0;
+    for (int r = 0; r < XF_REGIONS; r++) {
+        if (pd.snap_gen[r] != g_state.xf_gen[r]) {
+            const uint32_t* src = (r == XF_REGS ? g_state.xf_regs : g_state.xf_mem) + kXfBase[r];
+            pd.snap_off[r] = (uint32_t)pd.snap.size();
+            pd.snap.insert(pd.snap.end(), src, src + kXfLen[r]);
+            pd.snap_gen[r] = g_state.xf_gen[r];
+        }
+        d.snap[r] = pd.snap_off[r];
+    }
+    pd.draws.push_back(d);
+    if (xf_sync()) transform_draw(pd, d, b.verts.data());
     GpuVertex* out = b.verts.data() + base;
-    bool has_nrm = L.nrm_desc != 0;
-    for (uint32_t i = 0; i < dc.count; i++) transform_vertex(g_in[i], out[i], has_nrm);
 
     // GCN_MTXLOG=<n> prints the position matrix and projection of every draw in the nth
     // presented frame. The timebase is wall-clock driven, so frame N is a slightly
