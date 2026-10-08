@@ -24,7 +24,7 @@ option(GCN_TRACE_CALLS "Maintain a guest call stack (diagnostics)" OFF)
 #   DISC_ID <6 chars>          e.g. GM8E01; the image and the booted disc are checked against it
 #   DOL_SHA1 <hex>             the supported build's main.dol
 #   SYMBOLS <file>             decomp-toolkit symbols.txt for that DOL
-#   TABLES <dir>               hle.txt, names.txt, patches.txt, special_calls.txt
+#   TABLES <dir>               hle.txt, names.txt, patches.txt, special_calls.txt, idle.txt
 #   FPS <n>                    the game's frame rate, for the benchmark's percentage
 #   [IMAGE_DIR <dir>]          where to look for the user's .iso/.ciso (default rom/)
 #   [SOURCES <files>...]       the game project's own runtime sources, compiled into the

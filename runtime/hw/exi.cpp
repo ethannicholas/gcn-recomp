@@ -36,9 +36,15 @@ static void sram_init() {
     g_sram[2] = inv >> 8; g_sram[3] = (uint8_t)inv;
 }
 
+// The RTC runs on guest time from a base the frontend sets (the input log's start time
+// on a replay, the wall clock otherwise), so a replay sees the recording's calendar.
+static time_t g_rtc_base;
+void rtc_set_base(time_t utc) { g_rtc_base = utc; }
+
 static uint32_t rtc_now() {
     // seconds since 2000-01-01 00:00:00 local time
-    time_t t = time(nullptr);
+    if (!g_rtc_base) g_rtc_base = time(nullptr);
+    time_t t = g_rtc_base + (time_t)(now_ticks() / TB_FREQ);
     time_t local = t + plat_utc_offset_seconds();
     return (uint32_t)(local - 946684800);
 }

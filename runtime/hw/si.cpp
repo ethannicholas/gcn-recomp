@@ -19,8 +19,7 @@ static PadState pad_get(int chan) {
         std::lock_guard<std::mutex> lk(g_pad_mutex);
         p = g_pads[chan];
     }
-    input_replay_apply(chan, p);
-    input_log_record(chan, p);
+    input_pad_poll(chan, p);
     return p;
 }
 

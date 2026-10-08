@@ -1,7 +1,11 @@
 // Memory, CPU helper routines, timing and event scheduling.
 #include "runtime.h"
 #include "platform.h"
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstring>
+#include <thread>
 #include <mutex>
 #include <queue>
 #include <vector>
@@ -275,19 +279,105 @@ static std::chrono::steady_clock::time_point g_t0;
 // other emulated timing (DVD, audio, retrace), so it is not a correctness path.
 static double g_time_scale = 1.0;
 
+// Virtual clock: guest time is the back-edge count times this. The value sets how much
+// work the guest can do per 60 Hz frame before it sees the retrace arrive late: with
+// TICKS_PER_EDGE ticks per loop iteration, a frame holds FIELD_TICKS / TICKS_PER_EDGE
+// iterations. It is a constant, not a measurement, because determinism is the point: the
+// same route must count the same ticks on every machine. Measured with GCN_CLOCKLOG on
+// Metroid Prime (2026-10-08): gameplay on the frigate is 45-60k back-edges of work per
+// frame and the intro cinematic peaks near 85k, so at 4 ticks per edge the cinematic took
+// half a field and at 2 a quarter. 2 leaves room for scenes heavier than those; the real
+// Gekko, at a few cycles per short loop iteration, is in the same range.
+static constexpr uint64_t TICKS_PER_EDGE = 2;
+static bool g_virtual_clock = true;
+volatile uint64_t g_vcount;
+volatile uint64_t g_vlimit = UINT64_MAX;
+static int64_t g_pace_offset_ns;  // virtual time the host gave up on catching up with
+
+bool clock_is_virtual() { return g_virtual_clock; }
+void clock_set_scale(double s) { g_time_scale = s; }
+double clock_scale() { return g_time_scale; }
+
 void timing_init() {
     g_t0 = std::chrono::steady_clock::now();
+    if (const char* e = getenv("GCN_CLOCK")) g_virtual_clock = strcmp(e, "host") != 0;
     if (const char* e = getenv("GCN_TIMESCALE")) {
         double s = atof(e);
-        if (s > 0) g_time_scale = s;
+        if (s >= 0) g_time_scale = s;
     }
     build_fn_table();
 }
 
-uint64_t now_ticks() {
+uint64_t host_ns() {
     auto d = std::chrono::steady_clock::now() - g_t0;
-    return (uint64_t)((double)std::chrono::duration_cast<std::chrono::nanoseconds>(d).count() *
-                      (TB_FREQ / 1e9) * g_time_scale);
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+}
+
+uint64_t now_ticks() {
+    if (g_virtual_clock) return g_vcount * TICKS_PER_EDGE;
+    return (uint64_t)((double)host_ns() * (TB_FREQ / 1e9) * (g_time_scale > 0 ? g_time_scale : 1.0));
+}
+
+void irq_request() { g_vlimit = 0; }
+
+// The guest has nothing to run until the next event. On the virtual clock that event is
+// a known count away, so jump straight to it; the spin's iterations would have been
+// nothing but clock. On the host clock, give the CPU up for a moment instead of spinning.
+static uint64_t g_vskipped;
+extern "C" void idle_hint(CPU* c) {
+    if (g_virtual_clock) {
+        uint64_t limit = g_vlimit, cur = g_vcount;
+        if (limit != UINT64_MAX && cur < limit) { g_vskipped += limit - cur; g_vcount = limit; }
+        else g_vcount = cur + 1;
+    } else {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    irq_poll(c);
+}
+
+extern std::atomic<uint64_t> g_dec_deadline;
+extern std::atomic<uint64_t> g_next_event_at;
+
+void clock_update_limit() {
+    if (!g_virtual_clock) { g_vlimit = UINT64_MAX; return; }  // the ticker asks for polls
+    uint64_t at = std::min(g_next_event_at.load(), g_dec_deadline.load());
+    g_vlimit = at == UINT64_MAX ? UINT64_MAX : (at + TICKS_PER_EDGE - 1) / TICKS_PER_EDGE;
+}
+
+uint32_t gx_frames_submitted();
+
+// GCN_CLOCKLOG=1: once per virtual second, how the guest's time relates to the host's and
+// how much the guest executed per presented frame. The edges/frame figure is what
+// TICKS_PER_EDGE is tuned against.
+static void clock_log() {
+    static bool on = getenv("GCN_CLOCKLOG") != nullptr;
+    if (!on) return;
+    static uint64_t next_at, last_edges, last_frames;
+    uint64_t vt = now_ticks();
+    if (vt < next_at) return;
+    next_at = vt + TB_FREQ;
+    uint64_t edges = g_vcount - g_vskipped, frames = gx_frames_submitted(), host = host_ns();
+    fprintf(stderr, "[clock] virtual %6.1fs host %6.1fs  frames %u (+%u)  work edges/frame %.0fk (%.0f%% of a field)\n",
+            (double)vt / TB_FREQ, (double)host / 1e9, (unsigned)frames, (unsigned)(frames - last_frames),
+            frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) / 1000.0 : 0.0,
+            frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) * TICKS_PER_EDGE * 100.0 / (TB_FREQ / 59.94) : 0.0);
+    last_edges = edges; last_frames = frames;
+}
+
+// Hold virtual time to real time. Called from irq_poll, i.e. whenever an event is due,
+// which is at least every SI poll (1/120 s). When the host falls behind, the shortfall is
+// forgiven rather than caught up: the game slows down instead of fast-forwarding later.
+void clock_pace() {
+    clock_log();
+    if (!g_virtual_clock || g_time_scale <= 0) return;
+    int64_t virt_ns = (int64_t)((double)now_ticks() * (1e9 / TB_FREQ) / g_time_scale);
+    int64_t ahead = virt_ns - (int64_t)host_ns() - g_pace_offset_ns;
+    if (ahead > 300000) {
+        if (ahead > 50000000) ahead = 50000000;
+        std::this_thread::sleep_for(std::chrono::nanoseconds(ahead));
+    } else if (ahead < -100000000) {
+        g_pace_offset_ns += ahead;  // too far behind: re-anchor
+    }
 }
 
 struct Event {
@@ -299,12 +389,15 @@ struct Event {
 static std::mutex g_ev_mutex;
 static std::priority_queue<Event, std::vector<Event>, std::greater<Event>> g_events;
 static uint64_t g_ev_seq;
-std::atomic<uint64_t> g_next_event_at{UINT64_MAX};
+std::atomic<uint64_t> g_next_event_at{UINT64_MAX};  // declared above
 
 void event_schedule(uint64_t at, EventFn fn) {
-    std::lock_guard<std::mutex> lk(g_ev_mutex);
-    g_events.push(Event{at, g_ev_seq++, std::move(fn)});
-    g_next_event_at = g_events.top().at;
+    {
+        std::lock_guard<std::mutex> lk(g_ev_mutex);
+        g_events.push(Event{at, g_ev_seq++, std::move(fn)});
+        g_next_event_at = g_events.top().at;
+    }
+    clock_update_limit();
 }
 void event_schedule_in(uint64_t delta, EventFn fn) { event_schedule(now_ticks() + delta, std::move(fn)); }
 

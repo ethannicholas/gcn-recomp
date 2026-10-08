@@ -1,10 +1,15 @@
 // Input logging and replay.
 //
 // A run leaves behind a record of every controller state the game polled, keyed by the
-// presented-frame count, so that the same route can be played again without a human at
-// the controls -- "get me to the boss" rather than scripting a handful of presses. It is
-// not a deterministic replay: the guest runs on wall-clock timing, so a replay can drift
-// by a frame here and there. It is good enough to get back to where something happened.
+// poll's sequence number, so that the same route can be played again without a human at
+// the controls -- "get me to the boss" rather than scripting a handful of presses. With
+// the virtual clock (runtime.h) the guest's timeline is a function of its own execution,
+// so the Nth poll of a replay is the same instant in the game as the Nth poll of the
+// recording, and the replay is exact. The log also records the run's start time, which
+// the replay feeds to the RTC, so even the calendar looks the same to the game.
+//
+// Version 1 logs (keyed by presented frame, recorded under the host clock) still load;
+// they replay approximately, as they always did.
 //
 // A log is a directory:
 //   inputs.txt       one line per change of pad state (see the file's own header)
@@ -20,19 +25,17 @@
 // it exists. Returns false, and records nothing, if the directory cannot be made.
 bool input_log_start(const std::string& dir, const std::string& memcard_path);
 
-// Called by the SI layer each time the guest reads a pad. Records a line when the state
-// of that channel differs from the last line written for it.
-void input_log_record(int chan, const PadState& s);
 
 // Load `dir` for replay. The card snapshot, if any, is copied to `dir`/memcard_replay.raw
 // and `memcard_out` receives that path; the frontend points the EXI card at it before
 // boot. Returns false if there is no inputs.txt.
 bool input_replay_load(const std::string& dir, std::string& memcard_out);
 
-// While a replay is loaded and the current frame is within it, overwrites `s` with the
-// logged state for `chan` and returns true. Past the end of the log the live controller
-// takes over again, and this returns false.
-bool input_replay_apply(int chan, PadState& s);
+// Called by the SI layer each time the guest polls a pad, with the live state in `s`.
+// While a replay is loaded and not yet past its end, overwrites `s` with the logged state
+// for `chan` and returns true; past the end the live controller takes over again and this
+// returns false. Either way the state the guest will see is recorded, when logging.
+bool input_pad_poll(int chan, PadState& s);
 
-// Whether a replay is in progress (loaded and not yet past its last frame).
+// Whether a replay is in progress (loaded and not yet past its last poll).
 bool input_replay_active();

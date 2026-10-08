@@ -4,7 +4,7 @@
 Usage: recomp.py <main.dol> <dtk symbols.txt> <outdir> <tables dir>
 
 The tables directory holds the per-game steering files: names.txt, hle.txt,
-patches.txt and special_calls.txt (any may be absent).
+patches.txt, special_calls.txt and idle.txt (any may be absent).
 """
 import collections
 import os
@@ -188,6 +188,10 @@ def main():
         return s
 
     special_calls = load_kv(os.path.join(tables, 'special_calls.txt'))
+    # idle.txt: addresses of backward branches that are the OS's "nothing to run" spin
+    # (the SDK scheduler's wait for RunQueueBitmap). They poll through IDLE_CHECK, which
+    # lets the runtime skip guest time forward to the next event instead of spinning.
+    idle_loops = set(load_kv(os.path.join(tables, 'idle.txt')).keys())
     # patches.txt: "ADDR  <C statement>" replaces the instruction at ADDR.
     patches = {}
     pp = os.path.join(tables, 'patches.txt')
@@ -238,7 +242,7 @@ def main():
                 if br.link:
                     if t in special_calls:
                         # setjmp-style call site (OSSaveContext)
-                        call = (f'c->lr = 0x{pc + 4:08X}u; if (setjmp(*hle_context_jmpbuf(c)) == 0) {cname(t)}(c);')
+                        call = (f'c->lr = 0x{pc + 4:08X}u; if (_setjmp(*hle_context_jmpbuf(c)) == 0) {cname(t)}(c);')
                     else:
                         call = emit_call(pc, t, True)
                     if cond:
@@ -246,7 +250,7 @@ def main():
                     else:
                         s += call
                 elif in_range(t):
-                    irq = 'IRQ_CHECK(); ' if t <= pc else ''
+                    irq = ('IDLE_CHECK(); ' if pc in idle_loops else 'IRQ_CHECK(); ') if t <= pc else ''
                     if cond:
                         s += f'if ({cond}) {{ {irq}goto L_{t:08X}; }}'
                     else:

@@ -7,8 +7,8 @@ are `GCN_*`; none of this is needed to play.
 ## Input logging and replay
 
 Every run of the desktop frontend records the controller state the guest polled, keyed by
-presented frame, into `saves/inputs/<timestamp>/inputs.txt`, with a snapshot of the memory
-card beside it. The path is printed at startup. `--no-input-log` turns it off;
+the poll's sequence number, into `saves/inputs/<timestamp>/inputs.txt`, with a snapshot of
+the memory card beside it. The path is printed at startup. `--no-input-log` turns it off;
 `--input-log=<dir>` chooses the directory.
 
 `--replay=<dir>` plays a log back: the guest reads the logged controller instead of the live
@@ -17,15 +17,22 @@ of the logged card (`memcard_replay.raw` in the log directory), so the real card
 touched and the replay sees the same saves the original did. A replay is still recorded as a
 new log, so a route can be extended by replaying it and then playing on.
 
-This is not deterministic. The guest runs on wall-clock time, so a replay can land a press a
-frame early or late relative to a menu that fades on real time, and a long route can drift.
-It is meant to get back to where something happened, not to reproduce it bit for bit. If a
-replay diverges, replay it again with `--dump-dir` to see where, and trim or re-record from
-there.
+A replay is exact. Guest time is virtual (see "The clock" below): it is a function of what
+the guest executes, not of the host's clock, so the Nth pad poll of the replay is the same
+instant in the game as the Nth poll of the recording, every timed event (retrace, DVD
+completion, decrementer) lands on the same instruction, and the RTC is started from the
+recording's start time, which the log carries. A replay therefore reproduces the recording
+bit for bit, including a crash at its end, unless the runtime itself has a nondeterministic
+path -- which is then the bug to find. `--fast` runs a replay as fast as the host allows;
+the game still sees 60 Hz.
 
-The log format is text: a header, then one line per change of a channel's state --
-`frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r`, in hex.
-Lines can be edited or written by hand.
+Logs recorded before the virtual clock (version 1, keyed by presented frame) still load and
+replay approximately, as they always did.
+
+The log format is text: a header (version, game, start time and its epoch), then one line
+per change of a channel's state --
+`poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r`, in
+hex. Lines can be edited or written by hand; `frame` is for the reader.
 
 ## Scripted input
 
@@ -53,11 +60,27 @@ chase camera). With `--dump-dir`/`--dump-every` the eye's frames are written as 
 
 ## Measuring the guest
 
-`<game>_bench` runs the game with no graphics, audio or input and reports how fast the guest
-advances; `--warmup=N` (default 8) excludes boot from the steady-state figure. `GCN_TIMESCALE=N`
-makes the emulated timebase advance N times faster, so the game tries to run at N× real
-time; raise it until the frame rate stops climbing to find a machine's ceiling. It skews
-every other emulated timing, so it is a diagnostic only.
+`<game>_bench` runs the game with no graphics, audio or input, unpaced, and reports how fast
+the guest advances; `--warmup=N` (default 8) excludes boot from the steady-state figure. Its
+last column is the guest's work per presented frame in loop back-edges, the figure the
+virtual clock's tick-per-edge constant is tuned against.
+
+## The clock
+
+Guest time is virtual by default. Every backward branch in recompiled code counts one
+back-edge, and the time base is that count times a constant (`TICKS_PER_EDGE` in
+`cpu.cpp`); events are due when the count reaches them, and the SDK's idle spin
+(`idle.txt` in the game's tables) jumps the count to the next event instead of iterating.
+The host is held to real time by sleeping when virtual time runs ahead; when the host
+cannot keep up, the game slows down rather than catching up later. So the game's view of
+time depends only on what it executed, which is what makes replays exact; the cost is that
+a scene heavier than a frame's budget of back-edges looks to the game like a dropped frame,
+at a threshold set by the constant rather than by the real console.
+
+`GCN_CLOCK=host` restores wall-clock time (the ticker thread polls for due events every
+200 µs). `GCN_TIMESCALE=N` paces virtual time at N× real time (0: unpaced; `--fast` on
+the game, and the benchmark's default). `GCN_CLOCKLOG=1` prints once per virtual second how
+virtual and host time compare and the work per presented frame.
 
 `GCN_FRAMETIME=1` prints a line per frame from each thread: the guest's interval between
 presents and how much of it the GX front end took, the batch's shape, and the renderer's

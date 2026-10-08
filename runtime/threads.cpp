@@ -20,7 +20,6 @@
 #include <unordered_map>
 #include <vector>
 
-volatile int g_irq_pending;
 
 enum BindKind { BIND_NONE, BIND_SAVED, BIND_EXC };
 
@@ -127,8 +126,8 @@ static Binding* wait_for_baton(HostThread* self) {
     self->cpu.host = self;
     if (b->kind == BIND_SAVED) self->cpu.r[3] = 1;
     b->kind = BIND_NONE;
-    g_irq_pending = 1;  // re-evaluate pending interrupts after a switch
-    longjmp(b->jb, 1);
+    irq_request();  // re-evaluate pending interrupts after a switch
+    _longjmp(b->jb, 1);  // the mask-free variants: setjmp/longjmp would make a syscall per switch
 }
 
 // Hand the baton to `target` (resuming at binding b) and block until we get it back.
@@ -203,7 +202,7 @@ extern "C" void hle_OSLoadContext(CPU* c) {
 // ---------------------------------------------------------------------------
 static uint64_t g_dec_base_tick;
 static uint32_t g_dec_value;
-static std::atomic<uint64_t> g_dec_deadline{UINT64_MAX};
+std::atomic<uint64_t> g_dec_deadline{UINT64_MAX};
 static bool g_dec_pending;
 
 void dec_write(CPU* c, uint32_t v) {
@@ -212,6 +211,7 @@ void dec_write(CPU* c, uint32_t v) {
     g_dec_pending = false;
     // Exception fires when the decrementer passes from 0 to -1.
     g_dec_deadline = (v & 0x80000000u) ? UINT64_MAX : g_dec_base_tick + (uint64_t)v + 1;
+    clock_update_limit();
 }
 
 uint32_t dec_read(CPU* c) {
@@ -233,7 +233,7 @@ static void irq_deliver(CPU* c, uint32_t exc) {
     b->snapshot = *c;
     cpu_to_context(c, ctx, 0);
     mem_w16(ctx + CTX_STATE, mem_r16(ctx + CTX_STATE) | OS_CONTEXT_STATE_EXC);
-    if (setjmp(b->jb) != 0) return;  // resumed by OSLoadContext(ctx)
+    if (_setjmp(b->jb) != 0) return;  // resumed by OSLoadContext(ctx)
     c->spr[26] = 0;          // SRR0
     c->spr[27] = c->msr;     // SRR1
     c->msr &= ~MSR_EE;
@@ -245,31 +245,35 @@ static void irq_deliver(CPU* c, uint32_t exc) {
 }
 
 extern "C" void irq_poll(CPU* c) {
-    g_irq_pending = 0;
     if (g_quit) plat_thread_exit();
+    clock_pace();
     events_run_due();
     uint64_t now = now_ticks();
     if (g_dec_deadline.load() <= now) { g_dec_pending = true; g_dec_deadline = UINT64_MAX; }
+    clock_update_limit();
     bool ext = (g_pi_intsr.load() & g_pi_intmr.load()) != 0;
     if (!ext && !g_dec_pending) return;
-    if (!(c->msr & MSR_EE)) { g_irq_pending = 1; return; }
+    if (!(c->msr & MSR_EE)) { irq_request(); return; }  // poll again at the next back-edge
     if (ext) { LOG(LOG_THREAD, "deliver external irq: intsr=%08X intmr=%08X", g_pi_intsr.load(), g_pi_intmr.load()); irq_deliver(c, 4); return; }
     g_dec_pending = false;
     irq_deliver(c, 8);
 }
 
-// Background ticker: raises the poll flag when a timed event or the decrementer is due.
+// Background ticker for the host clock: asks for a poll when a timed event or the
+// decrementer is due. The virtual clock needs none; the back-edge count does it.
 static void ticker_main() {
     while (!g_quit) {
         uint64_t now = now_ticks();
-        if (g_next_event_at.load() <= now || g_dec_deadline.load() <= now) g_irq_pending = 1;
+        if (g_next_event_at.load() <= now || g_dec_deadline.load() <= now) irq_request();
         std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
 }
 
 void threads_start_boot(uint32_t entry) {
-    static std::thread ticker(ticker_main);
-    ticker.detach();
+    if (!clock_is_virtual()) {
+        static std::thread ticker(ticker_main);
+        ticker.detach();
+    }
     HostThread* h = new_host_thread();
     // Fake a context-free start: run entry directly on a host thread.
     struct Boot { static void* main(void* arg) {
@@ -288,6 +292,7 @@ void threads_start_boot(uint32_t entry) {
 
 void threads_request_quit() {
     g_quit = true;
+    irq_request();
     for (auto* h : g_threads) { std::lock_guard<std::mutex> lk(h->m); h->cv.notify_all(); }
 }
 
@@ -316,7 +321,10 @@ void debug_dump_threads() {
 #endif
     for (auto* h : g_threads) {
         CPU* c = &h->cpu;
-        fprintf(stderr, "=== host thread %d (run=%d) lr=%08X msr=%08X r1=%08X r3=%08X\n", h->id, h->run, c->lr, c->msr, c->r[1], c->r[3]);
+        fprintf(stderr, "=== host thread %d (run=%d) lr=%08X msr=%08X ctr=%08X\n", h->id, h->run, c->lr, c->msr, c->ctr);
+        for (int i = 0; i < 32; i += 8)
+            fprintf(stderr, "  r%-2d %08X %08X %08X %08X %08X %08X %08X %08X\n", i, c->r[i], c->r[i + 1], c->r[i + 2], c->r[i + 3],
+                    c->r[i + 4], c->r[i + 5], c->r[i + 6], c->r[i + 7]);
 #ifdef GCN_CALL_TRACE
         fprintf(stderr, "  guest call stack (innermost first):\n");
         uint32_t want = getenv("GCN_TRACE_DEPTH") ? (uint32_t)atoi(getenv("GCN_TRACE_DEPTH")) : 40;

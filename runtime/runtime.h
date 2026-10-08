@@ -2,6 +2,7 @@
 #pragma once
 #include "recomp.h"
 #include <cstdint>
+#include <ctime>
 #include <cstdio>
 #include <cstdarg>
 #include <string>
@@ -54,8 +55,19 @@ uint32_t dma_fit(const char* engine, uint32_t pa, uint32_t len);
 
 // ---- timing ----
 constexpr uint64_t TB_FREQ = 40500000;  // timebase / decrementer ticks per second
-uint64_t now_ticks();                   // monotonic, TB units
+uint64_t now_ticks();                   // guest time, TB units (virtual clock by default)
 void timing_init();
+// The clock. By default guest time is virtual: it advances with the guest's own execution
+// (loop back-edges, TICKS_PER_EDGE each) and the host sleeps to hold it to real time, so a
+// replay sees exactly the recording's timeline. GCN_CLOCK=host restores wall-clock time.
+bool clock_is_virtual();
+void clock_set_scale(double virtual_seconds_per_real_second);  // 0 = unpaced, run flat out
+double clock_scale();
+void clock_update_limit();   // recompute g_vlimit from the next event / decrementer deadline
+void clock_pace();           // sleep if virtual time is ahead of real time (virtual clock only)
+void irq_request();          // make the running guest thread poll at its next back-edge
+uint64_t host_ns();          // wall clock since start, for diagnostics
+void rtc_set_base(time_t utc);  // what the RTC reads at guest time zero (hw/exi.cpp)
 
 // Scheduled hardware events, run on the guest thread holding the baton.
 using EventFn = std::function<void()>;

@@ -222,9 +222,20 @@ void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr);
 void psq_store(CPU* c, uint32_t ea, int frs, int w, int gqr);
 jmp_buf* hle_context_jmpbuf(CPU* c);
 
-extern volatile int g_irq_pending;
+/* The guest clock. Every backward branch in recompiled code passes through IRQ_CHECK,
+   which counts it; with the virtual clock (the default) guest time *is* that count, so a
+   run that executes the same instructions reads the same time base, and its timed events
+   -- retrace, DVD completion, decrementer -- land on the same instructions. g_vlimit is the
+   count at which the next event is due (or 0 when the runtime wants attention), so the
+   hot path is one increment and one compare. See clock_* in cpu.cpp. */
+extern volatile uint64_t g_vcount;
+extern volatile uint64_t g_vlimit;
 void irq_poll(CPU* c);
-#define IRQ_CHECK() do { if (UNLIKELY(g_irq_pending)) irq_poll(c); } while (0)
+#define IRQ_CHECK() do { if (UNLIKELY(++g_vcount >= g_vlimit)) irq_poll(c); } while (0)
+/* The OS idle spin (tables/idle.txt): nothing will change until the next event, so the
+   runtime may skip guest time forward to it, and sleep the host meanwhile. */
+void idle_hint(CPU* c);
+#define IDLE_CHECK() idle_hint(c)
 
 #ifdef __cplusplus
 }

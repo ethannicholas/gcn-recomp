@@ -71,18 +71,22 @@ int main(int argc, char** argv) {
 
     mem_init();
     timing_init();
+    // The benchmark measures the host, so the guest runs flat out: virtual time is never
+    // held back to real time here (GCN_TIMESCALE still sets a pace if one is wanted).
+    if (!getenv("GCN_TIMESCALE")) clock_set_scale(0);
     input_script_init();
     uint32_t entry = boot_load(iso.c_str());
     threads_start_boot(entry);
 
     printf("benchmarking %s for %d s\n", iso.c_str(), seconds);
-    printf("  time   frames/s   verts/s   draws/s\n");
+    printf("  time   frames/s   verts/s   draws/s   edges/frame\n");
     fflush(stdout);
 
     using clock = std::chrono::steady_clock;
     const auto t_start = clock::now();
     auto t_mark = t_start;
     uint32_t frames_at_mark = 0;
+    uint64_t edges_at_mark = 0;
     uint64_t verts = 0, verts_at_mark = 0;
     uint64_t draws = 0, draws_at_mark = 0;
 
@@ -118,12 +122,15 @@ int main(int argc, char** argv) {
 
         if (since_mark >= 1.0) {
             const uint32_t frames = gx::g_frames_submitted.load();
-            printf("  %4.0fs   %8.1f   %7.0fk   %7.0f%s\n", elapsed,
+            const uint64_t edges = g_vcount;
+            printf("  %4.0fs   %8.1f   %7.0fk   %7.0f   %8.0fk%s\n", elapsed,
                    (frames - frames_at_mark) / since_mark,
                    (verts - verts_at_mark) / since_mark / 1000.0,
                    (draws - draws_at_mark) / since_mark,
+                   frames > frames_at_mark ? (double)(edges - edges_at_mark) / (frames - frames_at_mark) / 1000.0 : 0.0,
                    warmed ? "" : "   (warmup)");
             fflush(stdout);
+            edges_at_mark = edges;
             frames_at_mark = frames;
             verts_at_mark = verts;
             draws_at_mark = draws;

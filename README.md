@@ -42,6 +42,8 @@ That defines the game executable, a headless benchmark (`<name>_bench`) and a co
   `OSLoadContext`, `OSReport`, `OSPanic` at minimum).
 - `recomp/special_calls.txt` — the address of `OSSaveContext`, whose call sites become
   resume points.
+- `recomp/idle.txt` — the backward branch of the SDK scheduler's idle spin (`SelectThread`
+  waiting for a runnable thread), where the runtime skips guest time to the next event.
 - `recomp/names.txt`, `recomp/patches.txt` — hand-named functions and instruction patches,
   usually empty.
 

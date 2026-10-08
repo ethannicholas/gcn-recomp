@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
     if (!plat_readable(iso_default.c_str())) iso_default = plat_find_file("rom", ".iso");
     if (iso_default.empty()) iso_default = plat_find_file("rom", ".ciso");
     const char* iso = iso_default.c_str();
-    bool headless = false, hidden = false, input_log = true, first_person = false;
+    bool headless = false, hidden = false, input_log = true, first_person = false, fast = false;
     std::string input_log_dir, replay_dir;
     int scale = 2;
     for (int i = 1; i < argc; i++) {
@@ -194,6 +194,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sample")) debug_sampler_start();
         else if (!strcmp(argv[i], "--headless")) headless = true;
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
+        else if (!strcmp(argv[i], "--fast")) fast = true;
         else if (!strcmp(argv[i], "--cull-swap")) gx::g_cull_swap = true;
         else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--dump-dir=", 11)) gx::g_dump_dir = argv[i] + 11;
@@ -208,6 +209,7 @@ int main(int argc, char** argv) {
     }
     mem_init();
     timing_init();
+    if (fast) clock_set_scale(0);  // run as fast as the host allows; the game sees 60 Hz regardless
     input_script_init();
 
     // Every run records what the guest read from the controller, so that a route to
