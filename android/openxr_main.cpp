@@ -905,7 +905,8 @@ void android_main(android_app* app) {
     g_vrcfg = vr::load_config(dir);
     g_view_path = dir + "/view.txt";
     gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
-    gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale);
+    gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale, g_vrcfg.hud_band, g_vrcfg.hud_band_scale);
+    gx::render_set_eye_filter(vr::game_hooks().eye_filter);
     gx::render_set_panel_band(g_vrcfg.panel_band);
     static std::string dump_dir;
     if (g_vrcfg.dump_every > 0) {

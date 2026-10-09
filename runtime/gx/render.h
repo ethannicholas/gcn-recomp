@@ -31,6 +31,10 @@ struct TexData {
     uint32_t id;
     uint32_t width, height;
     std::vector<std::vector<uint32_t>> levels;  // RGBA8, row 0 = top
+    // A hash of the texels and of the palette entries they use: the same texture gets the
+    // same hash in every run, where `id` is only the order it was decoded in. What a game
+    // project names a texture by (a draw filter that hides a model's materials, say).
+    uint64_t hash = 0;
 };
 
 // Everything the pixel pipeline needs for a draw.
@@ -52,6 +56,22 @@ struct PixelState {
     // standing in the water between the viewer and the racer.
     uint8_t view_space;
 };
+
+// A game's own say over what an eye draws, on top of the eye hook: called once per pixel
+// state per frame, before the eye passes, with what the renderer knows of a draw that a
+// game's rule might turn on, and returns true to leave that state's draws out of the
+// eyes. The flat view is untouched; a hidden draw's textures are kept alive. For a game
+// that hides a model's materials (by TexData::hash, the same in every run) or an effect
+// that cannot be re-projected (a screen-space refraction of part of the frame).
+struct EyeDrawFacts {
+    bool ortho;                   // an orthographic draw: a 2D element, painted on the HUD frame
+    bool indirect;                // uses indirect texturing (a warp or a ripple)
+    bool samples_copy;            // samples an EFB copy
+    bool samples_fullscreen_copy; // ... of the whole frame, which an eye substitutes its own grab for
+    float band_lo, band_hi;       // the viewport's depth band
+    uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
+};
+using EyeFilter = bool (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };
 

@@ -36,6 +36,8 @@ VrConfig vr_config_load(const std::string& dir, const VrConfig& defaults) {
         else if (!strcmp(key, "background_band")) c.background_band = (float)val;
         else if (!strcmp(key, "foreground_band")) c.foreground_band = (float)val;
         else if (!strcmp(key, "foreground_scale")) c.foreground_scale = (float)val;
+        else if (!strcmp(key, "hud_band")) c.hud_band = (float)val;
+        else if (!strcmp(key, "hud_band_scale")) c.hud_band_scale = (float)val;
         else if (!strcmp(key, "theater_scale")) c.theater_scale = (int)val;
         else if (!strcmp(key, "stereo_scale")) c.stereo_scale = (int)val;
         else if (!strcmp(key, "eye_scale")) c.eye_scale = (float)val;
@@ -55,10 +57,11 @@ VrConfig vr_config_load(const std::string& dir, const VrConfig& defaults) {
     fclose(f);
     fprintf(stderr,
             "vr.txt: units_per_metre=%.2f offset=(%.2f,%.2f,%.2f) near=%.3fm far=%.0fm "
-            "hud=%.3f@%.1fm height=%.2fm pitch=%.1fdeg world_pitch=%.1fdeg layers=%.4f/%.4fx%.2f "
+            "hud=%.3f@%.1fm height=%.2fm pitch=%.1fdeg world_pitch=%.1fdeg layers=%.4f/%.4fx%.2f hud_band=%.5fx%.2f "
             "scale=%d/%d eyes=%.2fx msaa=%d stereo_at_start=%d first_person=%d transition=%.2fs/%.2fs theater_stereo=%d panel_band=%.5f depth=%.2f\n",
             c.units_per_metre, c.offset_x, c.offset_y, c.offset_z, c.near_m, c.far_m,
             c.hud_scale, c.hud_distance_m, c.hud_height_m, c.hud_pitch_deg, c.world_pitch_deg, c.background_band, c.foreground_band, c.foreground_scale,
+            c.hud_band, c.hud_band_scale,
             c.theater_scale, c.stereo_scale, c.eye_scale, c.msaa, (int)c.start_in_stereo,
             (int)c.first_person, c.transition_s, c.transition_out_s < 0.0f ? c.transition_s : c.transition_out_s,
             (int)c.theater_stereo, c.panel_band, c.theater_depth);

@@ -54,6 +54,11 @@ static bool g_eye_mode = false;
 static bool g_fast = false;
 static float g_eye_yaw = 0.0f;  // --eye-yaw: degrees of head turn, for spotting head-locked draws
 static float g_eye_pitch = 0.0f;  // --eye-pitch: degrees of looking down
+// --eye-fov=UP,DOWN: the eye's field above and below its axis, in degrees (45,45 by
+// default). A headset's is asymmetric -- a Quest 3 sees further down than up -- and the
+// HUD frame is sized from the larger of the two, so a 2D element's placement against the
+// world can only be checked with the field the headset has.
+static float g_eye_fov_up = 45.0f, g_eye_fov_down = 45.0f;
 static GLuint g_eye_fbo, g_eye_tex, g_eye_depth;
 static int g_eye_w = 960, g_eye_h = 720;
 
@@ -104,13 +109,20 @@ static void eye_init() {
 // Column-major, matching glUniformMatrix4fv with transpose = GL_FALSE. The game's view
 // space is -Z forward, so this is an ordinary GL perspective in game units.
 static void eye_matrices(float* proj, float* view, float* hud) {
-    const float fov = 1.0f;          // tan(45 deg): a 90 degree vertical field
+    // The field: tan_up above the axis, tan_down below, the width in proportion to the
+    // target. The frame the HUD hangs on is sized from the larger, as the app sizes it.
+    const float tan_up = tanf(g_eye_fov_up * 3.14159265f / 180.0f);
+    const float tan_down = tanf(g_eye_fov_down * 3.14159265f / 180.0f);
+    const float fov = fmaxf(tan_up, tan_down);
     const float aspect = (float)g_eye_w / (float)g_eye_h;
+    const float half_w = 0.5f * (tan_up + tan_down) * aspect;
     const float u = g_vrcfg.units_per_metre;
     const float n = g_vrcfg.near_m * u, f = g_vrcfg.far_m * u;
     memset(proj, 0, 16 * sizeof(float));
-    proj[0] = 1.0f / (fov * aspect);
-    proj[5] = 1.0f / fov;
+    // An off-axis frustum: [-half_w, half_w] across, [-tan_down, tan_up] up.
+    proj[0] = 1.0f / half_w;
+    proj[5] = 2.0f / (tan_up + tan_down);
+    proj[9] = (tan_up - tan_down) / (tan_up + tan_down);
     proj[10] = -(f + n) / (f - n);
     proj[11] = -1.0f;
     proj[14] = -(2.0f * f * n) / (f - n);
@@ -155,10 +167,10 @@ static void eye_matrices(float* proj, float* view, float* hud) {
         ev[e].rot[1] = sy * cx;
         ev[e].rot[2] = -sy * sx;
         ev[e].rot[3] = cy * cx;
-        ev[e].tan_left = -fov * aspect;
-        ev[e].tan_right = fov * aspect;
-        ev[e].tan_up = fov;
-        ev[e].tan_down = -fov;
+        ev[e].tan_left = -half_w;
+        ev[e].tan_right = half_w;
+        ev[e].tan_up = tan_up;
+        ev[e].tan_down = -tan_down;
     }
     const float sep = g_eye_count > 1 ? 0.064f * u : 0.0f;
     ev[0].pos[0] = ev[0].pos[1] = ev[0].pos[2] = 0.0f;
@@ -372,6 +384,11 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--fast")) g_fast = true;
         else if (!strncmp(argv[i], "--eye-yaw=", 10)) g_eye_yaw = (float)atof(argv[i] + 10);
         else if (!strncmp(argv[i], "--eye-pitch=", 12)) g_eye_pitch = (float)atof(argv[i] + 12);
+        else if (!strncmp(argv[i], "--eye-fov=", 10)) {
+            g_eye_fov_up = (float)atof(argv[i] + 10);
+            const char* comma = strchr(argv[i] + 10, ',');
+            g_eye_fov_down = comma ? (float)atof(comma + 1) : g_eye_fov_up;
+        }
         else if (!strncmp(argv[i], "--eye-size=", 11)) sscanf(argv[i] + 11, "%dx%d", &g_eye_w, &g_eye_h);
         else if (!strncmp(argv[i], "--eyes=", 7)) g_eye_count = atoi(argv[i] + 7);
         else if (!strncmp(argv[i], "--msaa=", 7)) g_eye_msaa = atoi(argv[i] + 7);
@@ -429,7 +446,8 @@ int main(int argc, char** argv) {
         eye_init();
         gpu_timer_init();
         gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
-        gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale);
+        gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale, g_vrcfg.hud_band, g_vrcfg.hud_band_scale);
+        gx::render_set_eye_filter(vr::game_hooks().eye_filter);
         gx::render_set_panel_band(g_vrcfg.panel_band);
         if (const char* s = getenv("GCN_EYE_MORPH")) {
             for (const char* q = s; *q;) {
@@ -514,11 +532,15 @@ int main(int argc, char** argv) {
         if (auto b = gx::take_batch(4)) {
             // GCN_STEREOLOG=1 prints what the game's stereo hook answers whenever the answer
             // changes, which is how a hook is checked against dumped frames without a headset.
+            // Asked every frame whether or not it is logged, as the app asks it: a game's
+            // hook may do its render-thread work here (finding the camera it answers from,
+            // say), which the game's other hooks then rely on. Without this the scan visor
+            // followed the head on the headset but not in the harness.
             static const bool stereolog = getenv("GCN_STEREOLOG") != nullptr;
-            if (stereolog && vr::game_hooks().wants_stereo) {
+            if (vr::game_hooks().wants_stereo) {
                 static int last = -1;
                 const int want = vr::game_hooks().wants_stereo(*b) ? 1 : 0;
-                if (want != last) {
+                if (stereolog && want != last) {
                     last = want;
                     fprintf(stderr, "[stereo] frame %u: %s\n", presented, want ? "stereo" : "theater");
                 }

@@ -237,6 +237,21 @@ off by default.
   by `foreground_scale`. A game models a weapon or a visor large and far off, because a flat
   picture shows only angular size; scaling about the camera keeps that angular size in each
   eye and brings it nearer, so it reads smaller.
+- **HUD** (a band ending at or before `hud_band`, inside the foreground's) is scaled by
+  `hud_band_scale` instead, for a game whose HUD is geometry in a band of its own: modelled
+  twenty units out, at the weapon's scale it stood ten metres off, a billboard; at a tenth
+  it is at arm's length, the same angular size, with the weapon where it was.
+
+A game can also leave draws out of the eyes altogether (`vr::GameHooks::eye_filter`, a
+`gx::EyeFilter`): the renderer asks it once per pixel state per frame, with what it knows
+of the draw -- orthographic or not, indirect texturing, whether it samples an EFB copy and
+whether of the whole frame, the depth band, and each texture's content hash
+(`TexData::hash`, the same in every run, printed by `GCN_DRAWLOG` and `GCN_TEXLOG`). The
+flat view is untouched. What a game uses it for: the materials of a helmet model drawn in
+the HUD's band, which on a television is the picture's edge and in a headset is a frame in
+mid-air; and a screen-space ripple -- a copy of part of the frame drawn back over itself
+orthographically through an indirect texture -- which the eyes would paint on the HUD frame
+as a distorted square in the air, since an ortho draw has no depth to give it.
 
 A foreground layer also keeps the game's own depth inside its band (`u_vr` 4 in the vertex
 shader): the depth the flat view writes, from the camera's position and the game's

@@ -74,7 +74,18 @@ void render_set_world_pitch(float pitch_rad);
 // or a visor, modelled large and far off because a flat picture shows only angular size --
 // and is scaled towards the camera by `foreground_scale`, keeping its angular size in each
 // eye. 0 turns either off, which is the default.
-void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale);
+// A third layer, for a game whose HUD is geometry in a band of its own nearer than the
+// weapon's: a perspective draw confined to depths no further than `hud_to` is scaled
+// towards the camera by `hud_scale` instead, which is how such a HUD, modelled far out in
+// view space, is brought to arm's length without moving the weapon. 0 turns it off.
+void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale,
+                             float hud_to = 0.0f, float hud_scale = 1.0f);
+
+// A game's draw filter for the eyes (gx::EyeFilter in render.h), installed by the
+// frontend from vr::GameHooks::eye_filter.
+void render_set_eye_filter(EyeFilter filter);
+// A decoded texture's content hash (TexData::hash), 0 for an id the renderer does not hold.
+uint64_t render_texture_hash(uint32_t id);
 
 // The game's own eye. The renderer knows how to re-project a batch for an eye and how to
 // take the chase camera's pitch out of the world; where else an eye might stand -- on the

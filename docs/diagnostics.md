@@ -74,7 +74,10 @@ directory holding the image (`game.iso` or `game.ciso`). `--dump-dir`/`--dump-ev
 the stereo path instead, with the VR settings the headset uses (the game's defaults, then
 `./vr.txt` if present): `--eyes=2` renders both eyes, `--eye-size=WxH` and `--msaa=N` match
 the headset's target, `--eye-yaw=deg`/`--eye-pitch=deg` turn the head (dump at two yaws:
-anything that does not move is head-locked), and `--first-person` with `--fp-window=a-b`
+anything that does not move is head-locked), `--eye-fov=UP,DOWN` gives the eye a
+headset's asymmetric field in degrees (45,45 by default; a Quest 3's is about 43,52, and
+the HUD frame is sized from the larger, so where a 2D element lands against the world can
+only be checked with the field the headset has), and `--first-person` with `--fp-window=a-b`
 calls the game's `set_first_person` hook. `GCN_EYE_GPU=1` times the eye passes,
 `GCN_EYE_MORPH=0,0.5,1` dumps the theater/stereo morph at those points beside the flat
 frame, and `GCN_STEREOLOG=1` prints the game's `wants_stereo` answer whenever it changes.
@@ -195,7 +198,9 @@ use, which every lookup prolonged.
 
 ## Finding a draw or a function
 
-- `GCN_DRAWLOG=<frame>` lists every draw in one frame with its index; `GCN_DRAW_SKIP=a-b`
+- `GCN_DRAWLOG=<frame>` lists every draw in one frame with its index, its depth band and
+  view-space box, and its textures by id and content hash (the hash is the same in every
+  run; an EFB copy is starred); `GCN_DRAW_SKIP=a-b`
   then drops a range of them, to attribute a piece of the image to the draws that made it.
   `GCN_DRAWLOG_VERBOSE=1` adds each draw's TEV setup (stage orders, colour and alpha
   combiners, konst selectors, the colour registers and konsts, alpha test, Z and blend

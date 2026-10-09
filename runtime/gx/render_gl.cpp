@@ -58,7 +58,7 @@ static inline void set_lod_bias(GLuint s, float bias) {
 struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
-    uint8_t view_space, background, foreground, fg_layer;
+    uint8_t view_space, background, foreground, fg_layer, hud_layer;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
@@ -107,6 +107,13 @@ static float g_bg_from = 0.0f;
 static float g_fg_to = 0.0f;
 static float g_fg_scale = 1.0f;
 static float g_vr_view_fg[16], g_vr_view_world_fg[16];
+// A HUD layer: the same, for a perspective draw confined to depths no further than
+// g_hud_to, with its own scale -- a game that models its HUD as geometry a long way out
+// in view space, in a band of its own nearer than the weapon's, wants it nearer than the
+// weapon's scale would put it. Takes precedence over the foreground. 0 is off.
+static float g_hud_to = 0.0f;
+static float g_hud_scale = 1.0f;
+static float g_vr_view_hud[16], g_vr_view_world_hud[16];
 static float g_world_pitch = 0.0f;
 static float g_vr_hud[16];
 // What the HUD frame goes through before the eye's view: the identity, unless the game's
@@ -122,6 +129,7 @@ static float g_world_xform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
 // First person (render_set_first_person): while on, the game's eye hook is asked per frame
 // where the eye stands, and g_eye_overridden says it answered for the frame being drawn.
 static EyeHook g_eye_hook = nullptr;
+static EyeFilter g_eye_filter = nullptr;
 static bool g_fp_on = false;
 static bool g_eye_overridden = false;
 // Per command of the batch being drawn: 1 for a draw the game's eye leaves out (the
@@ -203,7 +211,7 @@ static std::unordered_map<ShaderKey, Program, ShaderKeyHash> g_programs;
 // -- a fog volume showed it as bright specks along a waterline -- so it is always sampled
 // nearest. (At the console's own resolution a full-screen quad lands on texel centres and
 // a filter changes nothing; at a higher internal scale it does not.)
-struct GlTex { GLuint tex; uint32_t w, h, levels; bool efb; bool grab; bool depth; uint32_t last_used; };
+struct GlTex { GLuint tex; uint32_t w, h, levels; bool efb; bool grab; bool depth; uint32_t last_used; uint64_t hash; };
 static std::unordered_map<uint32_t, GlTex> g_textures;
 // Frames counted here rather than reusing the GX frame counter, so eviction works the
 // same for any frontend. Textures the game stops using are released: a race streams
@@ -787,11 +795,17 @@ void render_set_internal_scale(int scale) {
 }
 
 // ---------------------------------------------------------------------------
+uint64_t render_texture_hash(uint32_t id) {
+    auto it = g_textures.find(id);
+    return it == g_textures.end() ? 0 : it->second.hash;
+}
+
 static void upload_texture(const TexData& t) {
     GlTex g{};
     glGenTextures(1, &g.tex);
     glBindTexture(GL_TEXTURE_2D, g.tex);
     g.w = t.width; g.h = t.height;
+    g.hash = t.hash;
     uint32_t w = t.width, h = t.height;
     for (size_t l = 0; l < t.levels.size(); l++) {
         glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t.levels[l].data());
@@ -856,6 +870,8 @@ static const GLenum kBlendSrc[8] = {GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_
 static const GLenum kBlendDst[8] = {GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
 static const GLenum kDepthFunc[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
 static bool samples_fullscreen_copy(const PixelState& st);
+static bool is_fullscreen_tex(uint32_t id);
+static void note_fullscreen_copies(const Batch& b);
 
 // The origin that the scissor box and the viewport are both measured from, in EFB pixels.
 //
@@ -1098,13 +1114,15 @@ static void apply_state(const PixelState& st, int prim) {
     const float band_hi = st.viewport[5] / 16777215.0f;
     const bool background = sky_at_infinity && g_bg_from > 0.0f && perspective && !st.view_space &&
                             band_lo >= g_bg_from;
-    const bool foreground = g_fg_to > 0.0f && g_fg_scale != 1.0f && perspective && band_hi <= g_fg_to;
+    // The HUD layer takes precedence over the foreground, whose band it sits inside.
+    const bool hud_layer = g_hud_to > 0.0f && g_hud_scale != 1.0f && perspective && band_hi <= g_hud_to;
+    const bool foreground = !hud_layer && g_fg_to > 0.0f && g_fg_scale != 1.0f && perspective && band_hi <= g_fg_to;
     // A foreground layer also keeps the game's own depth within its band (u_vr 4 in the
     // vertex shader), whether or not it is scaled.
     const bool fg_layer = g_fg_to > 0.0f && perspective && band_hi <= g_fg_to;
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
-                           foreground == u.foreground && fg_layer == u.fg_layer;
+                           foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer;
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -1126,8 +1144,8 @@ static void apply_state(const PixelState& st, int prim) {
             // A camera-placed 3D object is viewed with the head transform but without the
             // world's pitch correction; see view_space_3d above.
             const float* view = background ? g_vr_view_sky
-                              : view_space_3d ? (foreground ? g_vr_view_fg : g_vr_view)
-                              : (foreground ? g_vr_view_world_fg : g_vr_view_world);
+                              : view_space_3d ? (hud_layer ? g_vr_view_hud : foreground ? g_vr_view_fg : g_vr_view)
+                              : (hud_layer ? g_vr_view_world_hud : foreground ? g_vr_view_world_fg : g_vr_view_world);
             // GCN_EYE_GAMEPROJ keeps the game's own frustum and applies only the head
             // transform, which tells apart "the eye sees less than it should" from "the game
             // never drew anything out there".
@@ -1193,6 +1211,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.background = background;
         u.foreground = foreground;
         u.fg_layer = fg_layer;
+        u.hud_layer = hud_layer;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
@@ -1699,6 +1718,9 @@ static void compose_world_view() {
     const float S[16] = {g_fg_scale, 0, 0, 0, 0, g_fg_scale, 0, 0, 0, 0, g_fg_scale, 0, 0, 0, 0, 1};
     mat4_mul(g_vr_view, S, g_vr_view_fg);
     mat4_mul(g_vr_view_world, S, g_vr_view_world_fg);
+    const float H[16] = {g_hud_scale, 0, 0, 0, 0, g_hud_scale, 0, 0, 0, 0, g_hud_scale, 0, 0, 0, 0, 1};
+    mat4_mul(g_vr_view, H, g_vr_view_hud);
+    mat4_mul(g_vr_view_world, H, g_vr_view_world_hud);
     mat4_mul(g_hud_xform, g_vr_hud, g_vr_hud_eff);
 }
 
@@ -1713,14 +1735,37 @@ void render_set_world_pitch(float pitch_rad) {
     compose_world_view();
 }
 
-void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale) {
+void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale,
+                             float hud_to, float hud_scale) {
     g_bg_from = background_from;
     g_fg_to = foreground_to;
     g_fg_scale = foreground_scale > 0.0f ? foreground_scale : 1.0f;
+    g_hud_to = hud_to;
+    g_hud_scale = hud_scale > 0.0f ? hud_scale : 1.0f;
     compose_world_view();
 }
 
 void render_set_eye_hook(EyeHook hook) { g_eye_hook = hook; }
+void render_set_eye_filter(EyeFilter filter) { g_eye_filter = filter; }
+
+// What an eye filter is told about a draw; see EyeFilter.
+static EyeDrawFacts draw_facts(const PixelState& st) {
+    EyeDrawFacts f{};
+    f.ortho = (int)st.proj[6] != 0;
+    f.indirect = ((st.bp[0x00] >> 16) & 7) != 0;
+    f.band_hi = st.viewport[5] / 16777215.0f;
+    f.band_lo = (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f;
+    for (int i = 0; i < 8; i++) {
+        if (!st.tex_id[i]) continue;
+        if (st.tex_is_efb[i]) {
+            f.samples_copy = true;
+            if (is_fullscreen_tex(st.tex_id[i])) f.samples_fullscreen_copy = true;
+        } else {
+            f.tex_hash[i] = render_texture_hash(st.tex_id[i]);
+        }
+    }
+    return f;
+}
 
 void render_set_first_person(bool on) {
     g_fp_on = on;
@@ -1753,9 +1798,23 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         memcpy(g_hud_xform, o.hud_to_eye, sizeof(g_hud_xform));
         g_hide.swap(o.hide);
         g_eye_overridden = true;
-        return;
+    } else {
+        world_pitch_matrix(g_world_xform);
     }
-    world_pitch_matrix(g_world_xform);
+    // The game's draw filter, on top of whatever the eye hook hid. A draw's facts are
+    // the state's, so each state is asked once and its answer stands for its draws.
+    if (!g_eye_filter) return;
+    note_fullscreen_copies(b);
+    std::vector<int8_t> answer(b.states.size(), -1);
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || skip[i]) continue;
+        int8_t& a = answer[c.state];
+        if (a < 0) a = g_eye_filter(b.states[c.state], draw_facts(b.states[c.state])) ? 1 : 0;
+        if (!a) continue;
+        if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
+        g_hide[i] = 1;
+    }
 }
 
 void render_set_vr_morph(float t, const float panel[16]) {
@@ -2487,9 +2546,13 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi,
                         at_origin, slivers, sliver_text.c_str());
                 if (slivers) fprintf(stderr, "\n       ");
-                for (int i = 0; i < 8; i++)
-                    if (st.tex_id[i]) fprintf(stderr, " t%d=%u%s", i, st.tex_id[i],
-                                              st.tex_is_efb[i] ? "*" : "");
+                // Each texture by id and, for a decoded one, by its content hash, which is
+                // the same in every run (TexData::hash); an EFB copy is starred.
+                for (int i = 0; i < 8; i++) {
+                    if (!st.tex_id[i]) continue;
+                    if (st.tex_is_efb[i]) fprintf(stderr, " t%d=%u*", i, st.tex_id[i]);
+                    else fprintf(stderr, " t%d=%u[%016llx]", i, st.tex_id[i], (unsigned long long)render_texture_hash(st.tex_id[i]));
+                }
                 fprintf(stderr, "\n");
                 // GCN_DRAWLOG_VERBOSE=1 adds the TEV setup -- stage count, each stage's
                 // order, colour and alpha combiners and konst selectors, the colour

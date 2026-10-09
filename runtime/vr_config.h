@@ -60,6 +60,11 @@ struct VrConfig {
     float background_band = 0.0f;
     float foreground_band = 0.0f;
     float foreground_scale = 1.0f;
+    // And a HUD layer inside the foreground's band: draws no further than `hud_band` are
+    // scaled towards the eye by `hud_band_scale` instead, for a HUD modelled as geometry
+    // far out in view space that should read at arm's length. 0 turns it off.
+    float hud_band = 0.0f;
+    float hud_band_scale = 1.0f;
 
     // How many samples the EFB keeps per hardware pixel, in each axis, in each view.
     // In theater the EFB *is* the picture, so more samples are filtered down into the

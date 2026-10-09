@@ -420,6 +420,7 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
     td->id = g_next_tex_id++;
     td->width = p.width;
     td->height = p.height;
+    td->hash = e.hash ^ (pal_hash * 0x9E3779B97F4A7C15ull);
     w = p.width; h = p.height;
     for (uint32_t l = 0; l < p.levels; l++) {
         std::vector<uint32_t> px(w * h);
@@ -438,8 +439,9 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
     if (texlog) {
         uint32_t nonzero = 0;
         for (uint32_t v : td->levels[0]) nonzero += (v & 0x00FFFFFF) != 0;
-        fprintf(stderr, "[tex] f%u id=%u addr=%08X fmt=%u %ux%u levels=%u nonblack=%u/%zu",
-                g_frame_counter, td->id, addr, p.fmt, p.width, p.height, p.levels, nonzero, td->levels[0].size());
+        fprintf(stderr, "[tex] f%u id=%u hash=%016llx addr=%08X fmt=%u %ux%u levels=%u nonblack=%u/%zu",
+                g_frame_counter, td->id, (unsigned long long)td->hash, addr, p.fmt, p.width, p.height, p.levels,
+                nonzero, td->levels[0].size());
         if (indexed) {
             // The palette entries the texels use, decoded: which ones a glyph lands on is
             // what decides what colour it comes out.

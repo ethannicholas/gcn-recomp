@@ -9,8 +9,8 @@
 // wants_stereo answers, against frames that can be dumped and looked at.
 #pragma once
 #include "vr_config.h"
+#include "gx/render.h"
 
-namespace gx { struct Batch; }
 struct PadState;
 
 namespace vr {
@@ -42,6 +42,10 @@ struct GameHooks {
     // game and not another. The desktop frontend has its own controllers and does not
     // call it.
     void (*map_pad)(PadState& p) = nullptr;
+
+    // The game's say over what the eyes draw: a filter the frontend installs in the
+    // renderer (gx::EyeFilter, with what it is told, in gx/render.h). Null hides nothing.
+    gx::EyeFilter eye_filter = nullptr;
 };
 
 void set_game_hooks(const GameHooks& h);
