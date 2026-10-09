@@ -65,6 +65,11 @@ behaviour for comparison:
   spray-sized grab the eye substitutes its own grab for does not count as read; a copy with
   no reader this frame does, since a game may sample it in a later one. For a first-person
   game that is nearly the whole main scene left out. `GCN_EYE_FULLFLAT=1` draws it all.
+  Eye frames in play are byte-identical with and without the trim; a cinematic's are
+  not quite, a handful of pixels a frame off by up to three of 255, the same pixels every
+  run, so something the full flat pass leaves behind still reaches the eye there. The
+  uniform shadows are not it (the old apply path shows the same pixels) and nor are the
+  copies, which are never left out. Not found yet; `GCN_EYE_FULLFLAT=1` is the control.
 - **Uniforms are shadowed per program** (`UniformShadow`). A uniform keeps its value in its
   program across switches, so a group whose inputs match what that program already holds is
   not re-uploaded, whether or not the program just changed. Two generation counters say when
