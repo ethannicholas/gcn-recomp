@@ -74,6 +74,11 @@ struct VrConfig {
     float eye_scale = 1.4f;
     int msaa = 4;
 
+    // Ask the runtime for its highest CPU and GPU levels (XR_EXT_performance_settings'
+    // boost) rather than leaving them to its own governor, which on a Quest 3 held the GPU
+    // two or three steps below its top clock while a heavy scene missed frames.
+    bool perf_boost = true;
+
     // Trace the theater path one display frame at a time (adb logcat -s <game>).
     bool log_frames = false;
 

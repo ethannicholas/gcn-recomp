@@ -33,6 +33,8 @@
 #include <openxr/openxr_platform.h>
 
 #include <dlfcn.h>
+#include <algorithm>
+#include <chrono>
 #include <pthread.h>
 #include <unistd.h>
 #include <cmath>
@@ -135,6 +137,7 @@ struct Xr {
     XrInstance instance = XR_NULL_HANDLE;
     XrSystemId system = XR_NULL_SYSTEM_ID;
     XrSession session = XR_NULL_HANDLE;
+    bool has_perf_settings = false;   // XR_EXT_performance_settings
     XrSpace space = XR_NULL_HANDLE;
     XrSwapchain swapchain = XR_NULL_HANDLE;          // the theater quad
     std::vector<XrSwapchainImageOpenGLESKHR> images;
@@ -263,16 +266,28 @@ static bool xr_create_instance(android_app* app) {
     init.applicationContext = app->activity->clazz;
     XR_TRY(xrInitializeLoaderKHR((const XrLoaderInitInfoBaseHeaderKHR*)&init));
 
-    const char* exts[] = {XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
-                          XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME};
+    std::vector<const char*> exts = {XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
+                                     XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME};
+    // Optional ones, enabled only where the runtime has them.
+    {
+        uint32_t n = 0;
+        xrEnumerateInstanceExtensionProperties(nullptr, 0, &n, nullptr);
+        std::vector<XrExtensionProperties> props(n, {XR_TYPE_EXTENSION_PROPERTIES});
+        xrEnumerateInstanceExtensionProperties(nullptr, n, &n, props.data());
+        for (const auto& e : props)
+            if (!strcmp(e.extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME)) {
+                exts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+                g_xr.has_perf_settings = true;
+            }
+    }
     XrInstanceCreateInfoAndroidKHR android_info{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     android_info.applicationVM = app->activity->vm;
     android_info.applicationActivity = app->activity->clazz;
 
     XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
     ci.next = &android_info;
-    ci.enabledExtensionCount = 2;
-    ci.enabledExtensionNames = exts;
+    ci.enabledExtensionCount = (uint32_t)exts.size();
+    ci.enabledExtensionNames = exts.data();
     snprintf(ci.applicationInfo.applicationName, sizeof(ci.applicationInfo.applicationName),
              "%s", GCN_GAME_TITLE);
     strcpy(ci.applicationInfo.engineName, "gcn-recomp");
@@ -304,6 +319,18 @@ static bool xr_create_session() {
     ci.next = &bind;
     ci.systemId = g_xr.system;
     XR_TRY(xrCreateSession(g_xr.instance, &ci, &g_xr.session));
+
+    // perf_boost: the highest CPU and GPU levels, instead of the runtime's governor.
+    if (g_xr.has_perf_settings && g_vrcfg.perf_boost) {
+        PFN_xrPerfSettingsSetPerformanceLevelEXT set_level = nullptr;
+        xrGetInstanceProcAddr(g_xr.instance, "xrPerfSettingsSetPerformanceLevelEXT",
+                              (PFN_xrVoidFunction*)&set_level);
+        if (set_level) {
+            const XrResult cpu = set_level(g_xr.session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_BOOST_EXT);
+            const XrResult gpu = set_level(g_xr.session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_BOOST_EXT);
+            LOGI("performance levels: boost (cpu %d, gpu %d)", (int)cpu, (int)gpu);
+        }
+    }
 
     XrReferenceSpaceCreateInfo sp{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     sp.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
@@ -840,6 +867,11 @@ void android_main(android_app* app) {
     LOGI("game started");
 
     uint32_t xr_frames = 0, game_frames = 0, skipped = 0;
+    // For the stats line: the longest wait between game frames, and the render thread's
+    // time for each stereo frame, in milliseconds.
+    double gap_max = 0, eyes_sum = 0, eyes_max = 0;
+    uint32_t eyes_n = 0;
+    auto last_game_frame = std::chrono::steady_clock::now();
     uint64_t disp_frames = 0;  // monotonic, unlike xr_frames which the stats line resets
     bool have_content = false;
     bool stereo = g_vrcfg.start_in_stereo, toggle_was_down = false, stereo_toggle_was_down = false;
@@ -991,6 +1023,9 @@ void android_main(android_app* app) {
         std::unique_ptr<gx::Batch> batch = gx::take_batch(0);
         if (batch) {
             game_frames++;
+            const auto now = std::chrono::steady_clock::now();
+            gap_max = std::max(gap_max, std::chrono::duration<double, std::milli>(now - last_game_frame).count());
+            last_game_frame = now;
             // Which view to present, when the game says. The view follows a *change* in the
             // game's answer, so a click on the left thumbstick holds until the game next
             // changes its mind. A change is held for two game frames before the view
@@ -1067,6 +1102,7 @@ void android_main(android_app* app) {
             // releasing an image without drawing into it hands the compositor whatever
             // that image held several frames ago, which reads as a hard strobe.
             if (batch && XR_SUCCEEDED(xrLocateViews(g_xr.session, &li, &vs, 2, &nv, views)) && nv == 2) {
+                const auto t_eyes = std::chrono::steady_clock::now();
                 // Both eyes share one batch: the CPU-side transform and the vertex
                 // buffer are produced once, only the uniforms and draws repeat.
                 gx::Batch* b = batch.get();
@@ -1133,6 +1169,10 @@ void android_main(android_app* app) {
                 // A half-filled projection layer is invalid, so only keep it when both
                 // eyes were acquired.
                 if (both_eyes) have_proj = true;
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_eyes).count();
+                eyes_sum += ms;
+                eyes_max = std::max(eyes_max, ms);
+                eyes_n++;
             }
         } else if (fs.shouldRender) {
             publish_hands(0, false);
@@ -1259,10 +1299,15 @@ void android_main(android_app* app) {
 
         xr_frames++;
         disp_frames++;
-        if (fs.predictedDisplayTime - last_report > 5000000000LL) {  // 5 s in ns
-            LOGI("compositor %u frames, game %u frames, %u not rendered",
-                 xr_frames, game_frames, skipped);
+        // Every second: what the viewer got. The compositor's own line (VrApi FPS=) has
+        // the clocks and the GPU's load beside it in logcat.
+        if (fs.predictedDisplayTime - last_report > 1000000000LL) {  // 1 s in ns
+            LOGI("compositor %u frames, game %u frames (longest gap %.0f ms), %u not rendered; "
+                 "stereo render thread %.1f ms mean, %.1f max",
+                 xr_frames, game_frames, gap_max, skipped, eyes_n ? eyes_sum / eyes_n : 0.0, eyes_max);
             xr_frames = game_frames = skipped = 0;
+            gap_max = eyes_sum = eyes_max = 0;
+            eyes_n = 0;
             last_report = fs.predictedDisplayTime;
         }
     }
