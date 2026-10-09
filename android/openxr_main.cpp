@@ -139,6 +139,11 @@ struct Xr {
     XrSwapchain swapchain = XR_NULL_HANDLE;          // the theater quad
     std::vector<XrSwapchainImageOpenGLESKHR> images;
     std::vector<GLuint> fbos;
+    // The right eye's panel, when theater is a stereo pair (theater_stereo); the one
+    // above is then the left eye's.
+    XrSwapchain swapchain_r = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageOpenGLESKHR> images_r;
+    std::vector<GLuint> fbos_r;
 
     // One swapchain per eye for the stereo projection layer.
     struct Eye {
@@ -354,34 +359,43 @@ static bool xr_create_swapchain() {
         g_swap_h = panel_w * 3 / 4;
     }
 
-    XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-    ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-    ci.format = chosen;
-    ci.sampleCount = 1;
-    ci.width = g_swap_w;
-    ci.height = g_swap_h;
-    ci.faceCount = 1;
-    ci.arraySize = 1;
-    ci.mipCount = 1;
-    XR_TRY(xrCreateSwapchain(g_xr.session, &ci, &g_xr.swapchain));
+    // The panel's swapchain, with one framebuffer per image so the renderer can blit
+    // straight in. Two of them when theater is a stereo pair.
+    auto make_panel = [&](XrSwapchain& sc, std::vector<XrSwapchainImageOpenGLESKHR>& images,
+                          std::vector<GLuint>& fbos, const char* what) -> bool {
+        XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+        ci.format = chosen;
+        ci.sampleCount = 1;
+        ci.width = g_swap_w;
+        ci.height = g_swap_h;
+        ci.faceCount = 1;
+        ci.arraySize = 1;
+        ci.mipCount = 1;
+        XR_TRY(xrCreateSwapchain(g_xr.session, &ci, &sc));
 
-    xrEnumerateSwapchainImages(g_xr.swapchain, 0, &n, nullptr);
-    g_xr.images.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
-    XR_TRY(xrEnumerateSwapchainImages(g_xr.swapchain, n, &n,
-                                      (XrSwapchainImageBaseHeader*)g_xr.images.data()));
+        uint32_t n = 0;
+        xrEnumerateSwapchainImages(sc, 0, &n, nullptr);
+        images.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+        XR_TRY(xrEnumerateSwapchainImages(sc, n, &n, (XrSwapchainImageBaseHeader*)images.data()));
 
-    // One framebuffer per swapchain image, so the renderer can blit straight in.
-    g_xr.fbos.resize(n);
-    glGenFramebuffers(n, g_xr.fbos.data());
-    for (uint32_t i = 0; i < n; i++) {
-        glBindFramebuffer(GL_FRAMEBUFFER, g_xr.fbos[i]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                               g_xr.images[i].image, 0);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-            LOGE("swapchain fbo %u incomplete", i);
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    LOGI("quad swapchain %dx%d, %u images", g_swap_w, g_swap_h, n);
+        fbos.resize(n);
+        glGenFramebuffers(n, fbos.data());
+        for (uint32_t i = 0; i < n; i++) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbos[i]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                   images[i].image, 0);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                LOGE("%s swapchain fbo %u incomplete", what, i);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        LOGI("%s swapchain %dx%d, %u images", what, g_swap_w, g_swap_h, n);
+        return true;
+    };
+    if (!make_panel(g_xr.swapchain, g_xr.images, g_xr.fbos, "quad")) return false;
+    if (g_vrcfg.theater_stereo &&
+        !make_panel(g_xr.swapchain_r, g_xr.images_r, g_xr.fbos_r, "right quad"))
+        return false;
 
     // Per-eye swapchains for the stereo projection layer, at what the runtime recommends
     // for this headset times `eye_scale`.
@@ -733,6 +747,7 @@ void android_main(android_app* app) {
     g_view_path = dir + "/view.txt";
     gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
     gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale);
+    gx::render_set_panel_band(g_vrcfg.panel_band);
     static std::string dump_dir;
     if (g_vrcfg.dump_every > 0) {
         dump_dir = dir + "/frames";
@@ -835,6 +850,9 @@ void android_main(android_app* app) {
     // Until it does, the eyes' last image stays up: it was rendered almost exactly flat,
     // and the panel's alternative is whatever it showed before stereo began.
     bool quad_fresh = !stereo;
+    // Whether the panel's last frame was drawn as a stereo pair (theater_stereo), so the
+    // right swapchain holds its other half.
+    bool quad_pair = false;
     // The panel in the eye's space, in game units: where theater hangs it, seen from where
     // mat_view puts the eye. It is in the headset's room, not the game's, so it takes the
     // viewpoint offset and nothing of the world's pitch.
@@ -1009,6 +1027,7 @@ void android_main(android_app* app) {
 
         std::vector<XrCompositionLayerBaseHeader*> layers;
         XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerQuad quad_r{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerProjection proj_layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
 
         if (fs.shouldRender && eyes) {
@@ -1102,17 +1121,47 @@ void android_main(android_app* app) {
             // meant cycling the swapchain under the compositor while it sampled, at the
             // one rate where a fade makes any mismatch visible. It also cost a full-screen
             // blit per display frame.
-            uint32_t idx = 0;
+            uint32_t idx = 0, idx_r = 0;
+            const bool pair = g_vrcfg.theater_stereo && g_xr.swapchain_r != XR_NULL_HANDLE;
             XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             if (batch && XR_SUCCEEDED(xrAcquireSwapchainImage(g_xr.swapchain, &ai, &idx))) {
                 XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
                 wi.timeout = XR_INFINITE_DURATION;
+                bool have_r = pair && XR_SUCCEEDED(xrAcquireSwapchainImage(g_xr.swapchain_r, &ai, &idx_r));
+                if (have_r && XR_FAILED(xrWaitSwapchainImage(g_xr.swapchain_r, &wi))) have_r = false;
                 if (XR_SUCCEEDED(xrWaitSwapchainImage(g_xr.swapchain, &wi))) {
-                    gx::render_set_output_fbo(g_xr.fbos[idx]);
                     // Consume at most one game frame per display frame; otherwise a
                     // backlog would be drawn and thrown away.
-                    const bool drew = gx::render_execute(*batch);
-                    gx::render_set_output_fbo(0);
+                    bool drew;
+                    if (have_r) {
+                        // The pair is separated by the viewer's own eyes, as the runtime
+                        // places them for this frame; a headset that will not say gets a
+                        // typical 63 mm. The panel's width in game units is what the
+                        // game's frustum is converged on.
+                        float sep = 0.063f;
+                        XrViewState vs{XR_TYPE_VIEW_STATE};
+                        uint32_t nv = 0;
+                        XrView views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+                        XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+                        li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                        li.displayTime = fs.predictedDisplayTime;
+                        li.space = g_xr.space;
+                        if (XR_SUCCEEDED(xrLocateViews(g_xr.session, &li, &vs, 2, &nv, views)) && nv == 2 &&
+                            (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)) {
+                            const float dx = views[1].pose.position.x - views[0].pose.position.x;
+                            const float dy = views[1].pose.position.y - views[0].pose.position.y;
+                            const float dz = views[1].pose.position.z - views[0].pose.position.z;
+                            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+                            if (d > 0.04f && d < 0.09f) sep = d;
+                        }
+                        const float u = g_vrcfg.units_per_metre;
+                        drew = gx::render_execute_stereo_pair(*batch, g_xr.fbos[idx], g_xr.fbos_r[idx_r],
+                                                              sep * g_vrcfg.theater_depth * u, kQuadW * u);
+                    } else {
+                        gx::render_set_output_fbo(g_xr.fbos[idx]);
+                        drew = gx::render_execute(*batch);
+                        gx::render_set_output_fbo(0);
+                    }
                     // `log_frames 1` in vr.txt traces the theater path one display frame
                     // at a time: which swapchain image was written, whether it got a new
                     // game frame or a repaint, and which game frame it is showing. The
@@ -1129,6 +1178,8 @@ void android_main(android_app* app) {
                 }
                 XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 xrReleaseSwapchainImage(g_xr.swapchain, &ri);
+                if (have_r) xrReleaseSwapchainImage(g_xr.swapchain_r, &ri);
+                quad_pair = have_r;
             }
         } else {
             skipped++;
@@ -1162,6 +1213,15 @@ void android_main(android_app* app) {
             quad.pose.position = {0, 0, -kQuadDist};
             quad.size = {kQuadW, kQuadH};
             layers.push_back((XrCompositionLayerBaseHeader*)&quad);
+            // A stereo pair: the same panel, one image per eye. The frame the panel
+            // last got decides, so a pair is never mixed with a single image.
+            if (quad_pair) {
+                quad.eyeVisibility = XR_EYE_VISIBILITY_LEFT;
+                quad_r = quad;
+                quad_r.eyeVisibility = XR_EYE_VISIBILITY_RIGHT;
+                quad_r.subImage.swapchain = g_xr.swapchain_r;
+                layers.push_back((XrCompositionLayerBaseHeader*)&quad_r);
+            }
         }
 
         XrFrameEndInfo fe{XR_TYPE_FRAME_END_INFO};

@@ -93,6 +93,22 @@ void render_set_first_person(bool on);
 // CPU-side transform and any render-to-texture results, so only uniforms and draw
 // calls are repeated. Pass do_copies for the first eye only.
 bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies);
+
+// The flat frame as a stereo pair for a theater panel, like a 3D film: the batch drawn
+// twice, into `fbo_l` then `fbo_r`, with every perspective draw seen from half `eye_sep`
+// to the side of the game's camera and its frustum sheared so that the depth at which it
+// is `panel_width` wide has no disparity -- the panel's own plane, so the panel is a
+// window -- and points at infinity have the eyes' full separation. Both in game units.
+// Orthographic draws, the 2D elements, are the same in both and sit on the panel. The
+// batch is uploaded once; the second pass redoes the EFB copies from its own EFB. The
+// frame dumps get `_l` and `_r` suffixes. Returns whether a frame was presented.
+bool render_execute_stereo_pair(Batch& b, unsigned fbo_l, unsigned fbo_r, float eye_sep,
+                                float panel_width);
+// In a stereo pair, a perspective draw the game confines to a band of the depth buffer no
+// deeper than `band` (its HUD layer, say) is drawn on the panel itself, with no disparity,
+// as a film's subtitles are; a draw with no band at all (a zero-width z range) is not
+// affected. 0, the default, pins nothing.
+void render_set_panel_band(float band);
 extern bool g_cull_swap;
 extern const char* g_dump_dir;
 extern int g_dump_every;

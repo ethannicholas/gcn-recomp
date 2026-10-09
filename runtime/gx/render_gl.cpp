@@ -128,6 +128,11 @@ static bool g_eye_overridden = false;
 static std::vector<uint8_t> g_hide;
 // The morph between theater and stereo; see render_set_vr_morph. 1 is plain stereo.
 static float g_morph = 1.0f;
+// A flat frame drawn as one of a stereo pair (render_execute_stereo_pair): where the eye
+// stands beside the game's camera, 0 for the plain flat frame, and half the width of the
+// panel the pair is shown on, both in game units.
+static float g_flat_eye = 0.0f, g_flat_halfw = 1.0f;
+static float g_panel_band = 0.0f;   // render_set_panel_band
 static float g_panel[16];
 // Whether the vertex shader can write clip distances, which is what crops the morph.
 static bool g_clip_ok = false;
@@ -1032,6 +1037,22 @@ static void apply_state(const PixelState& st, int prim) {
             mat4_mul(g_vr_proj, b, M);
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
             glUniform1i(pr.u_vr, 2);
+        } else if (g_flat_eye != 0.0f && perspective &&
+                   !(g_panel_band > 0.0f && band_hi > band_lo && band_hi <= g_panel_band)) {
+            // One of a stereo pair on the panel (a draw in the panel band falls through to
+            // the plain projection, and so sits on the panel). The view is moved g_flat_eye to the side,
+            // which shifts every point by -P00*e in clip x, and the frustum is sheared back
+            // by e/halfw per unit of depth, which cancels that at the depth where the
+            // frustum is as wide as the panel (D = P00 * halfw): a point there sits on the
+            // panel in both eyes, and the disparity of one at depth z is e * (1 - D/z) of
+            // the panel's half-width -- the eyes' own separation at infinity. In the
+            // vertex shader clip x is P00*x + P[8]*z + P[12], so both terms are in P.
+            float Q[16];
+            memcpy(Q, P, sizeof(Q));
+            Q[12] = -P[0] * g_flat_eye;
+            Q[8] -= g_flat_eye / g_flat_halfw;
+            glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, Q);
+            glUniform1i(pr.u_vr, 0);
         } else {
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, P);
             glUniform1i(pr.u_vr, 0);
@@ -1427,6 +1448,10 @@ static void do_efb_copy(const EfbCopyCmd& c) {
 const char* g_dump_dir = nullptr;
 int g_dump_every = 0;
 static uint32_t g_present_count;
+// The second pass of a stereo pair (render_execute_stereo_pair) presents the same frame
+// again: it is not counted twice, and its dump is told apart by a suffix.
+static bool g_pair_second = false;
+static const char* g_dump_suffix = "";
 
 static void dump_efb(const EfbCopyCmd& c) {
     int w = c.src_w * g_scale, h = c.src_h * g_scale;
@@ -1438,7 +1463,7 @@ static void dump_efb(const EfbCopyCmd& c) {
         for (int x = 0; x < w; x++) flipped[((size_t)y * w + x) * 4 + 3] = 255;
     }
     char path[512];
-    snprintf(path, sizeof(path), "%s/frame_%05u.png", g_dump_dir, g_present_count);
+    snprintf(path, sizeof(path), "%s/frame_%05u%s.png", g_dump_dir, g_present_count, g_dump_suffix);
     write_png(path, flipped.data(), w, h);
 }
 
@@ -1477,7 +1502,7 @@ static void blit_to_output(const EfbCopyCmd& c, GLuint src_tex) {
 }
 
 static void present(const EfbCopyCmd& c) {
-    g_present_count++;
+    if (!g_pair_second) g_present_count++;
     // GCN_DUMP_RANGE=a-b restricts dumping to a window of presented frames, so a short
     // stretch can be captured every single frame. Flicker is only visible frame by frame.
     static int range_lo = -1, range_hi = -1;
@@ -1732,7 +1757,8 @@ void render_hud_frame(float dist, float tan_half_fovy, float scale, float height
     // depth test for these draws and lets submission order do the layering.
 }
 
-static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out = nullptr);
+static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out = nullptr,
+                          bool again = false);
 
 // The size of the frame the game actually scans out, which is the display copy's. It is
 // not the EFB's size: the EFB is 640x528 and the game displays 640x480 of it.
@@ -2148,25 +2174,32 @@ static void evict_textures() {
 // Runs a batch into the EFB the way the hardware would. With do_present false the final
 // scanout is skipped but everything else -- including every render-to-texture copy -- still
 // happens, which is how the stereo path obtains the textures its eye passes sample.
-static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out) {
-    g_render_frame++;
-    evict_textures();
+// `again` draws a batch this function has just drawn: the textures and vertices are
+// already up, and it is the same frame to the texture cache.
+static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out, bool again) {
     const auto t_start = std::chrono::steady_clock::now();
-    for (auto& t : b.new_textures) upload_texture(*t);
-    const double ms_tex = g_frametime ? ms_since(t_start) : 0.0;
+    double ms_tex = 0.0, ms_vbo = 0.0;
+    if (!again) {
+        g_render_frame++;
+        evict_textures();
+        for (auto& t : b.new_textures) upload_texture(*t);
+        ms_tex = g_frametime ? ms_since(t_start) : 0.0;
+        // A set the GPU has finished with; see g_vaos. The eye passes after this draw from
+        // the same one, so a batch is still uploaded once however many views it is drawn
+        // into.
+        g_vertex_set = (g_vertex_set + 1) % kVertexRing;
+        g_vao = g_vaos[g_vertex_set];
+        g_vbo = g_vbos[g_vertex_set];
+        g_ebo = g_ebos[g_vertex_set];
+        glBindVertexArray(g_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+        glBufferData(GL_ARRAY_BUFFER, b.verts.size() * sizeof(GpuVertex), b.verts.data(), GL_STREAM_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, b.indices.size() * sizeof(uint32_t), b.indices.data(), GL_STREAM_DRAW);
+        ms_vbo = g_frametime ? ms_since(t_start) - ms_tex : 0.0;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
     glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
-    // A set the GPU has finished with; see g_vaos. The eye passes after this draw from the
-    // same one, so a batch is still uploaded once however many views it is drawn into.
-    g_vertex_set = (g_vertex_set + 1) % kVertexRing;
-    g_vao = g_vaos[g_vertex_set];
-    g_vbo = g_vbos[g_vertex_set];
-    g_ebo = g_ebos[g_vertex_set];
     glBindVertexArray(g_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-    glBufferData(GL_ARRAY_BUFFER, b.verts.size() * sizeof(GpuVertex), b.verts.data(), GL_STREAM_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, b.indices.size() * sizeof(uint32_t), b.indices.data(), GL_STREAM_DRAW);
-    const double ms_vbo = g_frametime ? ms_since(t_start) - ms_tex : 0.0;
     uint32_t n_apply = 0;
     note_fullscreen_copies(b);
     static const bool batchlog = getenv("GCN_EYELOG") != nullptr;
@@ -2388,6 +2421,29 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
 bool render_execute(Batch& b) {
     g_hide.clear();   // the flat view shows everything, whatever the eyes leave out
     return execute_batch(b, true);
+}
+
+void render_set_panel_band(float band) { g_panel_band = band; }
+
+bool render_execute_stereo_pair(Batch& b, unsigned fbo_l, unsigned fbo_r, float eye_sep,
+                                float panel_width) {
+    g_hide.clear();
+    const GLuint out = g_output_fbo;
+    g_flat_halfw = panel_width > 0.0f ? 0.5f * panel_width : 1.0f;
+    g_flat_eye = -0.5f * eye_sep;
+    g_output_fbo = (GLuint)fbo_l;
+    g_dump_suffix = "_l";
+    const bool presented = execute_batch(b, true);
+    g_flat_eye = 0.5f * eye_sep;
+    g_output_fbo = (GLuint)fbo_r;
+    g_dump_suffix = "_r";
+    g_pair_second = true;
+    execute_batch(b, true, nullptr, true);
+    g_pair_second = false;
+    g_dump_suffix = "";
+    g_flat_eye = 0.0f;
+    g_output_fbo = out;
+    return presented;
 }
 
 }  // namespace gx

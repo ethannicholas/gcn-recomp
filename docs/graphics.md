@@ -49,6 +49,41 @@ game's business: `render_set_eye_hook` takes a per-frame callback that returns a
 transform, a HUD transform and the draws to leave out, and a game project installs it.
 Nothing here knows what the game is.
 
+## The theater panel as a stereo pair
+
+A game's 2D views -- menus, maps, a third-person camera -- are drawn by the game as 3D
+scenes with its own projection, so the theater panel can show them like a 3D film rather
+than a photograph: `render_execute_stereo_pair` draws the flat frame twice, each pass with
+every perspective draw seen from half the eyes' separation to one side of the game's
+camera, and the headset frontend hangs the two images on the same panel as two quad layers
+with `eyeVisibility` left and right (`theater_stereo` in vr.txt). Orthographic draws are
+untouched and sit on the panel.
+
+The per-draw change is in the projection alone, because vertices arrive in the camera's view
+space: moving the view by `e` shifts clip x by `-P00*e` (P's translation column), and a
+shear of `e / halfw` per unit of depth (P's x-from-z term) brings a point back to where it
+was at the depth `D = P00 * halfw`, where the frustum is as wide as the panel. So the panel
+is a window: a point `D` out sits on it, nearer ones stand in front, and a point at infinity
+has the eyes' own separation, whatever the panel's distance or the draw's field of view.
+Each draw converges on its own `D`, which keeps a scene composed from several fields of view
+consistent with how the flat frame composes it.
+
+Two settings shape it. `panel_band` puts a perspective draw the game confines to a band
+of the depth buffer no deeper than that on the panel itself, with no disparity, as a
+film's subtitles are: a HUD layer drawn close in front of the camera would otherwise stand
+in front of the panel. A draw with no band at all (a zero-width z range, depth off) is
+left with its depth. `theater_depth` scales the separation the pair is drawn with: 1 is
+true to the game's scale, less flattens everything towards the panel.
+
+The second pass reuses the uploaded vertices and textures (`execute_batch`'s `again`) and
+redoes the EFB copies from its own EFB, so a game that samples a copy of its own frame gets
+each eye's. What it does not do is keep two EFBs: the second pass starts from the first's
+leftovers, as the next frame would, and a game that relies on what the EFB held at the end
+of the last frame sees the other eye's. Nothing seen so far does. Cost is a second flat pass,
+about twice theater's; the eye path is not involved, so the panel keeps the compositor's
+reprojection. `GCN_THEATER_STEREO=<metres>` runs it on the desktop and in the harness,
+with the frame dumps in `_l`/`_r` pairs.
+
 ## What the render thread spends a stereo frame on
 
 A stereo frame is the batch drawn three times: a flat pass into the EFB, then each eye

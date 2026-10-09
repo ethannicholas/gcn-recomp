@@ -81,6 +81,10 @@ The desktop build honours `GCN_STEREOLOG` too, numbering frames as its dumps are
 game's stereo hook can be checked against a replayed route without a device.
 `GCN_RAMSNAP=<dir>` (with `GCN_RAMSNAP_EVERY`, `GCN_RAMSNAP_RANGE=a-b`) writes the low 8 MB
 of guest RAM beside the frames, for finding the state such a hook reads.
+`GCN_THEATER_STEREO=<metres>` draws the flat frame as the stereo pair the headset hangs on
+its panel with `theater_stereo` (see "The theater panel as a stereo pair" in `graphics.md`),
+the eyes that far apart; the dumps come as `frame_NNNNN_l.png` and `_r.png`, and the
+desktop window shows the right eye's.
 
 The app has no environment of its own, so `gcn_env.txt` in its files directory
 (`/sdcard/Android/data/<package>/files/`), one `KEY=VALUE` per line, is put into it before

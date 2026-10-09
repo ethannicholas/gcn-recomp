@@ -296,6 +296,7 @@ int main(int argc, char** argv) {
 
     bool running = true;
     uint32_t frames = 0;
+    const float theater_stereo_m = getenv("GCN_THEATER_STEREO") ? (float)atof(getenv("GCN_THEATER_STEREO")) : 0.0f;
     auto t0 = std::chrono::steady_clock::now();
     while (running) {
         SDL_Event e;
@@ -333,6 +334,18 @@ int main(int argc, char** argv) {
             glBindFramebuffer(GL_READ_FRAMEBUFFER, g_eye_fbo);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glBlitFramebuffer(0, 0, kEyeW, kEyeH, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        } else if (theater_stereo_m > 0.0f) {
+            // GCN_THEATER_STEREO=<metres>: the flat frame as the stereo pair a headset
+            // would hang on its panel, the eyes that far apart; the window shows the right
+            // eye's, and the frame dumps come in pairs (_l, _r). The panel is the headset
+            // frontend's, 3.2 m wide (kQuadW there), in the game's units.
+            static const float u = [] {
+                VrConfig d;
+                if (vr::game_hooks().config_defaults) vr::game_hooks().config_defaults(d);
+                gx::render_set_panel_band(d.panel_band);
+                return d.units_per_metre;
+            }();
+            presented = gx::render_execute_stereo_pair(*b, 0, 0, theater_stereo_m * u, 3.2f * u);
         } else {
             presented = gx::render_execute(*b);
         }

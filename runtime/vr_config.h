@@ -93,6 +93,22 @@ struct VrConfig {
     // world, or the world folding back onto it. 0 snaps.
     float transition_s = 1.0f;
 
+    // Show the theater panel as a stereo pair, like a 3D film: each eye's image rendered
+    // from half an interpupillary distance to its side of the game's camera, converged on
+    // the panel (gx::render_execute_stereo_pair). The panel is then a window: what the
+    // game's frustum shows as wide as the panel sits on it, nearer things stand in front of
+    // it, and the sky is at infinity. Costs a second flat pass per game frame.
+    bool theater_stereo = false;
+    // With theater_stereo, draws the game confines to a band of the depth buffer no deeper
+    // than this sit on the panel itself, with no disparity (gx::render_set_panel_band):
+    // a HUD layer drawn in front of the camera, which would otherwise stand in front of
+    // the panel or, drawn far with a narrow frustum, at infinity. 0 pins nothing.
+    float panel_band = 0.0f;
+    // With theater_stereo, the fraction of the viewer's own eye separation the pair is
+    // drawn with. 1 is true to the game's scale: a point at infinity has the eyes' full
+    // separation, parallel. Less flattens everything towards the panel.
+    float theater_depth = 1.0f;
+
     // Seconds the morph back to theater takes, for a game whose stereo exits had better be
     // cut than folded: by the time the game's answer changes it is already drawing something
     // that is wrong in stereo. Negative, the default, uses transition_s both ways.

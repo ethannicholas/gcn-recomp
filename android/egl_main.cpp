@@ -403,6 +403,7 @@ int main(int argc, char** argv) {
         gpu_timer_init();
         gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
         gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale);
+        gx::render_set_panel_band(g_vrcfg.panel_band);
         if (const char* s = getenv("GCN_EYE_MORPH")) {
             for (const char* q = s; *q;) {
                 g_morphs.push_back((float)atof(q));
@@ -440,6 +441,7 @@ int main(int argc, char** argv) {
 
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
+    const float theater_stereo_m = getenv("GCN_THEATER_STEREO") ? (float)atof(getenv("GCN_THEATER_STEREO")) : 0.0f;
     auto t_mark = t0;
     uint32_t presented = 0, presented_at_mark = 0, last_snap = 0;
     for (;;) {
@@ -577,6 +579,13 @@ int main(int argc, char** argv) {
                         dump_fbo(g_flat_fbo, 640, 480, path);
                     }
                 }
+            } else if (theater_stereo_m > 0.0f) {
+                // GCN_THEATER_STEREO=<metres>: theater as the app draws it with
+                // theater_stereo, two flat passes a frame, for its cost on the device.
+                const float u = g_vrcfg.units_per_metre;
+                if (gx::render_execute_stereo_pair(*b, 0, 0, theater_stereo_m * g_vrcfg.theater_depth * u, 3.2f * u))
+                    presented++;
+                glFlush();
             } else {
                 if (gx::render_execute(*b)) presented++;
                 glFlush();  // as the eye path does; see there
