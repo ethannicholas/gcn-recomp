@@ -163,9 +163,29 @@ static GLuint g_efb_fbo, g_efb_color, g_efb_depth;
 // at most a frame or two behind, so three is enough. g_vao, g_vbo and g_ebo are the set
 // in use; execute_batch moves them on.
 static constexpr int kVertexRing = 3;
-static GLuint g_vaos[kVertexRing], g_vbos[kVertexRing], g_ebos[kVertexRing];
+//
+// Each set's vertex buffer holds the batch's packed vertices (Batch::packed), a region per
+// texture coordinate count, so each set has a vertex array per count over the same two
+// buffers: g_vaos[set][n] reads n coordinates at packed_stride(n). g_vao is the one bound.
+static GLuint g_vaos[kVertexRing][9], g_vbos[kVertexRing], g_ebos[kVertexRing];
 static int g_vertex_set = 0;
 static GLuint g_vao, g_vbo, g_ebo;
+
+// Binds the vertex layout for a draw with `ntex` texture coordinates.
+static void bind_vertex_format(uint32_t ntex) {
+    const GLuint vao = g_vaos[g_vertex_set][ntex];
+    if (vao == g_vao) return;
+    g_vao = vao;
+    glBindVertexArray(vao);
+}
+
+// One draw command, from the packed region its texture coordinate count selects.
+static void draw_cmd(const Batch& b, const Cmd& c) {
+    static const GLenum mode[3] = {GL_TRIANGLES, GL_LINES, GL_POINTS};
+    bind_vertex_format(draw_ntex(b.states[c.state]));
+    glDrawElementsBaseVertex(mode[c.prim], c.count, GL_UNSIGNED_INT, (const void*)(uintptr_t)(c.first * sizeof(uint32_t)),
+                             c.base_vertex);
+}
 static GLuint g_copy_prog, g_copy_vao;
 static GLint g_copy_u_src, g_copy_u_rect, g_copy_u_mode, g_copy_u_depth;
 static GLuint g_blit_prog;
@@ -559,28 +579,32 @@ void render_init(int internal_scale) {
     clear_depth(1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glGenVertexArrays(kVertexRing, g_vaos);
+    glGenVertexArrays(kVertexRing * 9, &g_vaos[0][0]);
     glGenBuffers(kVertexRing, g_vbos);
     glGenBuffers(kVertexRing, g_ebos);
-    for (int r = 0; r < kVertexRing; r++) {
-        glBindVertexArray(g_vaos[r]);
-        glBindBuffer(GL_ARRAY_BUFFER, g_vbos[r]);
-        // The element buffer binding is part of the VAO's state, so binding it once here
-        // keeps it bound whenever this VAO is.
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_ebos[r]);
-        const GLsizei stride = sizeof(GpuVertex);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(GpuVertex, pos));
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(GpuVertex, col[0]));
-        glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(GpuVertex, col[1]));
-        for (int i = 0; i < 8; i++) {
-            glEnableVertexAttribArray(3 + i);
-            glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, stride, (void*)(offsetof(GpuVertex, tex) + i * 12));
+    for (int r = 0; r < kVertexRing; r++)
+        for (uint32_t n = 0; n < 9; n++) {
+            glBindVertexArray(g_vaos[r][n]);
+            glBindBuffer(GL_ARRAY_BUFFER, g_vbos[r]);
+            // The element buffer binding is part of the VAO's state, so binding it once here
+            // keeps it bound whenever this VAO is.
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_ebos[r]);
+            const GLsizei stride = (GLsizei)packed_stride(n);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(GpuVertex, pos));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(GpuVertex, col[0]));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(GpuVertex, col[1]));
+            for (uint32_t i = 0; i < n; i++) {
+                glEnableVertexAttribArray(3 + i);
+                glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, stride, (void*)(offsetof(GpuVertex, tex) + i * 12));
+            }
         }
-    }
-    g_vao = g_vaos[0];
+    // A coordinate past a draw's count reads the attribute's constant value instead, which
+    // is what the transform writes into a GpuVertex's unused ones.
+    for (int i = 0; i < 8; i++) glVertexAttrib4f(3 + i, 0.0f, 0.0f, 1.0f, 1.0f);
+    g_vao = g_vaos[0][0];
     g_vbo = g_vbos[0];
     g_ebo = g_ebos[0];
     glBindVertexArray(g_vao);
@@ -2107,8 +2131,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             cur_state = c.state;
             cur_prim = c.prim;
         }
-        static const GLenum mode[3] = {GL_TRIANGLES, GL_LINES, GL_POINTS};
-        glDrawElements(mode[c.prim], c.count, GL_UNSIGNED_INT, (const void*)(uintptr_t)(c.first * sizeof(uint32_t)));
+        draw_cmd(b, c);
     }
     if (eyelog && do_copies)
         fprintf(stderr, "[eye]   drawn=%d skipped_composite=%d spray=%d flat_trimmed=%zu\n", n_drawn,
@@ -2188,12 +2211,12 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         // the same one, so a batch is still uploaded once however many views it is drawn
         // into.
         g_vertex_set = (g_vertex_set + 1) % kVertexRing;
-        g_vao = g_vaos[g_vertex_set];
+        g_vao = g_vaos[g_vertex_set][0];
         g_vbo = g_vbos[g_vertex_set];
         g_ebo = g_ebos[g_vertex_set];
         glBindVertexArray(g_vao);
         glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-        glBufferData(GL_ARRAY_BUFFER, b.verts.size() * sizeof(GpuVertex), b.verts.data(), GL_STREAM_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, b.packed.size(), b.packed.data(), GL_STREAM_DRAW);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, b.indices.size() * sizeof(uint32_t), b.indices.data(), GL_STREAM_DRAW);
         ms_vbo = g_frametime ? ms_since(t_start) - ms_tex : 0.0;
     }
@@ -2391,8 +2414,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                 cur_prim = c.prim;
                 n_apply++;
             }
-            static const GLenum mode[3] = {GL_TRIANGLES, GL_LINES, GL_POINTS};
-            glDrawElements(mode[c.prim], c.count, GL_UNSIGNED_INT, (const void*)(uintptr_t)(c.first * sizeof(uint32_t)));
+            draw_cmd(b, c);
             break;
         }
         case CmdType::EfbCopy:

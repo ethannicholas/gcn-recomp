@@ -86,6 +86,7 @@ Batch::~Batch() {
     b.pooled = true;
     b.cmds.swap(cmds);
     b.verts.swap(verts);
+    b.packed.swap(packed);
     b.indices.swap(indices);
     b.states.swap(states);
     b.mtxs.swap(mtxs);
@@ -93,6 +94,7 @@ Batch::~Batch() {
     // Emptied now, on the thread that is done with it: the decoded textures go with it.
     b.cmds.clear();
     b.verts.clear();
+    b.packed.clear();
     b.indices.clear();
     b.states.clear();
     b.mtxs.clear();
@@ -122,13 +124,17 @@ static bool mtxlog_frame() { return g_mtxlog && g_frame_counter == g_mtxlog; }
 
 static void submit_for_transform(std::unique_ptr<Batch> b, std::unique_ptr<struct Pending> pd);
 static void recycle_pending(std::unique_ptr<struct Pending> p);
+static void pack_all(Batch& b);
 static bool xf_sync();
 static std::unique_ptr<struct Pending> g_pending;
 
 static void flush_batch() {
     if (g_batch && !g_batch->cmds.empty()) {
         // Transformed already (see xf_sync), or by the worker before the renderer sees it.
-        if (xf_sync() || !g_pending) submit_batch(std::move(g_batch));
+        if (xf_sync() || !g_pending) {
+            pack_all(*g_batch);
+            submit_batch(std::move(g_batch));
+        }
         else submit_for_transform(std::move(g_batch), std::move(g_pending));
     }
     g_batch.reset();
@@ -816,6 +822,7 @@ struct XfDraw {
     uint32_t first_in, first_out, count, seq;
     uint32_t snap[XF_REGIONS];   // offsets into Pending::snap
     bool has_nrm;
+    uint32_t cmd;                // the Batch::cmds entry drawing it; ~0 if none
 };
 
 struct Pending {
@@ -867,18 +874,71 @@ static void recycle_pending(std::unique_ptr<Pending> p) {
     if (g_pend_pool.size() < 4) g_pend_pool.push_back(std::move(p));
 }
 
-static void transform_draw(const Pending& pd, const XfDraw& d, GpuVertex* verts) {
+// Where vertex `v` of a command goes in Batch::packed, and at what stride; null for a
+// command with no draw to pack.
+static uint8_t* packed_dest(Batch& b, uint32_t cmd, uint32_t v, uint32_t& stride) {
+    if (cmd == ~0u || b.packed.empty()) return nullptr;
+    const Cmd& c = b.cmds[cmd];
+    stride = packed_stride(draw_ntex(b.states[c.state]));
+    return b.packed.data() + (size_t)((int64_t)c.base_vertex + v) * stride;
+}
+
+// Lays out Batch::packed (see there): a region per texture coordinate count, each draw's
+// vertices in it in the order they were drawn, and each command's base_vertex. Packing
+// itself is done as the vertices are transformed, while they are still in cache.
+static void layout_packed(Batch& b) {
+    size_t count[9] = {};
+    for (const Cmd& c : b.cmds)
+        if (c.type == CmdType::Draw) count[draw_ntex(b.states[c.state])] += c.vcount;
+    size_t bytes = 0, next[9];
+    for (uint32_t n = 0; n < 9; n++) {
+        const uint32_t s = packed_stride(n);
+        bytes = (bytes + s - 1) / s * s;
+        next[n] = bytes / s;  // the region's first vertex, in vertices of its own stride
+        bytes += count[n] * s;
+    }
+    for (Cmd& c : b.cmds) {
+        if (c.type != CmdType::Draw) continue;
+        size_t& at = next[draw_ntex(b.states[c.state])];
+        c.base_vertex = (int32_t)((int64_t)at - c.vfirst);
+        at += c.vcount;
+    }
+    b.packed.resize(bytes);
+}
+
+// For a batch whose vertices were transformed as they arrived (xf_sync): packs them all.
+static void pack_all(Batch& b) {
+    layout_packed(b);
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        if (b.cmds[i].type != CmdType::Draw) continue;
+        const Cmd& c = b.cmds[i];
+        uint32_t stride;
+        uint8_t* dst = packed_dest(b, (uint32_t)i, c.vfirst, stride);
+        for (uint32_t v = c.vfirst; v < c.vfirst + c.vcount; v++, dst += stride) memcpy(dst, &b.verts[v], stride);
+    }
+}
+
+static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
     t_xf.base = pd.snap.data();
     for (int r = 0; r < XF_REGIONS; r++) t_xf.pt[r] = pd.snap.data() + d.snap[r];
     t_draw_seq = d.seq;
     load_xf_plan();
     const InVertex* in = pd.in.data() + d.first_in;
-    GpuVertex* out = verts + d.first_out;
-    for (uint32_t i = 0; i < d.count; i++) transform_vertex(in[i], out[i], d.has_nrm);
+    GpuVertex* out = b.verts.data() + d.first_out;
+    uint32_t stride = 0;
+    uint8_t* dst = packed_dest(b, d.cmd, d.first_out, stride);
+    if (!dst) {
+        for (uint32_t i = 0; i < d.count; i++) transform_vertex(in[i], out[i], d.has_nrm);
+        return;
+    }
+    for (uint32_t i = 0; i < d.count; i++, dst += stride) {
+        transform_vertex(in[i], out[i], d.has_nrm);
+        memcpy(dst, &out[i], stride);
+    }
 }
 
-static void transform_range(const Pending& pd, size_t lo, size_t hi, GpuVertex* verts) {
-    for (size_t i = lo; i < hi; i++) transform_draw(pd, pd.draws[i], verts);
+static void transform_range(const Pending& pd, size_t lo, size_t hi, Batch& b) {
+    for (size_t i = lo; i < hi; i++) transform_draw(pd, pd.draws[i], b);
 }
 
 // Helpers that take a share of each frame alongside the worker.
@@ -888,7 +948,7 @@ struct XfHelper {
     std::condition_variable cv;
     const Pending* pd = nullptr;
     size_t lo = 0, hi = 0;
-    GpuVertex* verts = nullptr;
+    Batch* batch = nullptr;
     bool busy = false;
 };
 static std::vector<std::unique_ptr<XfHelper>> g_helpers;
@@ -899,9 +959,9 @@ static void helper_main(XfHelper* h) {
         h->cv.wait(lk, [h] { return h->busy && h->pd; });
         const Pending* pd = h->pd;
         const size_t lo = h->lo, hi = h->hi;
-        GpuVertex* verts = h->verts;
+        Batch* batch = h->batch;
         lk.unlock();
-        transform_range(*pd, lo, hi, verts);
+        transform_range(*pd, lo, hi, *batch);
         lk.lock();
         h->pd = nullptr;
         h->busy = false;
@@ -922,9 +982,9 @@ static void transform_pending(const Pending& pd, Batch& b) {
         g_helpers.push_back(std::move(h));
     }
     const size_t n = pd.draws.size();
-    GpuVertex* verts = b.verts.data();
+    layout_packed(b);
     if (threads == 1 || n < 64) {
-        transform_range(pd, 0, n, verts);
+        transform_range(pd, 0, n, b);
         return;
     }
     // Split by vertices rather than draws: a frame's draws range from one vertex to
@@ -947,11 +1007,11 @@ static void transform_pending(const Pending& pd, Batch& b) {
         h->pd = &pd;
         h->lo = cut[k];
         h->hi = cut[k + 1];
-        h->verts = verts;
+        h->batch = &b;
         h->busy = true;
         h->cv.notify_all();
     }
-    transform_range(pd, cut[0], cut[1], verts);
+    transform_range(pd, cut[0], cut[1], b);
     for (int k = 1; k < threads; k++) {
         XfHelper* h = g_helpers[k - 1].get();
         std::unique_lock<std::mutex> lk(h->m);
@@ -1089,6 +1149,7 @@ static void draw_impl(const DrawCall& dc) {
     d.count = dc.count;
     d.seq = g_draw_seq;
     d.has_nrm = L.nrm_desc != 0;
+    d.cmd = ~0u;
     for (int r = 0; r < XF_REGIONS; r++) {
         if (pd.snap_gen[r] != g_state.xf_gen[r]) {
             const uint32_t* src = (r == XF_REGS ? g_state.xf_regs : g_state.xf_mem) + kXfBase[r];
@@ -1107,7 +1168,7 @@ static void draw_impl(const DrawCall& dc) {
         d.snap[r] = pd.snap_off[r];
     }
     pd.draws.push_back(d);
-    if (xf_sync()) transform_draw(pd, d, b.verts.data());
+    if (xf_sync()) transform_draw(pd, d, b);
     GpuVertex* out = b.verts.data() + base;
 
     // GCN_MTXLOG=<n> prints the position matrix and projection of every draw in the nth
@@ -1268,8 +1329,10 @@ static void draw_impl(const DrawCall& dc) {
     if (!b.cmds.empty()) {
         Cmd& last = b.cmds.back();
         if (last.type == CmdType::Draw && last.state == state && last.prim == prim &&
-            last.mtx == mtx && last.first + last.count == first) {
+            last.mtx == mtx && last.first + last.count == first && last.vfirst + last.vcount == base) {
             last.count += count;
+            last.vcount += dc.count;
+            pd.draws.back().cmd = (uint32_t)b.cmds.size() - 1;
             return;
         }
     }
@@ -1280,6 +1343,9 @@ static void draw_impl(const DrawCall& dc) {
     c.first = first;
     c.count = count;
     c.mtx = mtx;
+    c.vfirst = base;
+    c.vcount = dc.count;
+    pd.draws.back().cmd = (uint32_t)b.cmds.size();
     b.cmds.push_back(c);
 }
 

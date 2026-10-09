@@ -114,6 +114,23 @@ behaviour for comparison:
 - **The texture and the sampler of a unit are bound separately**, since the texture changes
   at nearly every draw and the sampler almost never.
 
+The vertex buffer is uploaded once a frame and was, for a while, the largest single cost of
+the render thread. A `GpuVertex` has room for eight texture coordinates of three floats,
+124 bytes, and a draw uses about two: a frame of a hundred thousand vertices was twelve
+megabytes through `glBufferData`, 5-7 ms of the render thread on a Quest 3. So the GPU is
+given only each vertex's leading `packed_stride(n)` bytes, n the draw's texture coordinate
+count (`Batch::packed`): one region of the buffer per count, each starting at a multiple of
+its stride so that it can be indexed in vertices of that size, and a vertex array per
+count over it (`g_vaos[set][n]`), with `glDrawElementsBaseVertex` and the command's
+`base_vertex` to find the draw's vertices in its region. A coordinate past the count reads
+the attribute's constant value, (0, 0, 1), which is what the transform writes into the
+unused ones. The transform workers pack each vertex as they finish it, while it is in
+cache (`layout_packed` lays the regions out first); `GCN_XF_SYNC` builds pack the whole
+batch at the end. `Batch::verts` stays whole for the renderer's own CPU-side reads. The
+same frame went from twelve megabytes to about four and the upload to about 0.5 ms --
+more than the size alone accounts for, so the driver was also slow with the large buffer.
+Frames are byte-identical.
+
 And on GL ES the eye's depth attachment is invalidated at the end of each eye pass
 (`glInvalidateFramebuffer`): on a tiled GPU a depth buffer left valid is written out of
 tile memory to RAM, and at a headset's eye size with multisampling that is tens of

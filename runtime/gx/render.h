@@ -1,6 +1,7 @@
 // Data passed from the GX front end (guest thread) to the render back end (main thread).
 #pragma once
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -77,8 +78,20 @@ struct Cmd {
     // eye hook reads off it -- which draws are the player's, and where they stand. The
     // index only changes when the matrix does, so a run of draws sharing one shares it.
     uint32_t mtx;
+    // The vertices the draw's indices refer to, Batch::verts[vfirst, vfirst + vcount),
+    // and where they are in Batch::packed: the region for the state's texture coordinate
+    // count, vertex index v at packed vertex v + base_vertex. See Batch::packed.
+    uint32_t vfirst, vcount;
+    int32_t base_vertex;
     EfbCopyCmd copy;
 };
+
+// What the GPU is given of a vertex with `ntex` texture coordinates: the leading bytes of
+// a GpuVertex -- position, both colours, then that many coordinates.
+constexpr uint32_t kPackedHead = 20;
+inline uint32_t packed_stride(uint32_t ntex) { return kPackedHead + 12 * ntex; }
+inline uint32_t draw_ntex(const PixelState& st) { return st.num_texgens > 8 ? 8 : st.num_texgens; }
+static_assert(offsetof(GpuVertex, tex) == kPackedHead, "a packed vertex is a GpuVertex's leading bytes");
 
 struct Batch {
     std::vector<Cmd> cmds;
@@ -87,6 +100,15 @@ struct Batch {
     // repeating vertices, which would nearly double the buffer -- and this buffer is
     // uploaded and fetched for every pass of every frame.
     std::vector<GpuVertex> verts;
+    // The same vertices as the GPU takes them. A GpuVertex has room for eight texture
+    // coordinates, and a draw uses about two: uploading `verts` as it is sent a frame of a
+    // hundred thousand vertices as twelve megabytes, two thirds of them unused, and the
+    // GPU read them for every pass. So each draw's vertices are packed at the stride its
+    // texture coordinate count needs (packed_stride), in one region per count, each region
+    // starting at a multiple of its stride so that it can be addressed in vertices of that
+    // size; a draw is drawn with its count's vertex layout and Cmd::base_vertex.
+    // `verts` stays whole for the renderer's own CPU-side reads.
+    std::vector<uint8_t> packed;
     std::vector<uint32_t> indices;
     std::vector<PixelState> states;
     // The position matrices the draws used, twelve floats each in GX's row-major 3x4
