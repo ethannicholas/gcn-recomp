@@ -980,14 +980,16 @@ void android_main(android_app* app) {
 
         // Advance the morph on the compositor's clock. The eyes only take it up when the
         // game delivers a frame, so it moves at the game's rate, not this one -- but
-        // stepping it here keeps its duration honest however unevenly frames arrive.
+        // stepping it here keeps its duration honest however unevenly frames arrive. The
+        // way back may have a duration of its own (transition_out_s).
         {
             const float target = stereo ? 1.0f : 0.0f;
-            if (g_vrcfg.transition_s <= 0.0f || last_display == 0) {
+            const float secs = stereo || g_vrcfg.transition_out_s < 0.0f ? g_vrcfg.transition_s
+                                                                          : g_vrcfg.transition_out_s;
+            if (secs <= 0.0f || last_display == 0) {
                 morph = target;
             } else {
-                const float step = (float)(fs.predictedDisplayTime - last_display) * 1e-9f /
-                                   g_vrcfg.transition_s;
+                const float step = (float)(fs.predictedDisplayTime - last_display) * 1e-9f / secs;
                 morph = target > morph ? fminf(target, morph + step) : fmaxf(target, morph - step);
             }
             last_display = fs.predictedDisplayTime;

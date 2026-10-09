@@ -93,6 +93,11 @@ struct VrConfig {
     // world, or the world folding back onto it. 0 snaps.
     float transition_s = 1.0f;
 
+    // Seconds the morph back to theater takes, for a game whose stereo exits had better be
+    // cut than folded: by the time the game's answer changes it is already drawing something
+    // that is wrong in stereo. Negative, the default, uses transition_s both ways.
+    float transition_out_s = -1.0f;
+
     // Every key above that the file did not recognise, for a game's hooks.
     std::map<std::string, float> extra;
     float get(const char* key, float fallback) const {
