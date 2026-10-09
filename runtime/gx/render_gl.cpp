@@ -1813,14 +1813,25 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     if (!g_eye_filter) return;
     note_fullscreen_copies(b);
     std::vector<int8_t> answer(b.states.size(), -1);
+    std::vector<uint8_t> hidden_mtx;   // EyeHideObject: the position matrices to clear of draws
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
         if (c.type != CmdType::Draw || skip[i]) continue;
         int8_t& a = answer[c.state];
-        if (a < 0) a = g_eye_filter(b.states[c.state], draw_facts(b.states[c.state])) ? 1 : 0;
-        if (!a) continue;
+        if (a < 0) a = (int8_t)g_eye_filter(b.states[c.state], draw_facts(b.states[c.state]));
+        if (a == EyeKeep) continue;
         if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
         g_hide[i] = 1;
+        if (a == EyeHideObject) {
+            if (hidden_mtx.size() <= c.mtx) hidden_mtx.resize(c.mtx + 1, 0);
+            hidden_mtx[c.mtx] = 1;
+        }
+    }
+    if (hidden_mtx.empty()) return;
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || skip[i]) continue;
+        if (c.mtx < hidden_mtx.size() && hidden_mtx[c.mtx]) g_hide[i] = 1;
     }
 }
 

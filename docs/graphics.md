@@ -246,8 +246,10 @@ A game can also leave draws out of the eyes altogether (`vr::GameHooks::eye_filt
 `gx::EyeFilter`): the renderer asks it once per pixel state per frame, with what it knows
 of the draw -- orthographic or not, indirect texturing, whether it samples an EFB copy and
 whether of the whole frame, the depth band, and each texture's content hash
-(`TexData::hash`, the same in every run, printed by `GCN_DRAWLOG` and `GCN_TEXLOG`). The
-flat view is untouched. What a game uses it for: the materials of a helmet model drawn in
+(`TexData::hash`, the same in every run, printed by `GCN_DRAWLOG` and `GCN_TEXLOG`) -- and
+it answers keep, hide that state's draws, or hide the whole object: every draw of the
+frame sharing a position matrix with one of them, which is how the untextured parts of a
+rigid model go with the materials that name it. The flat view is untouched. What a game uses it for: the materials of a helmet model drawn in
 the HUD's band, which on a television is the picture's edge and in a headset is a frame in
 mid-air; and a screen-space ripple -- a copy of part of the frame drawn back over itself
 orthographically through an indirect texture -- which the eyes would paint on the HUD frame

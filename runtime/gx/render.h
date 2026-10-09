@@ -59,10 +59,13 @@ struct PixelState {
 
 // A game's own say over what an eye draws, on top of the eye hook: called once per pixel
 // state per frame, before the eye passes, with what the renderer knows of a draw that a
-// game's rule might turn on, and returns true to leave that state's draws out of the
-// eyes. The flat view is untouched; a hidden draw's textures are kept alive. For a game
-// that hides a model's materials (by TexData::hash, the same in every run) or an effect
-// that cannot be re-projected (a screen-space refraction of part of the frame).
+// game's rule might turn on. It answers EyeKeep, EyeHideDraw to leave that state's draws
+// out of the eyes, or EyeHideObject to leave out every draw of the frame that shares a
+// position matrix with one of them -- the rest of a rigid model whose other materials
+// have nothing to name them by. The flat view is untouched; a hidden draw's textures are
+// kept alive. For a game that hides a model's materials (by TexData::hash, the same in
+// every run) or an effect that cannot be re-projected (a screen-space refraction of part
+// of the frame).
 struct EyeDrawFacts {
     bool ortho;                   // an orthographic draw: a 2D element, painted on the HUD frame
     bool indirect;                // uses indirect texturing (a warp or a ripple)
@@ -71,7 +74,8 @@ struct EyeDrawFacts {
     float band_lo, band_hi;       // the viewport's depth band
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-using EyeFilter = bool (*)(const PixelState& st, const EyeDrawFacts& facts);
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2 };
+using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };
 
