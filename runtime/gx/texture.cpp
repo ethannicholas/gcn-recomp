@@ -284,12 +284,30 @@ static uint64_t efb_copy_fingerprint(uint32_t addr, uint32_t w, uint32_t h) {
     return h64;
 }
 
+// The id a copy of this geometry to this address was last given, so that it keeps it. A
+// copy to the same place with the same geometry is the same target being redrawn, and the
+// renderer re-renders into the texture it already has; minting a fresh id every frame
+// instead stranded one GL texture per copy per frame -- around 2.5 MB a frame here, since
+// EFB textures are exempt from eviction. Kept apart from g_efb_copies, which holds only
+// the latest copy at an address: a game that copies several targets of different sizes
+// through one scratch buffer every frame (a reflection, then a depth copy of the scene,
+// then a sliver of it) replaced the entry at that address with each, and every copy was
+// new again the next frame, five GL textures allocated and later freed per frame.
+struct EfbCopyIdKey {
+    uint32_t addr, w, h, fmt;
+    bool operator==(const EfbCopyIdKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
+};
+struct EfbCopyIdKeyHash {
+    size_t operator()(const EfbCopyIdKey& k) const { return hash_bytes((const uint8_t*)&k, sizeof(k), 0); }
+};
+struct EfbCopyId {
+    std::shared_ptr<TexData> tex;
+    uint32_t last_frame;
+};
+static std::unordered_map<EfbCopyIdKey, EfbCopyId, EfbCopyIdKeyHash> g_efb_copy_ids;
+
 uint32_t texture_register_efb_copy(uint32_t addr, uint32_t w, uint32_t h, uint32_t fmt) {
     addr &= 0x03FFFFFF;
-    // A copy to the same place with the same geometry is the same target being redrawn,
-    // so it keeps its id and the renderer re-renders into the texture it already has.
-    // Minting a fresh id every frame instead stranded one GL texture per copy per frame
-    // -- around 2.5 MB a frame here, since EFB textures are exempt from eviction.
     auto it = g_efb_copies.find(addr);
     if (it != g_efb_copies.end() && it->second.w == w && it->second.h == h && it->second.fmt == fmt) {
         it->second.last_frame = it->second.checked_frame = g_frame_counter;
@@ -297,10 +315,15 @@ uint32_t texture_register_efb_copy(uint32_t addr, uint32_t w, uint32_t h, uint32
         return it->second.tex->id;
     }
     EfbCopyEntry e{};
-    e.tex = std::make_shared<TexData>();
-    e.tex->id = g_next_tex_id++;
-    e.tex->width = w;
-    e.tex->height = h;
+    EfbCopyId& id = g_efb_copy_ids[EfbCopyIdKey{addr, w, h, fmt}];
+    if (!id.tex) {
+        id.tex = std::make_shared<TexData>();
+        id.tex->id = g_next_tex_id++;
+        id.tex->width = w;
+        id.tex->height = h;
+    }
+    id.last_frame = g_frame_counter;
+    e.tex = id.tex;
     e.w = w; e.h = h; e.fmt = fmt;
     e.last_frame = e.checked_frame = g_frame_counter;
     e.ram = efb_copy_fingerprint(addr, w, h);
@@ -462,6 +485,10 @@ void texture_evict() {
     // so at speed this map grows without bound and takes a GL texture with each entry.
     for (auto it = g_efb_copies.begin(); it != g_efb_copies.end();) {
         if (g_frame_counter - it->second.last_frame > kIdleFrames) it = g_efb_copies.erase(it);
+        else ++it;
+    }
+    for (auto it = g_efb_copy_ids.begin(); it != g_efb_copy_ids.end();) {
+        if (g_frame_counter - it->second.last_frame > kIdleFrames) it = g_efb_copy_ids.erase(it);
         else ++it;
     }
 }

@@ -566,12 +566,48 @@ static thread_local bool g_dualtex;
 static thread_local uint32_t g_mtx_cached;
 static thread_local float g_posmtx[12], g_nrmmtx[9];
 
+// The texture matrices the same way: a regular texgen read its twelve words through the
+// snapshot's page table for every vertex, two dependent loads each, and with two texgens
+// on nearly every vertex that was a quarter of the transform's memory traffic for a
+// matrix the whole draw shares. Kept per texgen against the index the vertex names, and
+// dropped with the position matrix when the matrix memory's snapshot changes. The post
+// matrices are named by the plan rather than the vertex, so they are kept with it, and
+// dropped when the post-matrix memory's snapshot changes.
+static thread_local uint8_t g_texmtx_idx[8];    // 0xFF: nothing cached for that texgen
+static thread_local float g_texmtx[8][12];
+static thread_local uint32_t g_post_loaded;     // bit t: g_postmtx[t] holds texgen t's
+static thread_local float g_postmtx[8][12];
+
+static void forget_matrices() {
+    g_mtx_cached = 0xFFFFFFFFu;
+    memset(g_texmtx_idx, 0xFF, sizeof(g_texmtx_idx));
+}
+
 static void load_matrices(uint8_t pnmtx) {
     const uint32_t m = (pnmtx & 63) * 4;
     for (int i = 0; i < 12; i++) g_posmtx[i] = tf(XF_MTX, m + i);
     const uint32_t n = (pnmtx & 31) * 3;
     for (int i = 0; i < 9; i++) g_nrmmtx[i] = tf(XF_NRM, n + i);
     g_mtx_cached = pnmtx;
+}
+
+static inline const float* texgen_matrix(uint32_t t, uint8_t texmtx) {
+    const uint8_t idx = texmtx & 63;
+    if (g_texmtx_idx[t] != idx) {
+        const uint32_t tm = (uint32_t)idx * 4;
+        for (int i = 0; i < 12; i++) g_texmtx[t][i] = tf(XF_MTX, tm + i);
+        g_texmtx_idx[t] = idx;
+    }
+    return g_texmtx[t];
+}
+
+static inline const float* post_matrix(uint32_t t, uint32_t post) {
+    if (!(g_post_loaded & (1u << t))) {
+        const uint32_t ptm = post * 4;
+        for (int i = 0; i < 12; i++) g_postmtx[t][i] = tf(XF_POST, ptm + i);
+        g_post_loaded |= 1u << t;
+    }
+    return g_postmtx[t];
 }
 
 // The matrix indices a vertex falls back to are needed when it is decoded, on the guest
@@ -609,7 +645,8 @@ static void load_xf_plan() {
     load_chan(0);
     load_chan(1);
     g_lights_loaded = 0;
-    g_mtx_cached = 0xFFFFFFFFu;
+    g_post_loaded = 0;
+    forget_matrices();
 }
 
 static uint32_t g_draw_seq;  // front-end draws so far, stamped into each vertex
@@ -660,10 +697,10 @@ static void transform_vertex(const InVertex& v, GpuVertex& o, bool has_nrm) {
         if (form == 0) src[2] = 1.0f;  // AB11
         float s = 0, tt = 0, q = 1;
         if (type == 0) {  // regular
-            uint32_t tm = (v.texmtx[t] & 63) * 4;
-            s = tf(XF_MTX, tm + 0) * src[0] + tf(XF_MTX, tm + 1) * src[1] + tf(XF_MTX, tm + 2) * src[2] + tf(XF_MTX, tm + 3);
-            tt = tf(XF_MTX, tm + 4) * src[0] + tf(XF_MTX, tm + 5) * src[1] + tf(XF_MTX, tm + 6) * src[2] + tf(XF_MTX, tm + 7);
-            if (proj) q = tf(XF_MTX, tm + 8) * src[0] + tf(XF_MTX, tm + 9) * src[1] + tf(XF_MTX, tm + 10) * src[2] + tf(XF_MTX, tm + 11);
+            const float* M = texgen_matrix(t, v.texmtx[t]);
+            s = M[0] * src[0] + M[1] * src[1] + M[2] * src[2] + M[3];
+            tt = M[4] * src[0] + M[5] * src[1] + M[6] * src[2] + M[7];
+            if (proj) q = M[8] * src[0] + M[9] * src[1] + M[10] * src[2] + M[11];
         } else if (type == 1) {  // emboss
             const uint32_t srcrow = G.srcrow, light = G.light;
             if (!(g_lights_loaded & (1u << light))) {
@@ -680,15 +717,15 @@ static void transform_vertex(const InVertex& v, GpuVertex& o, bool has_nrm) {
             tt = kU8toF[o.col[ch][1]];
         }
         if (dualtex && type == 0) {
-            const uint32_t ptm = G.post * 4;
+            const float* P = post_matrix(t, G.post);
             float in[3] = {s, tt, q};
             if (G.postnorm) {
                 float l = sqrtf(in[0] * in[0] + in[1] * in[1] + in[2] * in[2]);
                 if (l > 0) { in[0] /= l; in[1] /= l; in[2] /= l; }
             }
-            s = tf(XF_POST, ptm + 0) * in[0] + tf(XF_POST, ptm + 1) * in[1] + tf(XF_POST, ptm + 2) * in[2] + tf(XF_POST, ptm + 3);
-            tt = tf(XF_POST, ptm + 4) * in[0] + tf(XF_POST, ptm + 5) * in[1] + tf(XF_POST, ptm + 6) * in[2] + tf(XF_POST, ptm + 7);
-            q = tf(XF_POST, ptm + 8) * in[0] + tf(XF_POST, ptm + 9) * in[1] + tf(XF_POST, ptm + 10) * in[2] + tf(XF_POST, ptm + 11);
+            s = P[0] * in[0] + P[1] * in[1] + P[2] * in[2] + P[3];
+            tt = P[4] * in[0] + P[5] * in[1] + P[6] * in[2] + P[7];
+            q = P[8] * in[0] + P[9] * in[1] + P[10] * in[2] + P[11];
         }
         o.tex[t][0] = s; o.tex[t][1] = tt; o.tex[t][2] = q;
     }
@@ -938,6 +975,45 @@ static void pack_all(Batch& b) {
 static thread_local bool t_plan_valid;
 static thread_local uint32_t t_plan_snap[XF_REGIONS];
 
+// GCN_XFSTATS=1: what the transform is asked for, summed over 64 frames and printed per
+// frame -- vertices, how many carry a normal, how many have a lit colour or alpha channel,
+// light evaluations (a vertex times each light its channels sum), texgens, texgens with a
+// post matrix, emboss texgens. Which of this a scene needs decides what the transform's
+// time goes on, and every figure is a function of the draw's plan and its vertex count,
+// so nothing is added per vertex.
+struct XfStats { uint64_t verts, nrm, lit, alit, lights, texgens, post, emboss; };
+static const bool g_xfstats = getenv("GCN_XFSTATS") != nullptr;
+static thread_local XfStats t_stats;
+static std::mutex g_stats_mutex;
+static XfStats g_stats;
+
+static void count_draw_stats(const XfDraw& d) {
+    XfStats& S = t_stats;
+    const uint64_t n = d.count;
+    S.verts += n;
+    if (d.has_nrm) S.nrm += n;
+    auto nlights = [](uint32_t ctrl) {
+        return (uint64_t)__builtin_popcount(((ctrl >> 2) & 0xF) | (((ctrl >> 11) & 0xF) << 4));
+    };
+    for (uint32_t ch = 0; ch < g_numcol; ch++) {
+        if (g_chan[ch].cctrl & 2) { S.lit += n; S.lights += n * nlights(g_chan[ch].cctrl); }
+        if (g_chan[ch].actrl & 2) { S.alit += n; S.lights += n * nlights(g_chan[ch].actrl); }
+    }
+    S.texgens += n * g_ntex;
+    for (uint32_t t = 0; t < g_ntex && t < 8; t++) {
+        if (g_gen[t].type == 1) S.emboss += n;
+        else if (g_gen[t].type == 0 && g_dualtex) S.post += n;
+    }
+}
+
+static void flush_draw_stats() {
+    std::lock_guard<std::mutex> lk(g_stats_mutex);
+    g_stats.verts += t_stats.verts; g_stats.nrm += t_stats.nrm; g_stats.lit += t_stats.lit;
+    g_stats.alit += t_stats.alit; g_stats.lights += t_stats.lights; g_stats.texgens += t_stats.texgens;
+    g_stats.post += t_stats.post; g_stats.emboss += t_stats.emboss;
+    t_stats = XfStats{};
+}
+
 static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
     t_xf.base = pd.snap.data();
     for (int r = 0; r < XF_REGIONS; r++) t_xf.pt[r] = pd.snap.data() + d.snap[r];
@@ -945,11 +1021,13 @@ static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
     if (!t_plan_valid || d.snap[XF_REGS] != t_plan_snap[XF_REGS]) {
         load_xf_plan();
     } else {
-        if (d.snap[XF_MTX] != t_plan_snap[XF_MTX] || d.snap[XF_NRM] != t_plan_snap[XF_NRM]) g_mtx_cached = ~0u;
+        if (d.snap[XF_MTX] != t_plan_snap[XF_MTX] || d.snap[XF_NRM] != t_plan_snap[XF_NRM]) forget_matrices();
+        if (d.snap[XF_POST] != t_plan_snap[XF_POST]) g_post_loaded = 0;
         if (d.snap[XF_LIGHT] != t_plan_snap[XF_LIGHT]) g_lights_loaded = 0;
     }
     t_plan_valid = true;
     memcpy(t_plan_snap, d.snap, sizeof(t_plan_snap));
+    if (g_xfstats) count_draw_stats(d);
     const InVertex* in = pd.in.data() + d.first_in;
     GpuVertex* out = b.verts.data() + d.first_out;
     uint32_t stride = 0;
@@ -967,6 +1045,7 @@ static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
 static void transform_range(const Pending& pd, size_t lo, size_t hi, Batch& b) {
     t_plan_valid = false;
     for (size_t i = lo; i < hi; i++) transform_draw(pd, pd.draws[i], b);
+    if (g_xfstats) flush_draw_stats();
 }
 
 // Helpers that take a share of each frame alongside the worker.
@@ -1070,6 +1149,17 @@ static void xf_worker() {
         if (g_frametime)
             fprintf(stderr, "[xf] %zu draws, %zu vertices transformed in %.2fms\n",
                     job.pending->draws.size(), job.pending->in.size(), ms_since(t0));
+        if (g_xfstats) {
+            static uint32_t frames;
+            if (++frames % 64 == 0) {
+                std::lock_guard<std::mutex> lk(g_stats_mutex);
+                const XfStats& S = g_stats;
+                const double k = 1.0 / 64;
+                fprintf(stderr, "[xfstats] per frame: verts %.0f (nrm %.0f lit %.0f alit %.0f) light evals %.0f  texgens %.0f (post %.0f emboss %.0f)\n",
+                        S.verts * k, S.nrm * k, S.lit * k, S.alit * k, S.lights * k, S.texgens * k, S.post * k, S.emboss * k);
+                g_stats = XfStats{};
+            }
+        }
         recycle_pending(std::move(job.pending));
         submit_batch(std::move(job.batch));
         {

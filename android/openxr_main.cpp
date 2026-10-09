@@ -720,6 +720,26 @@ static void poll_xr_events() {
             handle_session_state(((XrEventDataSessionStateChanged*)&ev)->state);
         else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)
             LOGE("instance loss pending");
+        else if (ev.type == XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT) {
+            // The runtime's view of how the app is doing in a domain (compositing,
+            // rendering, thermal): normal, warning or impaired. Beside the compositor's own
+            // lines in logcat (VrApi FPS=, with the clocks and the GPU's load) and the OS
+            // clock governor's (crcs "Clock levels changed"), which is where a boost level
+            // being taken away is announced.
+            const auto* p = (const XrEventDataPerfSettingsEXT*)&ev;
+            auto level = [](XrPerfSettingsNotificationLevelEXT l) {
+                return l == XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT ? "normal"
+                     : l == XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT ? "warning"
+                     : l == XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT ? "impaired" : "?";
+            };
+            auto sub = [](XrPerfSettingsSubDomainEXT s) {
+                return s == XR_PERF_SETTINGS_SUB_DOMAIN_COMPOSITING_EXT ? "compositing"
+                     : s == XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT ? "rendering"
+                     : s == XR_PERF_SETTINGS_SUB_DOMAIN_THERMAL_EXT ? "thermal" : "?";
+            };
+            LOGI("performance notice: %s %s %s -> %s", p->domain == XR_PERF_SETTINGS_DOMAIN_CPU_EXT ? "cpu" : "gpu",
+                 sub(p->subDomain), level(p->fromLevel), level(p->toLevel));
+        }
     }
 }
 
