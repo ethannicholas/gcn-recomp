@@ -58,7 +58,7 @@ static inline void set_lod_bias(GLuint s, float bias) {
 struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
-    uint8_t view_space, background, foreground;
+    uint8_t view_space, background, foreground, fg_layer;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
@@ -1001,9 +1001,12 @@ static void apply_state(const PixelState& st, int prim) {
     const bool background = sky_at_infinity && g_bg_from > 0.0f && perspective && !st.view_space &&
                             band_lo >= g_bg_from;
     const bool foreground = g_fg_to > 0.0f && g_fg_scale != 1.0f && perspective && band_hi <= g_fg_to;
+    // A foreground layer also keeps the game's own depth within its band (u_vr 4 in the
+    // vertex shader), whether or not it is scaled.
+    const bool fg_layer = g_fg_to > 0.0f && perspective && band_hi <= g_fg_to;
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
-                           foreground == u.foreground;
+                           foreground == u.foreground && fg_layer == u.fg_layer;
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -1040,7 +1043,8 @@ static void apply_state(const PixelState& st, int prim) {
             }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, game_proj ? P : g_vr_proj);
             glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, view);
-            glUniform1i(pr.u_vr, 1);
+            static const bool game_depth = !(getenv("GCN_EYE_FGDEPTH") && atoi(getenv("GCN_EYE_FGDEPTH")) == 0);
+            glUniform1i(pr.u_vr, fg_layer && game_depth ? 4 : 1);
         } else if (g_vr_active) {
             // A HUD element in an eye. The game's own projection already puts its frame in
             // [-1,1], so that is where the chain picks up -- for the perspective rig too,
@@ -1090,6 +1094,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.view_space = st.view_space;
         u.background = background;
         u.foreground = foreground;
+        u.fg_layer = fg_layer;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {

@@ -129,6 +129,9 @@ uniform float u_point_size;
 //   3 = part way between theater and stereo: u_proj is the whole morphed chain, folded
 //       on the CPU, and u_crop cuts the scene to the window opening out of the game's
 //       frustum. See render_set_vr_morph.
+//   4 = as 1, but the depth written within the draw's band is the game's own: a
+//       foreground layer (render_set_depth_layers), where the band is too thin for the
+//       eye's.
 uniform int u_vr;
 uniform mat4 u_view;       // eye transform, relative to the game's camera; under 3, fog's
 uniform mat4 u_crop;       // four clip distances, each linear in the vertex
@@ -160,12 +163,12 @@ void main() {
     // leaves the game's 60-degree frustum. GCN_EYE_FOGZ=0 takes the game's depth instead,
     // which fogs exactly as the flat view does whatever the head is doing.
     static const bool eye_fog_z = !(getenv("GCN_EYE_FOGZ") && atoi(getenv("GCN_EYE_FOGZ")) == 0);
-    s += eye_fog_z ? "    float fz = (u_vr == 1 || u_vr == 3) ? (u_view * vec4(a_pos, 1.0)).z : a_pos.z;\n"
+    s += eye_fog_z ? "    float fz = (u_vr == 1 || u_vr == 3 || u_vr == 4) ? (u_view * vec4(a_pos, 1.0)).z : a_pos.z;\n"
                    : "    float fz = a_pos.z;\n";
     s += R"(    float gz = u_zproj.x * fz + u_zproj.y;
     float gw = u_zproj.z * fz + u_zproj.w;
     v_fogz = vec2((0.5 * u_vp_b.x + 0.5) * gw + 0.5 * u_vp_b.y * gz, gw);
-    if (u_vr == 1) {
+    if (u_vr == 1 || u_vr == 4) {
         // Straight to clip space: the eye's render target is the whole viewport, so
         // the GX viewport transform does not apply. No Y negation either -- that
         // exists only to cancel the flip the EFB blit does, and nothing blits here.
@@ -177,6 +180,17 @@ void main() {
         // which keeps that order and the eye's depth within each layer. A full-range
         // viewport maps to itself. u_vp_b is (2*hi - 1, 2*(hi - lo)) for the band [lo, hi].
         gl_Position.z = (u_vp_b.x - 0.5 * u_vp_b.y) * gl_Position.w + 0.5 * u_vp_b.y * gl_Position.z;
+        // A foreground layer's band can be a few hundredths of a percent of the buffer,
+        // and the eye's near plane is a few centimetres: squeezed into the band, its depth
+        // cannot tell apart surfaces closer than a large fraction of a unit at the
+        // distances a game models a HUD at, and they fight. The game's own projection was
+        // made for that band, so the depth it would have written goes in instead, from the
+        // camera's position: what the flat view writes.
+        if (u_vr == 4) {
+            float cz = u_zproj.x * a_pos.z + u_zproj.y;
+            float cw = u_zproj.z * a_pos.z + u_zproj.w;
+            gl_Position.z = (u_vp_b.x + u_vp_b.y * cz / cw) * gl_Position.w;
+        }
     } else if (u_vr == 2) {
         // A 2D element in an eye. u_proj here is not the game's projection alone but the
         // whole chain folded on the CPU: that projection, the frame the overlay is

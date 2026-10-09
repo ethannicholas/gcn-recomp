@@ -184,5 +184,16 @@ off by default.
   picture shows only angular size; scaling about the camera keeps that angular size in each
   eye and brings it nearer, so it reads smaller.
 
+A foreground layer also keeps the game's own depth inside its band (`u_vr` 4 in the vertex
+shader): the depth the flat view writes, from the camera's position and the game's
+projection, instead of the eye's. A HUD's band can be 1/512 of the buffer, and the eye's
+depth -- its near plane a few centimetres out -- squeezed into that cannot tell apart
+surfaces closer than a large fraction of a unit at the distance a game models a HUD at: a
+3D map 16 units out, its faces and outlines a few hundredths of a unit apart, broke into
+stripes in two frames of every six. The game's projection was made for that band. The
+order between layers is the bands' either way, and within one layer the camera's depth and
+an eye's differ only by the eye's offset. `GCN_EYE_FGDEPTH=0` writes the eye's depth again.
+
 `GCN_DRAWLOG=<frame>` prints each draw's band and view-space box, which is how a game's
-layers are found.
+layers are found. In stereo the flat pass is trimmed (see above) and logs only what it
+draws; `GCN_EYE_FULLFLAT=1` makes it list the whole frame.
