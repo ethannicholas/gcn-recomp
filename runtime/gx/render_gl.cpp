@@ -394,66 +394,141 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
 
 void render_set_shader_cache(const char* path) { g_shader_cache_path = path ? path : ""; }
 
-// Builds every program the file remembers. Called once from render_init.
-static void shader_cache_load() {
-    if (g_shader_cache_path.empty()) return;
-    const auto t0 = std::chrono::steady_clock::now();
+// Building every program the file remembers: shader_cache_open reads the file, then
+// shader_cache_step builds its records in order -- all at once from render_init, or a few
+// milliseconds at a time for a frontend that asked for that
+// (render_set_shader_cache_deferred) -- and the last step rewrites the file if it has to.
+struct CacheLoad {
     std::vector<uint8_t> data;
-    if (FILE* f = fopen(g_shader_cache_path.c_str(), "rb")) {
-        fseek(f, 0, SEEK_END);
-        long n = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        if (n > 0) {
-            data.resize((size_t)n);
-            if (fread(data.data(), 1, (size_t)n, f) != (size_t)n) data.clear();
-        }
-        fclose(f);
-    }
-    if (data.empty()) return;
-    const uint8_t* p = data.data();
-    const uint8_t* end = p + data.size();
+    size_t pos = 0;
+    bool active = false, same_driver = false, stale = false;
+    int total = 0, done = 0, from_binary = 0, compiled = 0;
+    std::chrono::steady_clock::time_point t0;
+};
+static CacheLoad g_cache_load;
+static bool g_cache_deferred = false;
+
+void render_set_shader_cache_deferred(bool on) { g_cache_deferred = on; }
+
+// One record's fields, read from `p`; false at the end or at a truncated record.
+struct CacheRecord {
+    ShaderKey k;
+    uint64_t src_hash;
+    uint32_t fmt, len;
+    const uint8_t* bin;
+};
+static bool cache_next(const uint8_t*& p, const uint8_t* end, CacheRecord& r) {
     auto take = [&](void* dst, size_t n) {
         if ((size_t)(end - p) < n) return false;
         memcpy(dst, p, n);
         p += n;
         return true;
     };
+    if (!take(&r.k, sizeof(r.k)) || !take(&r.src_hash, 8) || !take(&r.fmt, 4) || !take(&r.len, 4)) return false;
+    if ((size_t)(end - p) < r.len) return false;
+    r.bin = p;
+    p += r.len;
+    return true;
+}
+
+static void shader_cache_open() {
+    CacheLoad& L = g_cache_load;
+    L = CacheLoad{};
+    if (g_shader_cache_path.empty()) return;
+    L.t0 = std::chrono::steady_clock::now();
+    if (FILE* f = fopen(g_shader_cache_path.c_str(), "rb")) {
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (n > 0) {
+            L.data.resize((size_t)n);
+            if (fread(L.data.data(), 1, (size_t)n, f) != (size_t)n) L.data.clear();
+        }
+        fclose(f);
+    }
+    if (L.data.empty()) return;
     uint32_t magic = 0, ver = 0;
     uint64_t drv = 0;
-    if (!take(&magic, 4) || !take(&ver, 4) || !take(&drv, 8) || magic != kCacheMagic || ver != kCacheVersion) {
+    if (L.data.size() < 16) return;
+    memcpy(&magic, L.data.data(), 4);
+    memcpy(&ver, L.data.data() + 4, 4);
+    memcpy(&drv, L.data.data() + 8, 8);
+    if (magic != kCacheMagic || ver != kCacheVersion) {
         fprintf(stderr, "[shaders] ignoring unrecognised cache %s\n", g_shader_cache_path.c_str());
         return;
     }
-    const bool same_driver = drv == driver_id();
-    int from_binary = 0, compiled = 0;
-    bool stale = !same_driver;
-    while (p < end) {
-        ShaderKey k;
-        uint64_t src_hash;
-        uint32_t fmt, len;
-        if (!take(&k, sizeof(k)) || !take(&src_hash, 8) || !take(&fmt, 4) || !take(&len, 4)) { stale = true; break; }
-        const uint8_t* bin = p;
-        if ((size_t)(end - p) < len) { stale = true; break; }
-        p += len;
-        if (g_programs.count(k)) { stale = true; continue; }  // a duplicate, written by a crash mid-append
-        std::string src = gen_pixel_shader(k);
-        const bool bin_ok = same_driver && len && program_src_hash(src.c_str()) == src_hash;
-        GLuint prog = bin_ok ? build_program(k, src, bin, fmt, len) : 0;
-        if (prog) from_binary++;
-        else { prog = build_program(k, src, nullptr, 0, 0); compiled++; stale = true; }
-        register_program(k, prog);
-    }
-    // Anything that could not be used as stored is replaced: the whole file is rewritten
-    // from the programs now in hand, with fresh binaries where the driver gives them.
-    if (stale || (g_binaries_supported && from_binary == 0 && compiled > 0)) {
-        if (FILE* f = fopen(g_shader_cache_path.c_str(), "wb")) {
-            shader_cache_write_header(f);
-            for (auto& kv : g_programs) shader_cache_write_record(f, kv.first, program_src_hash(gen_pixel_shader(kv.first).c_str()), kv.second.prog);
-            fclose(f);
+    L.same_driver = drv == driver_id();
+    L.stale = !L.same_driver;
+    L.pos = 16;
+    // Counted first, for the progress a frontend shows.
+    const uint8_t* p = L.data.data() + L.pos;
+    const uint8_t* end = L.data.data() + L.data.size();
+    CacheRecord r;
+    while (cache_next(p, end, r)) L.total++;
+    L.active = true;
+}
+
+bool render_shader_cache_step(double budget_ms, int* done, int* total) {
+    CacheLoad& L = g_cache_load;
+    if (L.active) {
+        const auto t_step = std::chrono::steady_clock::now();
+        const uint8_t* p = L.data.data() + L.pos;
+        const uint8_t* end = L.data.data() + L.data.size();
+        while (p < end) {
+            CacheRecord r;
+            if (!cache_next(p, end, r)) {
+                L.stale = true;
+                p = end;
+                break;
+            }
+            L.done++;
+            if (g_programs.count(r.k)) {
+                L.stale = true;  // a duplicate, written by a crash mid-append
+            } else {
+                std::string src = gen_pixel_shader(r.k);
+                const bool bin_ok = L.same_driver && r.len && program_src_hash(src.c_str()) == r.src_hash;
+                GLuint prog = bin_ok ? build_program(r.k, src, r.bin, r.fmt, r.len) : 0;
+                if (prog) {
+                    L.from_binary++;
+                } else {
+                    prog = build_program(r.k, src, nullptr, 0, 0);
+                    L.compiled++;
+                    L.stale = true;
+                }
+                register_program(r.k, prog);
+            }
+            if (ms_since(t_step) >= budget_ms) break;
+        }
+        L.pos = (size_t)(p - L.data.data());
+        if (p >= end) {
+            // Anything that could not be used as stored is replaced: the whole file is
+            // rewritten from the programs now in hand, with fresh binaries where the
+            // driver gives them.
+            if (L.stale || (g_binaries_supported && L.from_binary == 0 && L.compiled > 0)) {
+                if (FILE* f = fopen(g_shader_cache_path.c_str(), "wb")) {
+                    shader_cache_write_header(f);
+                    for (auto& kv : g_programs)
+                        shader_cache_write_record(f, kv.first, program_src_hash(gen_pixel_shader(kv.first).c_str()),
+                                                  kv.second.prog);
+                    fclose(f);
+                }
+            }
+            fprintf(stderr, "[shaders] %d programs from cache (%d from binaries, %d compiled) in %.0f ms\n",
+                    L.from_binary + L.compiled, L.from_binary, L.compiled, ms_since(L.t0));
+            L.active = false;
+            L.data.clear();
+            L.data.shrink_to_fit();
         }
     }
-    fprintf(stderr, "[shaders] %d programs from cache (%d from binaries, %d compiled) in %.0f ms\n",
-            from_binary + compiled, from_binary, compiled, ms_since(t0));
+    if (done) *done = L.done;
+    if (total) *total = L.total;
+    return !L.active;
+}
+
+// Called once from render_init.
+static void shader_cache_load() {
+    shader_cache_open();
+    if (!g_cache_deferred) render_shader_cache_step(1e30, nullptr, nullptr);
 }
 
 static const Program& get_program(const ShaderKey& k) {

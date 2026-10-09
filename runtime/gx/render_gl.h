@@ -14,6 +14,17 @@ constexpr int kMaxInternalScale = 8;
 void render_set_shader_cache(const char* path);
 void render_init(int internal_scale);
 
+// Building a large cache takes a while -- after a change to the shaders every program is
+// compiled again, 6,000 of them in 25 s on a Quest 3 -- and a frontend that must keep
+// answering its platform meanwhile (an Android app is killed as not responding after a
+// few seconds) builds it in steps instead. Called before render_init, this makes
+// render_init only read the file; render_shader_cache_step then builds programs for up to
+// `budget_ms` per call and returns true once all are built (or there is no cache), with
+// how many are built so far and how many there are. Without it render_init builds them
+// all at once, as before.
+void render_set_shader_cache_deferred(bool on);
+bool render_shader_cache_step(double budget_ms, int* done, int* total);
+
 // Re-scale the EFB between frames. Call only when a whole frame is about to be drawn:
 // it discards the EFB's contents and every texture an EFB copy has produced.
 void render_set_internal_scale(int scale);

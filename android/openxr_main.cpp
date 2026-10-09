@@ -759,6 +759,94 @@ static void apply_env_file(const std::string& dir) {
     fclose(f);
 }
 
+// The shader cache, built while the app keeps answering. After a change to the shaders every
+// program in it is compiled again -- 6,000 programs, 25 s on a Quest 3 -- and done in one go
+// on this thread the app answered neither Android nor the runtime meanwhile: the viewer saw
+// the runtime's waiting room and then "not responding". So it is built a slice at a time
+// (render_shader_cache_step), with Android's events and the runtime's frames kept up
+// between slices and a progress bar on the theater panel, drawn with clears alone since no
+// shader can be assumed yet.
+[[noreturn]] static void app_exit(const char* why);
+static void build_shaders_responsively(android_app* app) {
+    const auto t0 = std::chrono::steady_clock::now();
+    int done = 0, total = 0;
+    bool finished = false;
+    while (!finished) {
+        int events;
+        android_poll_source* src;
+        while (ALooper_pollOnce(0, nullptr, &events, (void**)&src) >= 0) {
+            if (src) src->process(app, src);
+            if (app->destroyRequested) app_exit("activity destroyed");
+        }
+        poll_xr_events();
+        finished = gx::render_shader_cache_step(40.0, &done, &total);
+        if (finished || !g_xr.running) {
+            if (!g_xr.running && !finished) usleep(1000);
+            continue;
+        }
+        XrFrameState fs{XR_TYPE_FRAME_STATE};
+        XrFrameWaitInfo fw{XR_TYPE_FRAME_WAIT_INFO};
+        if (XR_FAILED(xrWaitFrame(g_xr.session, &fw, &fs))) continue;
+        XrFrameBeginInfo fb{XR_TYPE_FRAME_BEGIN_INFO};
+        xrBeginFrame(g_xr.session, &fb);
+        XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        bool drew = false;
+        uint32_t idx = 0;
+        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (fs.shouldRender && XR_SUCCEEDED(xrAcquireSwapchainImage(g_xr.swapchain, &ai, &idx))) {
+            XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            wi.timeout = XR_INFINITE_DURATION;
+            if (XR_SUCCEEDED(xrWaitSwapchainImage(g_xr.swapchain, &wi))) {
+                const int w = g_swap_w, h = g_swap_h;
+                const int bw = w * 6 / 10, bh = h / 24, bx = (w - bw) / 2, by = (h - bh) / 2;
+                const int fill = total > 0 ? (int)((int64_t)bw * done / total) : 0;
+                glBindFramebuffer(GL_FRAMEBUFFER, g_xr.fbos[idx]);
+                glViewport(0, 0, w, h);
+                glDisable(GL_SCISSOR_TEST);
+                glColorMask(1, 1, 1, 1);
+                glClearColor(0.02f, 0.02f, 0.03f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glEnable(GL_SCISSOR_TEST);
+                glScissor(bx - 3, by - 3, bw + 6, bh + 6);  // the frame
+                glClearColor(0.35f, 0.4f, 0.45f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glScissor(bx, by, bw, bh);                  // the track
+                glClearColor(0.06f, 0.07f, 0.08f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                if (fill > 0) {
+                    glScissor(bx, by, fill, bh);            // what is built
+                    glClearColor(0.2f, 0.6f, 0.9f, 1.0f);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                }
+                glDisable(GL_SCISSOR_TEST);
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glFlush();
+                drew = true;
+            }
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            xrReleaseSwapchainImage(g_xr.swapchain, &ri);
+        }
+        XrFrameEndInfo fe{XR_TYPE_FRAME_END_INFO};
+        fe.displayTime = fs.predictedDisplayTime;
+        fe.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        const XrCompositionLayerBaseHeader* layer = (const XrCompositionLayerBaseHeader*)&quad;
+        if (drew) {
+            quad.space = g_xr.space;
+            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            quad.subImage.swapchain = g_xr.swapchain;
+            quad.subImage.imageRect = {{0, 0}, {g_swap_w, g_swap_h}};
+            quad.pose.orientation = {0, 0, 0, 1};
+            quad.pose.position = {0, 0, -kQuadDist};
+            quad.size = {kQuadW, kQuadH};
+            fe.layerCount = 1;
+            fe.layers = &layer;
+        }
+        xrEndFrame(g_xr.session, &fe);
+    }
+    LOGI("shaders built: %d in %.1f s", total,
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
 // A NativeActivity can be destroyed and re-created inside one process, and that calls
 // android_main a second time. Nothing here survives it: the EGL context, the OpenXR
 // instance and session, the recompiled game and the threads it booted are all global and
@@ -829,8 +917,10 @@ void android_main(android_app* app) {
     input_script_init(read_script(dir).c_str());
     static const std::string shader_cache = dir + "/shaders.bin";
     gx::render_set_shader_cache(shader_cache.c_str());
+    gx::render_set_shader_cache_deferred(true);
     gx::render_init(g_vrcfg.start_in_stereo ? g_vrcfg.stereo_scale : g_vrcfg.theater_scale);
     gx::render_set_window_size(g_swap_w, g_swap_h);
+    build_shaders_responsively(app);
 
     // The app's own files directory is the only place it can write, and the memory card
     // has to land there or the game starts from a blank one every launch.
