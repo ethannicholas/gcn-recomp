@@ -248,7 +248,9 @@ struct CacheEntry {
 struct EfbCopyEntry {
     std::shared_ptr<TexData> tex;
     uint32_t last_frame;
+    uint32_t checked_frame;
     uint32_t w, h, fmt;
+    uint64_t ram;              // efb_copy_fingerprint of the destination when copied
 };
 
 struct Key {
@@ -262,6 +264,25 @@ struct KeyHash {
 static std::unordered_map<Key, CacheEntry, KeyHash> g_cache;
 static std::unordered_map<uint32_t, EfbCopyEntry> g_efb_copies;  // by address
 
+// A copy is kept on the GPU and never written to RAM, so the RAM at its destination is
+// whatever was there before. If that changes, the game has put something else there -- a
+// texture loaded into memory the copy's buffer used to occupy -- and the address no longer
+// names the copy. Without this check a lookup kept returning the copy, and kept it from
+// expiring, so the new texture was drawn as the old copy for as long as it was in use.
+// The fingerprint covers w*h/2 bytes, the smallest copy (4 bits a texel): the first 4 KB
+// in full and a word every 256 bytes after that, which is enough for anything that
+// rewrites the region and costs a few kilobytes a frame per copy.
+static uint64_t efb_copy_fingerprint(uint32_t addr, uint32_t w, uint32_t h) {
+    uint32_t n = w * h / 2;
+    if (addr >= RAM_SIZE) return 0;
+    if (n > RAM_SIZE - addr) n = RAM_SIZE - addr;
+    const uint8_t* p = mem_ptr(0x80000000u | addr);
+    const uint32_t head = n < 4096 ? n : 4096;
+    uint64_t h64 = hash_bytes(p, head, n);
+    for (uint32_t o = head; o + 8 <= n; o += 256) h64 = hash_bytes(p + o, 8, h64);
+    return h64;
+}
+
 uint32_t texture_register_efb_copy(uint32_t addr, uint32_t w, uint32_t h, uint32_t fmt) {
     addr &= 0x03FFFFFF;
     // A copy to the same place with the same geometry is the same target being redrawn,
@@ -270,7 +291,8 @@ uint32_t texture_register_efb_copy(uint32_t addr, uint32_t w, uint32_t h, uint32
     // -- around 2.5 MB a frame here, since EFB textures are exempt from eviction.
     auto it = g_efb_copies.find(addr);
     if (it != g_efb_copies.end() && it->second.w == w && it->second.h == h && it->second.fmt == fmt) {
-        it->second.last_frame = g_frame_counter;
+        it->second.last_frame = it->second.checked_frame = g_frame_counter;
+        it->second.ram = efb_copy_fingerprint(addr, w, h);
         return it->second.tex->id;
     }
     EfbCopyEntry e{};
@@ -279,7 +301,8 @@ uint32_t texture_register_efb_copy(uint32_t addr, uint32_t w, uint32_t h, uint32
     e.tex->width = w;
     e.tex->height = h;
     e.w = w; e.h = h; e.fmt = fmt;
-    e.last_frame = g_frame_counter;
+    e.last_frame = e.checked_frame = g_frame_counter;
+    e.ram = efb_copy_fingerprint(addr, w, h);
     g_efb_copies[addr] = e;
     return e.tex->id;
 }
@@ -301,11 +324,23 @@ static void scan_used_indices(const uint8_t* src, uint32_t total, uint32_t fmt, 
 
 TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData>>& new_textures) {
     uint32_t addr = p.addr & 0x03FFFFFF;
-    // EFB copies at this address take priority (the copy isn't written back to RAM).
+    // EFB copies at this address take priority (the copy isn't written back to RAM),
+    // unless the RAM there has changed since, which means the copy has been replaced.
+    static const bool hash_always = getenv("GCN_TEXHASH_ALWAYS") != nullptr;
     auto eit = g_efb_copies.find(addr);
     if (eit != g_efb_copies.end()) {
-        eit->second.last_frame = g_frame_counter;
-        return {eit->second.tex->id, true};
+        EfbCopyEntry& c = eit->second;
+        if (c.checked_frame != g_frame_counter || hash_always) {
+            c.checked_frame = g_frame_counter;
+            if (efb_copy_fingerprint(addr, c.w, c.h) != c.ram) {
+                g_efb_copies.erase(eit);
+                eit = g_efb_copies.end();
+            }
+        }
+        if (eit != g_efb_copies.end()) {
+            c.last_frame = g_frame_counter;
+            return {c.tex->id, true};
+        }
     }
     uint32_t tlut_entries = 0;
     if (p.fmt == TF_CI4) tlut_entries = 16;
@@ -334,7 +369,6 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
     // rewrite a texture between two draws of the same frame. GCN_TEXHASH_ALWAYS=1 checks
     // on every lookup instead; if an artifact disappears under it, the game is doing
     // exactly that and the texture needs telling apart some other way.
-    static const bool hash_always = getenv("GCN_TEXHASH_ALWAYS") != nullptr;
     if (e.variants.empty() || e.checked_frame != g_frame_counter || hash_always) {
         const uint64_t hsh = hash_bytes(src, total, 0);
         e.checked_frame = g_frame_counter;

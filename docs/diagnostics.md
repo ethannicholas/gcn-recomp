@@ -153,6 +153,14 @@ an artifact goes away under it, the game is doing exactly that. (Palettes are no
 this: an indexed texture is decoded once per distinct palette its texels see, so a font drawn
 black for a shadow and then white in the same frame gets both.)
 
+An EFB copy lives on the GPU and is never written to RAM, so a lookup at its address returns
+the copy -- until the RAM there changes. The copy's destination is fingerprinted when it is
+made and checked once a frame (every lookup under `GCN_TEXHASH_ALWAYS`); when it differs, the
+game has loaded something else into that memory, and the copy is dropped so the texture is
+decoded from RAM. Before this a copy outlived its memory: a texture loaded where an old copy's
+buffer had been was drawn as that copy -- black, or a stale screen -- for as long as it was in
+use, which every lookup prolonged.
+
 ## Finding a draw or a function
 
 - `GCN_DRAWLOG=<frame>` lists every draw in one frame with its index; `GCN_DRAW_SKIP=a-b`
