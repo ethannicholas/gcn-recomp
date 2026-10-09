@@ -74,6 +74,27 @@ uint32_t process(const uint8_t* data, uint32_t len, bool partial_ok);
 // may be reused before the front end gets to them -- and calls `sync` at each command
 // whose effect the guest can observe, after appending it: a PE token or finish, and the
 // copy that ends a frame. Returns bytes consumed, as process() does.
+// GCN_STALLS=1: how long the pipeline's threads wait on one another, at each place one can
+// block -- the guest on the front end (its queue full, a draw-done, a draw-sync token
+// read), the front end on the transform, the transform on the renderer -- summed and
+// printed every 60 frames. A thread's time minus its stalls is its own work, which is
+// what tells the stage that sets the pace from the stages waiting on it.
+enum class Stall { FeFull, Finish, Token, XfFull, RenderFull, Count };
+bool stalls_on();
+void stall_add(Stall s, uint64_t us);
+// Times a wait when GCN_STALLS is set.
+struct StallTimer {
+    Stall s;
+    uint64_t t0;
+    explicit StallTimer(Stall st);
+    ~StallTimer();
+};
+
+// Whether a draw-sync token read may show the GPU a frame behind the CPU (fifo.cpp, "draw-sync
+// lag"). Off unless a game turns it on: what a game does with the value is the game's.
+// GCN_GX_TOKEN_LAG=0 or 1 overrides the game.
+void set_draw_sync_lag(bool on);
+
 enum class SkimSync { Token, TokenInt, Finish, Frame };
 using SkimSyncFn = void (*)(SkimSync kind, uint32_t value, std::vector<uint8_t>& out);
 uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync);

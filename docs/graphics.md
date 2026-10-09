@@ -11,18 +11,43 @@ Four threads share a frame, besides the renderer's:
 
 - **The guest** runs the game, and skims the GX command stream as the game writes it
   (`gx::skim`, `gx/cmd.cpp`): it walks the commands, copies each complete one into a queue
-  with display lists inlined, and keeps the frame protocol itself. At a PE token or a
-  draw-done it waits for the front end to catch up and then raises the signal, at the same
-  guest instruction as when everything ran inline, so replays stay exact; it also counts
-  frames at the display copy, which scripted input and the guest checks key on.
+  with display lists inlined, and keeps the frame protocol itself. At a draw-done it waits
+  for the front end to catch up and then raises the signal, at the same guest instruction
+  as when everything ran inline, so replays stay exact. A PE token is raised at once, and
+  the wait moves to where the game reads the token register: what a token promises is
+  only that the GPU has got that far by the time the game looks. It also counts frames at
+  the display copy, which scripted input and the guest checks key on.
+
+  A game that sets a token after every skinned model and reads it back straight away still
+  waits at each read for the front end to decode everything drawn before it, which by
+  then is the whole world. Two things cut that. The guest hands commands over in 4 KB
+  chunks rather than 64 KB, so the front end has usually started on what is waited for
+  (and each side wakes the other only when it is asleep: a notify per chunk was a futex
+  syscall each time on Android). And a game can turn on draw-sync lag
+  (`gx::set_draw_sync_lag`): a token read returns the latest token issued before the last
+  frame boundary -- a GPU a frame behind, as real hardware usually is -- which the front end
+  has nearly always passed, so the read does not wait; a game that reads one over and over
+  without issuing another is waiting for the GPU to free something, and after eight reads
+  gets the latest. Both are functions of what the guest did, so replays stay exact.
+  `GCN_GX_TOKEN_EAGER=1` waits at every token as before; `GCN_GX_TOKEN_LAG=0` or `1`
+  overrides the game. `GCN_STALLS=1` prints how long each thread waits on the others.
 - **The front end** (`gx/fifo.cpp`) runs `gx::process` on the queue: register loads,
   vertex decoding, pixel-state snapshots, textures. Vertex arrays and textures are read when
   it reaches the draw, as the hardware reads them.
 - **Two transform workers** (`XfDraw` in `gx/xf.cpp`) transform and light each submitted
   frame from per-draw snapshots of the XF state, copied a sixteen-word block at a time as
-  it changes.
+  it changes. A draw's plan -- texgens, channels -- and the cached matrices and lights are
+  kept while the snapshot they came from is the same one, since a room's display lists are
+  thousands of four-vertex draws under one set of registers.
 
-Frames are byte-identical either way. `GCN_GX_SYNC=1` runs
+Because the front end reads vertex arrays and textures when it gets to them, what it reads
+of memory the guest rewrites every frame depends on how far behind the guest it is. Frames
+are byte-identical run to run, but a change to the pipeline's timing can move a handful
+of pixels where such data is drawn: a first-person game's HUD and visor edges moved by up
+to 61 of 255 at a few hundred pixels when the transform got faster, and matched exactly
+with the front end inline (`GCN_GX_SYNC=1`) either way.
+
+`GCN_GX_SYNC=1` runs
 the front end inline on the guest thread again, `GCN_XF_SYNC=1` the transform; the
 diagnostics that read transformed vertices early select the latter themselves.
 

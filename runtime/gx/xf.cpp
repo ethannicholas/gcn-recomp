@@ -47,6 +47,7 @@ static constexpr size_t kMaxQueuedBatches = 8;
 
 void submit_batch(std::unique_ptr<Batch> b) {
     std::unique_lock<std::mutex> lk(g_q_mutex);
+    StallTimer stall(Stall::RenderFull);
     // Wait for room, which throttles the guest to the renderer's rate. The timeout is
     // only a safety valve: if nothing is consuming at all (no window, a stalled render
     // thread) the guest must not block forever, so drop the oldest frame instead.
@@ -918,11 +919,26 @@ static void pack_all(Batch& b) {
     }
 }
 
+// The snapshot offsets the current plan was loaded from (see transform_draw). A frame's
+// draws are mostly runs of small primitives under one set of registers -- a room's
+// display lists are thousands of four-vertex fans -- so the plan, the cached matrices and
+// the lights are each kept until the snapshot they came from changes. Forgotten at the
+// start of each frame's share (transform_range), since snapshots are reused.
+static thread_local bool t_plan_valid;
+static thread_local uint32_t t_plan_snap[XF_REGIONS];
+
 static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
     t_xf.base = pd.snap.data();
     for (int r = 0; r < XF_REGIONS; r++) t_xf.pt[r] = pd.snap.data() + d.snap[r];
     t_draw_seq = d.seq;
-    load_xf_plan();
+    if (!t_plan_valid || d.snap[XF_REGS] != t_plan_snap[XF_REGS]) {
+        load_xf_plan();
+    } else {
+        if (d.snap[XF_MTX] != t_plan_snap[XF_MTX] || d.snap[XF_NRM] != t_plan_snap[XF_NRM]) g_mtx_cached = ~0u;
+        if (d.snap[XF_LIGHT] != t_plan_snap[XF_LIGHT]) g_lights_loaded = 0;
+    }
+    t_plan_valid = true;
+    memcpy(t_plan_snap, d.snap, sizeof(t_plan_snap));
     const InVertex* in = pd.in.data() + d.first_in;
     GpuVertex* out = b.verts.data() + d.first_out;
     uint32_t stride = 0;
@@ -938,6 +954,7 @@ static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
 }
 
 static void transform_range(const Pending& pd, size_t lo, size_t hi, Batch& b) {
+    t_plan_valid = false;
     for (size_t i = lo; i < hi; i++) transform_draw(pd, pd.draws[i], b);
 }
 
@@ -1061,6 +1078,7 @@ static void submit_for_transform(std::unique_ptr<Batch> b, std::unique_ptr<Pendi
     }();
     (void)started;
     std::unique_lock<std::mutex> lk(g_xf_mutex);
+    StallTimer stall(Stall::XfFull);
     g_xf_cv.wait(lk, [] { return g_xf_jobs.size() < kMaxXfJobs; });
     g_xf_jobs.push_back({std::move(b), std::move(pd)});
     g_xf_cv.notify_all();
@@ -1168,7 +1186,10 @@ static void draw_impl(const DrawCall& dc) {
         d.snap[r] = pd.snap_off[r];
     }
     pd.draws.push_back(d);
-    if (xf_sync()) transform_draw(pd, d, b);
+    if (xf_sync()) {
+        t_plan_valid = false;  // snapshots restart every frame; no carrying a plan over
+        transform_draw(pd, d, b);
+    }
     GpuVertex* out = b.verts.data() + base;
 
     // GCN_MTXLOG=<n> prints the position matrix and projection of every draw in the nth

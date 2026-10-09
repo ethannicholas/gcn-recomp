@@ -2,6 +2,8 @@
 #include "../runtime.h"
 #include "gx.h"
 #include "render.h"
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -35,7 +37,8 @@ static void pe_update_irq() {
 }
 
 void pe_signal_token(uint16_t token, bool interrupt) {
-    if (getenv("GCN_TOKLOG")) fprintf(stderr, "[tok] %04X%s\n", token, interrupt ? " int" : "");
+    static const bool toklog = getenv("GCN_TOKLOG") != nullptr;
+    if (toklog) fprintf(stderr, "[tok] %04X%s\n", token, interrupt ? " int" : "");
     g_pe_token = token;
     if (interrupt) { g_pe_ctrl |= PE_TOKEN_INT; pe_update_irq(); }
 }
@@ -57,9 +60,11 @@ void cp_init() {}
 //
 // So the guest thread skims (gx::skim): it walks the commands, copies every complete one
 // into a queue -- display lists inlined, since their memory may be reused -- and keeps
-// the frame protocol: at a token or a finish it waits until the front end has caught up
-// to that command, then raises the signal itself, at the same guest instruction as when
-// the front end ran inline, which keeps replays exact. Vertex arrays and textures are
+// the frame protocol: at a finish it waits until the front end has caught up to that
+// command, and a token read waits until the front end has reached the token it returns
+// (see "draw-sync lag" and pe_read16); either signal is raised by the guest thread itself,
+// at the same guest instruction as when the front end ran inline, which keeps replays
+// exact. Vertex arrays and textures are
 // still read when the front end gets to the draw, as the hardware reads them; a game that
 // rewrites one before the GPU has signalled that it is done with it is already racing
 // the hardware. The display copy that ends a frame is counted by the skim too, since
@@ -72,12 +77,83 @@ static bool fe_threaded() {
     return on;
 }
 
+// GCN_STALLS (gx.h).
+static std::atomic<uint64_t> g_stall_us[(int)gx::Stall::Count];
+static std::atomic<uint32_t> g_tok_reads, g_tok_lagged, g_tok_spun;   // draw-sync lag, below
+static uint64_t now_us() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+bool gx::stalls_on() {
+    static const bool on = getenv("GCN_STALLS") != nullptr;
+    return on;
+}
+void gx::stall_add(Stall s, uint64_t us) { g_stall_us[(int)s] += us; }
+gx::StallTimer::StallTimer(Stall st) : s(st), t0(stalls_on() ? now_us() : 0) {}
+gx::StallTimer::~StallTimer() {
+    if (t0) stall_add(s, now_us() - t0);
+}
+static void stall_report(uint32_t frame) {
+    static uint32_t last;
+    if (!gx::stalls_on() || frame < last + 60) return;
+    last = frame;
+    static const char* names[] = {"guest: fe queue full", "guest: draw-done", "guest: token read",
+                                  "fe: transform queue full", "transform: render queue full"};
+    fprintf(stderr, "[stalls] f%u per frame over 60:", frame);
+    for (int i = 0; i < (int)gx::Stall::Count; i++)
+        fprintf(stderr, "%s %s %.2f ms", i ? "," : "", names[i], g_stall_us[i].exchange(0) / 60000.0);
+    fprintf(stderr, "; token reads %u, lagged %u, spun %u", g_tok_reads.exchange(0), g_tok_lagged.exchange(0),
+            g_tok_spun.exchange(0));
+    fprintf(stderr, "\n");
+}
+
+// One condition variable each way, each signalled only when its waiter is asleep (the
+// flags below, under the mutex). The guest hands over a chunk every few kilobytes and the
+// front end finishes one as often; a notify per chunk on a shared variable was a futex
+// syscall each time on Android whether or not anyone waited, the largest single item in
+// both threads' profiles once the chunks were small.
 static std::mutex g_fe_mutex;
-static std::condition_variable g_fe_cv;
+static std::condition_variable g_fe_work_cv;   // the front end waits for chunks
+static std::condition_variable g_fe_done_cv;   // the guest waits for the front end
+static bool g_fe_sleeping;                     // the front end is waiting on g_fe_work_cv
+static bool g_guest_waiting;                   // the guest is waiting on g_fe_done_cv
 static std::deque<std::vector<uint8_t>> g_fe_queue;
 static std::vector<std::vector<uint8_t>> g_fe_spare;   // emptied chunks, capacity kept
 static size_t g_fe_bytes;            // queued, not yet processed
 static bool g_fe_busy;               // the thread is processing a chunk
+static uint64_t g_fe_handed;         // bytes ever handed over (the guest's count)
+static uint64_t g_fe_done;           // bytes ever processed, under g_fe_mutex
+// Where in the stream the latest draw-sync token stands, in g_fe_handed's terms: reading
+// the token register waits until the front end has got that far. See skim_sync.
+static uint64_t g_token_at;
+
+// Draw-sync lag. A game reads a token to learn how far the GPU has got, and real hardware
+// is commonly most of a frame behind the CPU, so a game that recycles buffers by token
+// keeps enough of them for that. Showing it the latest token issued before the last frame
+// boundary, rather than the latest of all, is a GPU a frame behind: the front end is
+// nearly always past that point already, so the read does not wait for it, where waiting
+// for the latest token put the guest behind every draw the front end had yet to decode.
+// A game that reads a token over and over without issuing one is waiting for the GPU to
+// free something, and gets the latest (with the wait) after kLagSpin reads, so a game whose
+// buffers are full still moves. Both are functions of what the guest did, not of timing,
+// so replays stay exact.
+static bool g_lag_on;
+static uint16_t g_tok_latest;    // the latest token issued, and where it stands
+static uint64_t g_tok_latest_at;
+static bool g_tok_frame_valid;   // a token issued before the last frame boundary
+static uint16_t g_tok_frame;
+static uint64_t g_tok_frame_at;
+static uint32_t g_tok_reads_since_issue;
+static constexpr uint32_t kLagSpin = 8;
+
+void gx::set_draw_sync_lag(bool on) { g_lag_on = on; }
+static bool lag_on() {
+    static const int env = [] {
+        const char* e = getenv("GCN_GX_TOKEN_LAG");
+        return e ? atoi(e) : -1;
+    }();
+    return env >= 0 ? env != 0 : g_lag_on;
+}
 static constexpr size_t kFeMaxBytes = 8u << 20;
 static std::vector<uint8_t> g_skim_out;
 
@@ -86,7 +162,11 @@ static void fe_thread_main() {
         std::vector<uint8_t> chunk;
         {
             std::unique_lock<std::mutex> lk(g_fe_mutex);
-            g_fe_cv.wait(lk, [] { return !g_fe_queue.empty(); });
+            while (g_fe_queue.empty()) {
+                g_fe_sleeping = true;
+                g_fe_work_cv.wait(lk);
+            }
+            g_fe_sleeping = false;
             chunk = std::move(g_fe_queue.front());
             g_fe_queue.pop_front();
             g_fe_busy = true;
@@ -95,12 +175,21 @@ static void fe_thread_main() {
         {
             std::lock_guard<std::mutex> lk(g_fe_mutex);
             g_fe_bytes -= chunk.size();
+            g_fe_done += chunk.size();
             g_fe_busy = false;
             chunk.clear();
-            if (g_fe_spare.size() < 8) g_fe_spare.push_back(std::move(chunk));
-            g_fe_cv.notify_all();
+            if (g_fe_spare.size() < 256) g_fe_spare.push_back(std::move(chunk));
+            if (g_guest_waiting) g_fe_done_cv.notify_one();
         }
     }
+}
+
+// Waits, on the guest thread, until `ready` holds. Call with the lock held.
+template <class Pred> static void guest_wait(std::unique_lock<std::mutex>& lk, Pred ready) {
+    if (ready()) return;
+    g_guest_waiting = true;
+    g_fe_done_cv.wait(lk, ready);
+    g_guest_waiting = false;
 }
 
 // Hands what the skim has gathered to the front end, waiting while too much is queued.
@@ -113,21 +202,47 @@ static void fe_submit() {
     }();
     (void)started;
     std::unique_lock<std::mutex> lk(g_fe_mutex);
-    g_fe_cv.wait(lk, [] { return g_fe_bytes < kFeMaxBytes; });
+    {
+        gx::StallTimer stall(gx::Stall::FeFull);
+        guest_wait(lk, [] { return g_fe_bytes < kFeMaxBytes; });
+    }
     g_fe_bytes += g_skim_out.size();
+    g_fe_handed += g_skim_out.size();
     g_fe_queue.push_back(std::move(g_skim_out));
     g_skim_out.clear();
     if (!g_fe_spare.empty()) {
         g_skim_out = std::move(g_fe_spare.back());
         g_fe_spare.pop_back();
     }
-    g_fe_cv.notify_all();
+    if (g_fe_sleeping) g_fe_work_cv.notify_one();
 }
 
 // Waits until the front end has processed everything handed to it.
 static void fe_wait_idle() {
+    gx::StallTimer stall(gx::Stall::Finish);
     std::unique_lock<std::mutex> lk(g_fe_mutex);
-    g_fe_cv.wait(lk, [] { return g_fe_queue.empty() && !g_fe_busy; });
+    guest_wait(lk, [] { return g_fe_queue.empty() && !g_fe_busy; });
+}
+
+// Waits until the front end has processed the first `at` bytes ever handed to it.
+static void fe_wait_until(uint64_t at) {
+    gx::StallTimer stall(gx::Stall::Token);
+    std::unique_lock<std::mutex> lk(g_fe_mutex);
+    guest_wait(lk, [at] { return g_fe_done >= at; });
+}
+
+// A draw-sync token is how a game learns that the GPU has got past a point in the
+// stream -- typically that it has read a buffer the CPU wants to write again. Waiting
+// for the front end at every token kept that true, but a game can set one after every
+// skinned model, dozens a frame, and each wait put the guest and the front end back in
+// series. What makes it true is only that the front end has got there by the time the
+// game *reads* the token, so the wait is made there instead (pe_read16), and the token's
+// value and its interrupt still land at the guest instruction they always did: the same
+// value is read at the same point, which keeps replays exact. GCN_GX_TOKEN_EAGER=1 waits
+// at every token as before.
+static bool token_eager() {
+    static const bool on = getenv("GCN_GX_TOKEN_EAGER") != nullptr;
+    return on;
 }
 
 static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) {
@@ -136,13 +251,25 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
     case gx::SkimSync::TokenInt:
     case gx::SkimSync::Finish:
         fe_submit();
-        fe_wait_idle();
+        if (kind == gx::SkimSync::Finish || token_eager()) fe_wait_idle();
+        else g_token_at = g_fe_handed;
+        if (kind != gx::SkimSync::Finish) {
+            g_tok_latest = (uint16_t)value;
+            g_tok_latest_at = g_fe_handed;
+            g_tok_reads_since_issue = 0;
+        }
         if (kind == gx::SkimSync::Finish) pe_signal_finish();
         else pe_signal_token((uint16_t)value, kind == gx::SkimSync::TokenInt);
         break;
     case gx::SkimSync::Frame:
         fe_submit();
         gx::g_frames_submitted++;
+        stall_report(gx::g_frames_submitted);
+        if (g_tok_latest_at) {
+            g_tok_frame_valid = true;
+            g_tok_frame = g_tok_latest;
+            g_tok_frame_at = g_tok_latest_at;
+        }
         debug_guest_check("frame");
         heap_trace_frame(gx::g_frames_submitted.load());
         break;
@@ -154,8 +281,12 @@ static uint32_t cp_consume(const uint8_t* data, uint32_t len) {
     const uint32_t used = gx::skim(data, len, true, g_skim_out, skim_sync);
     // Handed over in batches: this runs for every 32-byte line out of the gather pipe, and
     // a hand-off per line would cost more than the line. The syncs and the end of a frame
-    // hand over whatever is gathered regardless.
-    if (g_skim_out.size() >= (64u << 10)) fe_submit();
+    // hand over whatever is gathered regardless. Small ones, though: a game that reads a
+    // draw-sync token back waits for the front end to reach it (pe_read16), and with 64 KB
+    // batches the front end had often not started on what it was waited for. In a room of
+    // skinned models setting thirty tokens a frame, 4 KB took the guest from 59 to 73 fps
+    // (8 KB and 2 KB were within 2 fps of it).
+    if (g_skim_out.size() >= (4u << 10)) fe_submit();
     return used;
 }
 
@@ -360,7 +491,17 @@ void cp_write16(uint32_t off, uint16_t v) {
 uint16_t pe_read16(uint32_t off) {
     switch (off & 0xFF) {
     case 0x0A: return g_pe_ctrl;
-    case 0x0E: return g_pe_token;
+    case 0x0E:
+        if (!fe_threaded() || !g_token_at) return g_pe_token;
+        g_tok_reads++;
+        if (lag_on() && g_tok_frame_valid && ++g_tok_reads_since_issue <= kLagSpin) {
+            g_tok_lagged++;
+            fe_wait_until(g_tok_frame_at);
+            return g_tok_frame;
+        }
+        if (lag_on() && g_tok_reads_since_issue > kLagSpin) g_tok_spun++;
+        fe_wait_until(g_token_at);
+        return g_pe_token;
     }
     return g_pe_regs[(off & 0x3F) >> 1];
 }

@@ -111,6 +111,15 @@ The GX front end runs on a thread of its own and the vertex transform on worker 
 `GCN_XF_SYNC=1` runs the transform per draw there, and `GCN_XF_THREADS=N` sets how many
 threads share the transform of a frame (2 by default).
 
+`GCN_STALLS=1` prints, every 60 frames, the milliseconds per frame each thread spent
+waiting on another at each place one can block: the guest on the front end (its queue
+full, a draw-done, a draw-sync token read), the front end on the transform, the transform
+on the renderer, and how many token reads were answered a frame behind
+(`GCN_GX_TOKEN_LAG`, see "Threads" in `graphics.md`). A thread's frame time minus its
+stalls is its own work, which is what tells the stage that sets the pace from the ones
+waiting on it. `GCN_GX_TOKEN_EAGER=1` makes the guest wait for the front end at every
+token, as it once did.
+
 `<game>_bench` runs the game with no graphics, audio or input, unpaced, and reports how fast
 the guest advances; `--warmup=N` (default 8) excludes boot from the steady-state figure. Its
 last column is the guest's work per presented frame in loop back-edges, the figure the
