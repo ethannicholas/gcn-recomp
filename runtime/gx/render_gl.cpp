@@ -898,7 +898,16 @@ struct AppliedState {
     bool hud_depth;
 };
 static AppliedState g_applied;
-static void gl_state_invalidate() { g_applied.valid = false; }
+// What GL's face culling is set to: -1 unknown, 0 off, 1 front, 2 back, 3 both. Kept apart
+// from g_applied because GL culls polygons only: a line or a point leaves it as it is, so a
+// game alternating filled faces with outlines -- a 3D map, thousands of draws a frame -- need
+// not turn culling off and on again around each outline. Those toggles were a quarter of
+// the render thread's time on such a screen on a Quest 3.
+static int g_gl_cull = -1;
+static void gl_state_invalidate() {
+    g_applied.valid = false;
+    g_gl_cull = -1;
+}
 
 // A program's uniform record is current while its `gen` matches g_uniform_gen, and the
 // groups that depend on the pass -- the eye's matrices, the morph, the eye target's size,
@@ -1106,11 +1115,18 @@ static void apply_state(const PixelState& st, int prim) {
         memcpy(u.viewport, vp, sizeof(st.viewport));
         u.scissor_off = bp[0x59];
     }
-    if (!(held && bp[0x22] == u.psize_reg)) {
-        g_astat.psize++;
-        float psize = ((bp[0x22] >> 8) & 0xFF) / 6.0f * g_scale;
-        glUniform1f(pr.u_point_size, psize < 1 ? 1 : psize);
-        u.psize_reg = bp[0x22];
+    // Only points read the point size, and a game that sets a line width per draw changes
+    // this register with every line: so it is sent when a draw of points needs it, and a
+    // record that is not current forgets what it held rather than keep a value it never sent.
+    if (prim == 2) {
+        if (!(held && bp[0x22] == u.psize_reg)) {
+            g_astat.psize++;
+            float psize = ((bp[0x22] >> 8) & 0xFF) / 6.0f * g_scale;
+            glUniform1f(pr.u_point_size, psize < 1 ? 1 : psize);
+            u.psize_reg = bp[0x22];
+        }
+    } else if (!held) {
+        u.psize_reg = ~0u;
     }
 
     // TEV registers
@@ -1343,23 +1359,23 @@ static void apply_state(const PixelState& st, int prim) {
     }
     // Cull
     uint32_t cull = (bp[0x00] >> 14) & 3;
-    if (!(g_applied.valid && cull == ((abp[0x00] >> 14) & 3) && prim == g_applied.prim)) {
-        g_astat.cull++;
+    if (prim == 0) {
         static bool nocull = getenv("GCN_NOCULL") != nullptr;
-        if (prim != 0 || cull == 0 || nocull) glDisable(GL_CULL_FACE);
-        else {
-            glEnable(GL_CULL_FACE);
-            if (cull == 3) glCullFace(GL_FRONT_AND_BACK);
-            else {
-                // GX: 1 = cull front, 2 = cull back. GX front faces are clockwise with y down,
-                // which is counter-clockwise after our y flip (GL's default front face).
-                bool back = cull == 2;
-                if (g_cull_swap) back = !back;
-                glCullFace(back ? GL_BACK : GL_FRONT);
+        // GX: 1 = cull front, 2 = cull back. GX front faces are clockwise with y down,
+        // which is counter-clockwise after our y flip (GL's default front face).
+        const int want = (cull == 0 || nocull) ? 0 : cull == 3 ? 3 : ((cull == 2) != g_cull_swap ? 2 : 1);
+        if (want != g_gl_cull) {
+            g_astat.cull++;
+            if (!want) {
+                glDisable(GL_CULL_FACE);
+            } else {
+                glEnable(GL_CULL_FACE);
+                glCullFace(want == 3 ? GL_FRONT_AND_BACK : want == 2 ? GL_BACK : GL_FRONT);
             }
+            g_gl_cull = want;
         }
-        g_applied.prim = prim;
     }
+    g_applied.prim = prim;
     // Scissor (EFB coords, y down), measured from the same origin as the viewport.
     const bool same_scissor = g_applied.valid && bp[0x20] == abp[0x20] && bp[0x21] == abp[0x21] && bp[0x59] == abp[0x59];
     if (!same_scissor) {
@@ -1413,6 +1429,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
     set_logic_op_off();
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    g_gl_cull = 0;
     glColorMask(1, 1, 1, 1);
     if (!c.to_xfb && c.tex_id) {
         // The same target redrawn each frame keeps its id, so reuse the texture it
@@ -1509,6 +1526,7 @@ static void blit_to_output(const EfbCopyCmd& c, GLuint src_tex) {
     set_logic_op_off();
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    g_gl_cull = 0;
     glColorMask(1, 1, 1, 1);
     glViewport(0, 0, g_win_w, g_win_h);
     glClearColor(0, 0, 0, 1);
@@ -1745,6 +1763,7 @@ static void draw_morph_background(const float P[16], const float rgb[3]) {
     glDisable(GL_BLEND);
     set_logic_op_off();
     glDisable(GL_CULL_FACE);
+    g_gl_cull = 0;
     glColorMask(1, 1, 1, 1);
     glBindVertexArray(g_copy_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

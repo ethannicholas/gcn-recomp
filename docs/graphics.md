@@ -138,6 +138,11 @@ behaviour for comparison:
   what each pass actually sent.
 - **The texture and the sampler of a unit are bound separately**, since the texture changes
   at nearly every draw and the sampler almost never.
+- **Face culling is tracked as GL has it, not as GX asks** (`g_gl_cull`). GL culls polygons
+  only, so a line or a point leaves it alone; turning it off around every line made a 3D
+  map that alternates filled faces with outlines toggle it 5,600 times a frame, a quarter
+  of the render thread on a Quest 3 (9.4 ms a pass to 6.8). The point size likewise is sent
+  only when a draw of points needs it.
 
 The vertex buffer is uploaded once a frame and was, for a while, the largest single cost of
 the render thread. A `GpuVertex` has room for eight texture coordinates of three floats,
