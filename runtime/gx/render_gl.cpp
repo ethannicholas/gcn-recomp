@@ -2325,7 +2325,7 @@ static void evict_textures(const Batch& b) {
 // already up, and it is the same frame to the texture cache.
 static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out, bool again) {
     const auto t_start = std::chrono::steady_clock::now();
-    double ms_tex = 0.0, ms_vbo = 0.0;
+    double ms_tex = 0.0, ms_vbo = 0.0, ms_copy = 0.0;
     if (!again) {
         g_render_frame++;
         evict_textures(b);
@@ -2541,12 +2541,17 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             draw_cmd(b, c);
             break;
         }
-        case CmdType::EfbCopy:
+        case CmdType::EfbCopy: {
+            // Timed on its own: a copy mid-frame ends the EFB's render pass on a tiled GPU
+            // and the driver's share of that lands here, on the CPU.
+            const auto t_copy = g_frametime ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             do_efb_copy(c.copy);
+            if (g_frametime) ms_copy += ms_since(t_copy);
             glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
             cur_state = UINT32_MAX;
             gl_state_invalidate();
             break;
+        }
         case CmdType::Present:
             if (do_present) present(c.copy);
             presented = true;
@@ -2558,8 +2563,8 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         }
     }
     if (g_frametime)
-        fprintf(stderr, "[rt] f%u render %6.2fms (tex %5.2f vbo %5.2f)  applies %4u  programs %zu\n",
-                g_render_frame, ms_since(t_start), ms_tex, ms_vbo, n_apply, g_programs.size());
+        fprintf(stderr, "[rt] f%u render %6.2fms (tex %5.2f vbo %5.2f copies %5.2f)  applies %4u  programs %zu\n",
+                g_render_frame, ms_since(t_start), ms_tex, ms_vbo, ms_copy, n_apply, g_programs.size());
     apply_stats_flush("flat", g_render_frame);
     return presented;
 }

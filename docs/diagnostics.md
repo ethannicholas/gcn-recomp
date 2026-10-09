@@ -144,8 +144,12 @@ virtual and host time compare and the work per presented frame.
 
 `GCN_FRAMETIME=1` prints a line per frame from each thread: the guest's interval between
 presents and how much of it the GX front end took, the batch's shape, and the renderer's
-time to issue it (`[rt]` for the flat pass; in stereo `[eye-rt]` adds, per eye, the flat
-pass's time and the eye's own). `GCN_APPLYSTATS=1` prints every 64th frame, per pass, how
+time to issue it (`[rt]` for the flat pass, with the texture and vertex uploads' share and
+the EFB copies'; in stereo `[eye-rt]` adds, per eye, the flat pass's time and the eye's
+own). `GCN_XFSTATS=1` prints, per frame over every 64, what the vertex transform was asked
+for: vertices, how many carried a normal, how many had a lit colour or alpha channel,
+light evaluations, texgens, and the texgens with a post matrix or an emboss -- which is
+what decides where the transform's time goes. `GCN_APPLYSTATS=1` prints every 64th frame, per pass, how
 many state applications there were and which groups of GL state each actually sent --
 program, projection, viewport, TEV registers, textures, samplers, blend and so on -- which
 is what a state application costs on a given game. `GCN_EYE_FULLFLAT=1` and

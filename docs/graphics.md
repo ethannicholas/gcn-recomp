@@ -191,6 +191,14 @@ a little more of it as a session went on. Now only the front end decides
 a texture, the renderer deletes a batch later. The renderer ages only EFB copies' textures,
 which it makes itself.
 
+**A copy keeps its id.** A copy's texture id is kept per (address, size, format), not per
+address: a game that copies several targets of different sizes through one scratch buffer
+every frame -- a reflection, then a depth copy of the scene, then a sliver of it -- had
+each copy replace the last at that address, so every copy was new again the next frame
+and the renderer allocated and later freed five GL textures a frame, a third of a stereo
+flat pass. The lookup by address still resolves to the latest copy there; only the id a
+repeated copy is given is remembered.
+
 **Copies read back in another format.** An EFB copy is kept as RGBA and sampled as it is,
 so the copy shader writes it as the format the game will read it back as. The two-channel
 copies (RG8, GB8) are read as IA8 -- the first byte alpha, the second intensity -- and a
