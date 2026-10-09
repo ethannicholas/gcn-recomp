@@ -40,6 +40,15 @@ Four threads share a frame, besides the renderer's:
   kept while the snapshot they came from is the same one, since a room's display lists are
   thousands of four-vertex draws under one set of registers.
 
+**Latency.** Each queue between the threads fills when the stage after it is the slow one,
+and the picture is then as many frames behind the guest -- and behind the sound, which
+follows the guest -- as the queues hold. The front end's was bounded only at 8 MB, which
+is dozens of frames of a light scene, and the render queue held eight: a map screen whose
+renderer was the slow stage trailed the controls by most of a second. Now the guest may be
+one frame ahead of the front end (`kFeMaxFrames`, waited for at the end of a frame), the
+transform holds one frame and the render queue one: three frames from guest to screen at
+worst, at the frame rate two of each gave. `GCN_STALLS` prints the figure.
+
 Because the front end reads vertex arrays and textures when it gets to them, what it reads
 of memory the guest rewrites every frame depends on how far behind the guest it is. Frames
 are byte-identical run to run, but a change to the pipeline's timing can move a handful

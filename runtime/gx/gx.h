@@ -81,6 +81,7 @@ uint32_t process(const uint8_t* data, uint32_t len, bool partial_ok);
 // what tells the stage that sets the pace from the stages waiting on it.
 enum class Stall { FeFull, Finish, Token, XfFull, RenderFull, Count };
 bool stalls_on();
+uint32_t frames_taken();   // frames the renderer has taken off its queue
 void stall_add(Stall s, uint64_t us);
 // Times a wait when GCN_STALLS is set.
 struct StallTimer {

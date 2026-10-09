@@ -97,13 +97,15 @@ static void stall_report(uint32_t frame) {
     static uint32_t last;
     if (!gx::stalls_on() || frame < last + 60) return;
     last = frame;
-    static const char* names[] = {"guest: fe queue full", "guest: draw-done", "guest: token read",
+    static const char* names[] = {"guest: fe queue full or a frame ahead", "guest: draw-done", "guest: token read",
                                   "fe: transform queue full", "transform: render queue full"};
     fprintf(stderr, "[stalls] f%u per frame over 60:", frame);
     for (int i = 0; i < (int)gx::Stall::Count; i++)
         fprintf(stderr, "%s %s %.2f ms", i ? "," : "", names[i], g_stall_us[i].exchange(0) / 60000.0);
     fprintf(stderr, "; token reads %u, lagged %u, spun %u", g_tok_reads.exchange(0), g_tok_lagged.exchange(0),
             g_tok_spun.exchange(0));
+    // How far the guest is ahead of the screen, which is the latency a viewer feels.
+    fprintf(stderr, "; %d frames ahead of the screen", (int)(frame - gx::frames_taken()));
     fprintf(stderr, "\n");
 }
 
@@ -155,6 +157,17 @@ static bool lag_on() {
     return env >= 0 ? env != 0 : g_lag_on;
 }
 static constexpr size_t kFeMaxBytes = 8u << 20;
+// Latency. Every queue between the guest and the display fills when the stage after it is
+// the slow one, and what the viewer sees is then as many frames late as the queues hold.
+// The front end's was bounded only in bytes, and a frame of a map screen is a few hundred
+// kilobytes: with the renderer behind, the picture trailed the controls -- and the sound,
+// which follows the guest -- by most of a second. So the guest may also be no more than
+// kFeMaxFrames frames ahead of the front end (one, with one frame in each of the queues
+// after it: three frames from the guest to the screen when the renderer is the slow stage,
+// at the same frame rate as with two each, which made six), waiting at the end of a frame
+// (in real time only, so replays are unaffected). See also kMaxQueuedBatches in xf.cpp.
+static constexpr size_t kFeMaxFrames = 1;
+static std::deque<uint64_t> g_frame_ends;   // where each frame not yet processed ends
 static std::vector<uint8_t> g_skim_out;
 
 static void fe_thread_main() {
@@ -225,8 +238,8 @@ static void fe_wait_idle() {
 }
 
 // Waits until the front end has processed the first `at` bytes ever handed to it.
-static void fe_wait_until(uint64_t at) {
-    gx::StallTimer stall(gx::Stall::Token);
+static void fe_wait_until(uint64_t at, gx::Stall kind = gx::Stall::Token) {
+    gx::StallTimer stall(kind);
     std::unique_lock<std::mutex> lk(g_fe_mutex);
     guest_wait(lk, [at] { return g_fe_done >= at; });
 }
@@ -263,6 +276,12 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
         break;
     case gx::SkimSync::Frame:
         fe_submit();
+        g_frame_ends.push_back(g_fe_handed);
+        while (g_frame_ends.size() > kFeMaxFrames) {
+            const uint64_t at = g_frame_ends.front();
+            g_frame_ends.pop_front();
+            fe_wait_until(at, gx::Stall::FeFull);
+        }
         gx::g_frames_submitted++;
         stall_report(gx::g_frames_submitted);
         if (g_tok_latest_at) {

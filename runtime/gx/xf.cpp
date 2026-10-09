@@ -43,7 +43,10 @@ static std::deque<std::unique_ptr<Batch>> g_queue;
 // has to be a hard bound, not a hint. If the renderer is slower than the guest (a
 // mobile GPU, say) an advisory wait that queues anyway grows this by tens of megabytes
 // a second; on a Quest 3 that reached 3.8 GB and the app was killed by lowmemorykiller.
-static constexpr size_t kMaxQueuedBatches = 8;
+// It is also latency: when the renderer is the slow stage the queue stays full, and every
+// frame shown is as many frames old as it holds, so it holds one (see kFeMaxFrames in
+// fifo.cpp).
+static constexpr size_t kMaxQueuedBatches = 1;
 
 void submit_batch(std::unique_ptr<Batch> b) {
     std::unique_lock<std::mutex> lk(g_q_mutex);
@@ -64,11 +67,16 @@ size_t queue_depth() {
     return g_queue.size();
 }
 
+// Frames the renderer has taken off the queue, for GCN_STALLS's latency figure.
+static std::atomic<uint32_t> g_frames_taken{0};
+uint32_t frames_taken() { return g_frames_taken.load(std::memory_order_relaxed); }
+
 std::unique_ptr<Batch> take_batch(int timeout_ms) {
     std::unique_lock<std::mutex> lk(g_q_mutex);
     if (!g_q_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [] { return !g_queue.empty(); })) return nullptr;
     auto b = std::move(g_queue.front());
     g_queue.pop_front();
+    g_frames_taken.fetch_add(1, std::memory_order_relaxed);
     g_q_cv.notify_all();
     return b;
 }
@@ -1044,7 +1052,7 @@ struct XfJob {
 static std::mutex g_xf_mutex;
 static std::condition_variable g_xf_cv;
 static std::deque<XfJob> g_xf_jobs;
-static constexpr size_t kMaxXfJobs = 2;
+static constexpr size_t kMaxXfJobs = 1;
 
 static void xf_worker() {
     for (;;) {
