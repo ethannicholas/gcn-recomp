@@ -100,6 +100,7 @@ Batch::~Batch() {
     b.states.swap(states);
     b.mtxs.swap(mtxs);
     b.new_textures.swap(new_textures);
+    b.dead_textures.swap(dead_textures);
     // Emptied now, on the thread that is done with it: the decoded textures go with it.
     b.cmds.clear();
     b.verts.clear();
@@ -108,6 +109,7 @@ Batch::~Batch() {
     b.states.clear();
     b.mtxs.clear();
     b.new_textures.clear();
+    b.dead_textures.clear();
     std::lock_guard<std::mutex> lk(pool_mutex());
     if (pool().size() < kMaxPooled) pool().push_back(std::move(b));
 }
@@ -139,6 +141,7 @@ static std::unique_ptr<struct Pending> g_pending;
 
 static void flush_batch() {
     if (g_batch && !g_batch->cmds.empty()) {
+        texture_take_dead(g_batch->dead_textures);
         // Transformed already (see xf_sync), or by the worker before the renderer sees it.
         if (xf_sync() || !g_pending) {
             pack_all(*g_batch);

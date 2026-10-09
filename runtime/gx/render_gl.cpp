@@ -197,7 +197,12 @@ static GLint g_bg_u_mvp, g_bg_u_crop, g_bg_u_quad, g_bg_u_col;
 static GLuint g_vs;
 static std::unordered_map<ShaderKey, Program, ShaderKeyHash> g_programs;
 // `grab` marks one of the spray's screen-space grabs; see is_grab_copy().
-struct GlTex { GLuint tex; uint32_t w, h, levels; bool efb; bool grab; uint32_t last_used; };
+// `depth`: an EFB copy of the depth buffer, whose texels are a depth packed into bytes. A
+// filter would average neighbouring depths a byte at a time, which at an edge is nonsense
+// -- a fog volume showed it as bright specks along a waterline -- so it is always sampled
+// nearest. (At the console's own resolution a full-screen quad lands on texel centres and
+// a filter changes nothing; at a higher internal scale it does not.)
+struct GlTex { GLuint tex; uint32_t w, h, levels; bool efb; bool grab; bool depth; uint32_t last_used; };
 static std::unordered_map<uint32_t, GlTex> g_textures;
 // Frames counted here rather than reusing the GX frame counter, so eviction works the
 // same for any frontend. Textures the game stops using are released: a race streams
@@ -575,7 +580,7 @@ void main() {
     vec4 c = texture(u_src, uv);
     if ((u_mode & 32) != 0) {
         float z = texture(u_depth, uv).r;
-        uint zi = uint(z * 16777215.0);
+        uint zi = uint(z * 16777215.0 + 0.5);
         c = vec4(float((zi >> 16) & 255u), float((zi >> 8) & 255u), float(zi & 255u), 255.0) / 255.0;
         c = vec4(c.r, c.g, c.b, c.r);
     }
@@ -591,6 +596,13 @@ void main() {
     else if (fmt == 9) c = vec4(c.g);         // G8
     else if (fmt == 10) c = vec4(c.b);        // B8
     else if (fmt == 1 && !intensity) c = vec4(c.r);
+    // The two-channel formats are read back as IA8: the first byte is the alpha and the
+    // second the intensity. A 16-bit depth copy is RG8 -- the depth's top byte, then its
+    // middle -- and a fog volume subtracts two of them a byte at a time; handed the colour
+    // channels as they were, it borrowed from the wrong byte and drew a line wherever
+    // the lower byte wrapped.
+    else if (fmt == 11) c = vec4(c.g, c.g, c.g, c.r);   // RG8
+    else if (fmt == 12) c = vec4(c.b, c.b, c.b, c.g);   // GB8
     if (fmt == 4) c.a = 1.0;                  // RGB565
     o = c;
 }
@@ -1353,7 +1365,8 @@ static void apply_state(const PixelState& st, int prim) {
                 uint32_t img0 = bp[base + 8];
                 tsz[m * 2] = (float)((img0 & 0x3FF) + 1);
                 tsz[m * 2 + 1] = (float)(((img0 >> 10) & 0x3FF) + 1);
-                sampler = get_sampler(bp[base], bp[base + 4], gt->efb ? 1 : gt->levels);
+                const uint32_t mode0 = gt->depth ? bp[base] & ~0xF0u : bp[base];  // see GlTex::depth
+                sampler = get_sampler(mode0, bp[base + 4], gt->efb ? 1 : gt->levels);
             } else {
                 id = 0;
             }
@@ -1526,6 +1539,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
         t.last_used = g_render_frame;
         // Set after the reuse path, which carries the previous copy's flags in.
         t.grab = is_grab_copy(c);
+        t.depth = c.depth;
         glBindFramebuffer(GL_FRAMEBUFFER, g_copy_fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
         glViewport(0, 0, c.dst_w * g_scale, c.dst_h * g_scale);
@@ -2091,8 +2105,8 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             int nd = 0;
             for (size_t j = pass_start; j < i; j++) nd += b.cmds[j].type == CmdType::Draw;
             const EfbCopyCmd& cc = b.cmds[i].copy;
-            fprintf(stderr, "[eye]   copy %ux%u xfb=%d tex=%u full=%d draws=%d clr=%d%d src=%u,%u+%ux%u %s\n",
-                    cc.dst_w, cc.dst_h, (int)cc.to_xfb, cc.tex_id,
+            fprintf(stderr, "[eye]   copy %ux%u xfb=%d tex=%u fmt=%02X%s full=%d draws=%d clr=%d%d src=%u,%u+%ux%u %s\n",
+                    cc.dst_w, cc.dst_h, (int)cc.to_xfb, cc.tex_id, cc.format, cc.depth ? " depth" : "",
                     (int)is_fullscreen_copy(cc, dw, dh), nd, (int)cc.clear,
                     (int)cc.clear_color, cc.src_x, cc.src_y, cc.src_w, cc.src_h,
                     skip[i] ? "SKIP" : "replay");
@@ -2280,11 +2294,22 @@ static void touch_textures(const PixelState& st) {
 // and would otherwise strand a texture per sprite per frame. They are given a longer
 // idle period than the guest-side cache so that an address is always forgotten there
 // first: a draw can then never reach an id whose texture has already gone.
-static void evict_textures() {
+// Decoded textures go when the front end says (Batch::dead_textures), a batch late, so that
+// nothing still drawing from one loses it: the ids `b` names are deleted at the next batch.
+// The renderer ages only the EFB copies' textures, which it makes itself.
+static std::vector<uint32_t> g_dead_pending;
+static void evict_textures(const Batch& b) {
+    for (uint32_t id : g_dead_pending) {
+        auto it = g_textures.find(id);
+        if (it != g_textures.end() && !it->second.efb) {
+            glDeleteTextures(1, &it->second.tex);
+            g_textures.erase(it);
+        }
+    }
+    g_dead_pending = b.dead_textures;
     if ((g_render_frame & 63) != 0) return;
     for (auto it = g_textures.begin(); it != g_textures.end();) {
-        const uint32_t idle = it->second.efb ? 4 * kTexIdleFrames : kTexIdleFrames;
-        if (g_render_frame - it->second.last_used > idle) {
+        if (it->second.efb && g_render_frame - it->second.last_used > 4 * kTexIdleFrames) {
             glDeleteTextures(1, &it->second.tex);
             it = g_textures.erase(it);
         } else {
@@ -2303,7 +2328,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
     double ms_tex = 0.0, ms_vbo = 0.0;
     if (!again) {
         g_render_frame++;
-        evict_textures();
+        evict_textures(b);
         for (auto& t : b.new_textures) upload_texture(*t);
         ms_tex = g_frametime ? ms_since(t_start) : 0.0;
         // A set the GPU has finished with; see g_vaos. The eye passes after this draw from

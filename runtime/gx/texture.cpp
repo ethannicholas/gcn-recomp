@@ -245,6 +245,7 @@ struct CacheEntry {
     uint64_t used[4];          // palette indices the texels reference (CI4, CI8)
     std::vector<Variant> variants;
 };
+static void drop_variants(CacheEntry& e);  // below, with Batch::dead_textures
 struct EfbCopyEntry {
     std::shared_ptr<TexData> tex;
     uint32_t last_frame;
@@ -373,7 +374,7 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
         const uint64_t hsh = hash_bytes(src, total, 0);
         e.checked_frame = g_frame_counter;
         if (e.variants.empty() || hsh != e.hash) {
-            e.variants.clear();
+            drop_variants(e);
             e.hash = hsh;
             if (indexed) scan_used_indices(src, total, p.fmt, e.used);
         }
@@ -431,14 +432,30 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
 
 void texture_invalidate_efb_copy(uint32_t addr) { g_efb_copies.erase(addr & 0x03FFFFFF); }
 
+// Decoded textures let go of, for the renderer (Batch::dead_textures). EFB copies are not
+// here: the renderer makes their GL textures itself and ages them itself.
+static std::vector<uint32_t> g_dead;
+static void drop_variants(CacheEntry& e) {
+    for (const Variant& v : e.variants) g_dead.push_back(v.tex->id);
+    e.variants.clear();
+}
+void texture_take_dead(std::vector<uint32_t>& out) {
+    out.insert(out.end(), g_dead.begin(), g_dead.end());
+    g_dead.clear();
+}
+
 // Drop decoded textures the game has stopped referencing. Each entry holds every mip
 // level as RGBA8, so a long race would otherwise accumulate hundreds of megabytes.
 void texture_evict() {
     static constexpr uint32_t kIdleFrames = 240;  // ~8 s at 30 fps
     if ((g_frame_counter & 63) != 0) return;
     for (auto it = g_cache.begin(); it != g_cache.end();) {
-        if (g_frame_counter - it->second.last_frame > kIdleFrames) it = g_cache.erase(it);
-        else ++it;
+        if (g_frame_counter - it->second.last_frame > kIdleFrames) {
+            drop_variants(it->second);
+            it = g_cache.erase(it);
+        } else {
+            ++it;
+        }
     }
     // EFB copies too. Most are a fixed set of targets redrawn every frame, but the spray
     // copies out around fifty 32x32 and 64x64 sprites a frame to addresses that rotate,

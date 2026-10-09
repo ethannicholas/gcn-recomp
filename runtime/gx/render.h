@@ -115,6 +115,12 @@ struct Batch {
     // layout (row r is m[r*4..r*4+3], the last column the translation). See Cmd::mtx.
     std::vector<float> mtxs;
     std::vector<std::shared_ptr<TexData>> new_textures;
+    // Textures the front end has let go of -- unreferenced for a while, or replaced because
+    // the game rewrote them -- which the renderer deletes once this batch is drawn. The
+    // front end decides alone when a texture is dead: when the renderer aged textures on
+    // its own clock, one the game still referenced could go from the renderer while the
+    // front end, believing it sent, never sent it again, and drew black from then on.
+    std::vector<uint32_t> dead_textures;
 
     // A race frame's batch is eight megabytes or so, and a fresh one grew into that
     // from nothing every frame -- reallocating and copying the vertex array a dozen

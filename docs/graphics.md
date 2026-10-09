@@ -177,6 +177,33 @@ megabytes per eye per frame for a buffer nothing reads. `GCN_EYE_KEEPDEPTH=1` le
 
 The next lever, not taken, is `GL_OVR_multiview2`: both eyes from one set of draw calls.
 
+## Texture lifetimes and EFB copies
+
+**Who decides a texture is dead.** The front end decodes a texture when the game first
+references it and never sends it again while its cache holds it; the renderer keeps the GL
+texture. Each used to age textures on its own clock -- the front end by game frames since
+the game last referenced it, the renderer by frames since a draw last bound it -- and they
+disagree: in stereo, draws the trimmed flat pass and the eyes leave out reference textures
+the renderer never binds. A texture could go from the renderer while the front end still
+held it, and every draw from then on sampled nothing: HUD text drawn as black rectangles,
+a little more of it as a session went on. Now only the front end decides
+(`Batch::dead_textures`): what it evicts, and the variants it drops when the game rewrites
+a texture, the renderer deletes a batch later. The renderer ages only EFB copies' textures,
+which it makes itself.
+
+**Copies read back in another format.** An EFB copy is kept as RGBA and sampled as it is,
+so the copy shader writes it as the format the game will read it back as. The two-channel
+copies (RG8, GB8) are read as IA8 -- the first byte alpha, the second intensity -- and a
+16-bit depth copy is RG8. A fog volume indexes a ramp with two of those through indirect
+texturing, which takes its offsets from alpha, blue and green; handed (high, middle, low)
+it took the low byte for the middle and drew a bright line across the fog wherever a byte
+wrapped. Depth copies are also always sampled nearest (`GlTex::depth`): a filter averages
+packed depths a byte at a time, and at a higher internal scale a full-screen quad no longer
+lands on texel centres. `GCN_EYELOG` prints each copy's format and whether it is of depth.
+Faint lines remain at internal scale 1, every few dozen rows, and short ticks along a fog
+volume's edges; not found yet -- the indirect arithmetic is float where the hardware's is
+fixed point, which is the first place to look.
+
 ## Depth bands in an eye
 
 GX has no depth-range call, but a viewport carries a z range, and a game can confine a draw
