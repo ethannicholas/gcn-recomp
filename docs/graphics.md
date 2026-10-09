@@ -208,9 +208,14 @@ it took the low byte for the middle and drew a bright line across the fog wherev
 wrapped. Depth copies are also always sampled nearest (`GlTex::depth`): a filter averages
 packed depths a byte at a time, and at a higher internal scale a full-screen quad no longer
 lands on texel centres. `GCN_EYELOG` prints each copy's format and whether it is of depth.
-Faint lines remain at internal scale 1, every few dozen rows, and short ticks along a fog
-volume's edges; not found yet -- the indirect arithmetic is float where the hardware's is
-fixed point, which is the first place to look.
+A depth copy's coordinate is also snapped in the shader to the centre of the texel GX
+would read (`u_texsnap`, set in `apply_state` for the maps holding one): a game reads such
+a copy back with a quad whose coordinates run from texel centre to texel centre over
+exactly as many pixels, which at internal scale 1 leaves the last row's coordinate within
+1/256 of a texel edge, where the GPU's own subtexel rounding reads the next texel. A fog
+volume drawn in horizontal chunks, each copied and read back that way, showed a faint line
+along every chunk's edge at scale 1 and none at scale 2. The snap is from the arithmetic,
+not yet from a frame of that game; it leaves every frame without depth copies unchanged.
 
 ## Depth bands in an eye
 

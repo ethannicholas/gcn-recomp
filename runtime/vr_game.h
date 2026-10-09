@@ -11,6 +11,7 @@
 #include "vr_config.h"
 
 namespace gx { struct Batch; }
+struct PadState;
 
 namespace vr {
 struct GameHooks {
@@ -34,6 +35,13 @@ struct GameHooks {
     // calling gx::render_set_first_person, say). Called with on=false whenever the view
     // leaves stereo. Without this hook the right thumbstick click does nothing.
     void (*set_first_person)(bool on, const VrConfig& c) = nullptr;
+
+    // The controller state the headset frontend built from the Touch controllers, before
+    // the game reads it and before it is logged, for a game that wants a button somewhere
+    // else: swapping two, or a trigger standing in for a face button in one part of the
+    // game and not another. The desktop frontend has its own controllers and does not
+    // call it.
+    void (*map_pad)(PadState& p) = nullptr;
 };
 
 void set_game_hooks(const GameHooks& h);

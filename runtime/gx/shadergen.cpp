@@ -269,6 +269,11 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     s += "layout(location = 0) out vec4 o_color;\n";
     s += "uniform vec2 u_indcoordscale[4];\n";
     s += "vec2 u_indscalef(int i) { return u_indcoordscale[i]; }\n";
+    // The maps sampled nearest whose coordinate is snapped to the centre of the texel GX
+    // would read (the floor of the coordinate in texels), set for EFB copies of depth.
+    // See apply_state().
+    s += "uniform int u_texsnap;\n";
+    s += "#define snap_tex(m, t) (((u_texsnap >> (m)) & 1) != 0 ? floor(t) + 0.5 : (t))\n";
     // A macro, not a function: a sampler array has to be indexed by a constant
     // expression in GLSL ES (and strictly in GLSL 330 as well). Every call site
     // passes a literal map index, so expansion makes the index constant.
@@ -312,7 +317,8 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     // indirect stages
     for (uint32_t i = 0; i < nind; i++) {
         uint32_t map = (k.iref >> (6 * i)) & 7, coord = (k.iref >> (6 * i + 3)) & 7;
-        W("  ivec4 indtex%u = sample_tex(%u, uv%u * u_indscalef(%u));\n", i, map, coord, i);
+        W("  ivec4 indtex%u = sample_tex(%u, snap_tex(%u, uv%u * u_indscalef(%u) * u_texsize[%u]) / u_texsize[%u]);\n", i, map,
+          map, coord, i, map, map);
     }
 
     for (uint32_t st = 0; st < nstages; st++) {
@@ -392,7 +398,7 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         // ---- texture ----
         if (tex_en) {
             uint32_t tswap = (aenv >> 2) & 3;
-            W("    tex = sample_tex(%u, tc / u_texsize[%u]).%s;\n", map, map, swizzle(k, tswap).c_str());
+            W("    tex = sample_tex(%u, snap_tex(%u, tc) / u_texsize[%u]).%s;\n", map, map, map, swizzle(k, tswap).c_str());
         } else {
             W("    tex = ivec4(255);\n");
         }

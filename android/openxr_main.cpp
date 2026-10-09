@@ -1096,6 +1096,7 @@ void android_main(android_app* app) {
         PadState p;
         p.connected = true;
         read_pad(p);
+        if (vr::game_hooks().map_pad) vr::game_hooks().map_pad(p);
         input_script_apply(p);
         pad_set_state(0, p);
 

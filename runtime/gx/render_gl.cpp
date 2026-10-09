@@ -70,12 +70,13 @@ struct UniformShadow {
     uint32_t screen_uv;
     float ripple[2];
     float tsz[16];
+    uint32_t texsnap;
 };
 
 struct Program {
     GLuint prog;
     GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_konst, u_texsize, u_indmtx, u_indscale,
-        u_alpharef, u_fog, u_fogcolor, u_indcoordscale;
+        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
     mutable UniformShadow shadow;
 };
@@ -391,6 +392,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_fog = glGetUniformLocation(p, "u_fog");
     pr.u_fogcolor = glGetUniformLocation(p, "u_fogcolor");
     pr.u_indcoordscale = glGetUniformLocation(p, "u_indcoordscale");
+    pr.u_texsnap = glGetUniformLocation(p, "u_texsnap");
     glUseProgram(p);
     GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     glUniform1iv(pr.u_tex, 8, units);
@@ -1346,6 +1348,15 @@ static void apply_state(const PixelState& st, int prim) {
     // texture and the sampler are bound separately: a frame here changed the texture on
     // a unit at nearly every draw and the sampler almost never.
     float tsz[16];
+    // Depth copies are sampled nearest (GlTex::depth), and the shader snaps their
+    // coordinate to the centre of the texel GX would read. A game reads such a copy back
+    // with a quad whose coordinates run from texel centre to texel centre over exactly as
+    // many pixels, which at internal scale 1 leaves the last row and column's coordinate
+    // within 1/256 of a texel edge: the GPU's own subtexel rounding then reads the wrong
+    // texel, a different depth, and a fog volume indexing its ramp with those bytes drew a
+    // line along the edge of every chunk it was copied in. In texels the margin is clear
+    // (half a texel over the chunk), so the snap is done there in float.
+    uint32_t texsnap = 0;
     for (int m = 0; m < 8; m++) {
         tsz[m * 2] = tsz[m * 2 + 1] = 1.0f;
         uint32_t id = st.tex_id[m];
@@ -1367,6 +1378,7 @@ static void apply_state(const PixelState& st, int prim) {
                 tsz[m * 2 + 1] = (float)(((img0 >> 10) & 0x3FF) + 1);
                 const uint32_t mode0 = gt->depth ? bp[base] & ~0xF0u : bp[base];  // see GlTex::depth
                 sampler = get_sampler(mode0, bp[base + 4], gt->efb ? 1 : gt->levels);
+                if (gt->depth) texsnap |= 1u << m;
             } else {
                 id = 0;
             }
@@ -1394,6 +1406,10 @@ static void apply_state(const PixelState& st, int prim) {
         g_astat.tsz++;
         glUniform2fv(pr.u_texsize, 8, tsz);
         memcpy(u.tsz, tsz, sizeof(tsz));
+    }
+    if (!(held && u.texsnap == texsnap)) {
+        glUniform1i(pr.u_texsnap, (GLint)texsnap);
+        u.texsnap = texsnap;
     }
     u.gen = g_uniform_gen;
     u.view_gen = g_view_gen;
