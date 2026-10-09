@@ -144,6 +144,28 @@ static void eye_matrices(float* proj, float* view, float* hud) {
     // that sits still under a yaw is one that is still locked to the viewer's face.
     gx::render_hud_frame(g_vrcfg.hud_distance_m * u, fov, g_vrcfg.hud_scale,
                          g_vrcfg.hud_height_m * u, g_vrcfg.hud_pitch_deg * 3.14159265f / 180.0f, hud);
+
+    // The same eyes for the game's culling (vr::eye_views), as the headset publishes them.
+    // The view turns the world by +yaw about y and +pitch about x, so the head is turned by
+    // -yaw, then -pitch about its own x. The second eye (--eyes=2) is 64 mm to its right.
+    const float sy = sinf(-0.5f * a), cy = cosf(-0.5f * a), sx = sinf(-0.5f * b), cx = cosf(-0.5f * b);
+    vr::EyeView ev[2];
+    for (int e = 0; e < 2; e++) {
+        ev[e].rot[0] = cy * sx;
+        ev[e].rot[1] = sy * cx;
+        ev[e].rot[2] = -sy * sx;
+        ev[e].rot[3] = cy * cx;
+        ev[e].tan_left = -fov * aspect;
+        ev[e].tan_right = fov * aspect;
+        ev[e].tan_up = fov;
+        ev[e].tan_down = -fov;
+    }
+    const float sep = g_eye_count > 1 ? 0.064f * u : 0.0f;
+    ev[0].pos[0] = ev[0].pos[1] = ev[0].pos[2] = 0.0f;
+    ev[1].pos[0] = sep * cosf(a);  // the head's right, (cos yaw, 0, sin yaw) after the turn
+    ev[1].pos[1] = 0.0f;
+    ev[1].pos[2] = sep * sinf(a);
+    vr::set_eye_views(ev);
 }
 
 static void dump_fbo(GLuint fbo, int w, int h, const char* path) {

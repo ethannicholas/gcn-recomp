@@ -55,6 +55,20 @@ struct HandPose {
 void set_hand_pose(Hand h, const HandPose* p);  // null: not tracked, or not in stereo
 bool hand_pose(Hand h, HandPose* out);
 
+// The eyes, for a game that culls against its own camera's field of view and so has to be
+// told what the viewer can see: turning the head shows what the camera's frustum left out.
+// Each eye's pose is in the controllers' frame above, and its field is given as the
+// tangents of its four edges (left and down negative), as located for the frame being shown.
+// The game culls a frame or two before that frame is shown, so it should allow for the head
+// moving in between. Published, like the controllers, only while the eyes are drawn.
+struct EyeView {
+    float pos[3];
+    float rot[4];  // a unit quaternion: x, y, z, w
+    float tan_left, tan_right, tan_up, tan_down;
+};
+void set_eye_views(const EyeView* views);  // two views, left then right; null: not in stereo
+bool eye_views(EyeView out[2]);
+
 // The defaults with the game's adjustments applied, then `dir`/vr.txt over them.
 VrConfig load_config(const std::string& dir);
 }  // namespace vr

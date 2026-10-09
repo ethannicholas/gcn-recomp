@@ -644,6 +644,30 @@ static void publish_hands(XrTime t, bool on) {
     }
 }
 
+// What the eyes see, for the game's culling (vr::eye_views), converted the same way.
+static void publish_eyes(const XrView* views) {
+    if (!views) {
+        vr::set_eye_views(nullptr);
+        return;
+    }
+    vr::EyeView ev[2];
+    for (int e = 0; e < 2; e++) {
+        const XrPosef& p = views[e].pose;
+        ev[e].pos[0] = (p.position.x - g_head_zero[0]) * g_vrcfg.units_per_metre + g_vrcfg.offset_x;
+        ev[e].pos[1] = (p.position.y - g_head_zero[1]) * g_vrcfg.units_per_metre + g_vrcfg.offset_y;
+        ev[e].pos[2] = (p.position.z - g_head_zero[2]) * g_vrcfg.units_per_metre + g_vrcfg.offset_z;
+        ev[e].rot[0] = p.orientation.x;
+        ev[e].rot[1] = p.orientation.y;
+        ev[e].rot[2] = p.orientation.z;
+        ev[e].rot[3] = p.orientation.w;
+        ev[e].tan_left = tanf(views[e].fov.angleLeft);
+        ev[e].tan_right = tanf(views[e].fov.angleRight);
+        ev[e].tan_up = tanf(views[e].fov.angleUp);
+        ev[e].tan_down = tanf(views[e].fov.angleDown);
+    }
+    vr::set_eye_views(ev);
+}
+
 // ---------------------------------------------------------------------------
 static void handle_session_state(XrSessionState s) {
     g_xr.state = s;
@@ -1075,6 +1099,7 @@ void android_main(android_app* app) {
                     }
                 }
                 publish_hands(fs.predictedDisplayTime, true);
+                publish_eyes(views);
                 for (int e = 0; e < 2; e++) {
                     auto& eye = g_xr.eyes[e];
                     uint32_t ei = 0;
@@ -1111,6 +1136,7 @@ void android_main(android_app* app) {
             }
         } else if (fs.shouldRender) {
             publish_hands(0, false);
+            publish_eyes(nullptr);
             // Touch the swapchain only when there is a new game frame to put in it.
             //
             // The compositor does not need a new image every display frame: a quad layer

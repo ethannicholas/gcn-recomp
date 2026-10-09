@@ -93,6 +93,21 @@ bool hand_pose(Hand h, HandPose* out) {
     return g_hand_valid[h];
 }
 
+static EyeView g_eyes[2];
+static bool g_eyes_valid;
+
+void set_eye_views(const EyeView* views) {
+    std::lock_guard<std::mutex> l(g_hand_lock);
+    g_eyes_valid = views != nullptr;
+    if (views) g_eyes[0] = views[0], g_eyes[1] = views[1];
+}
+
+bool eye_views(EyeView out[2]) {
+    std::lock_guard<std::mutex> l(g_hand_lock);
+    if (g_eyes_valid) out[0] = g_eyes[0], out[1] = g_eyes[1];
+    return g_eyes_valid;
+}
+
 VrConfig load_config(const std::string& dir) {
     VrConfig d;
     if (hooks().config_defaults) hooks().config_defaults(d);
