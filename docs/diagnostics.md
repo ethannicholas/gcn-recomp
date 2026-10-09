@@ -32,8 +32,9 @@ replay approximately, as they always did.
 The log format is text: a header (version, game, start time and its epoch), then one line
 per change of a channel's state --
 `poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r`, in
-hex -- and, when the run ended in a way the runtime saw (a normal exit, a fault, a failed
-guest check or an interrupt), a final `# end <poll> <frame>`. A replay holds the last
+hex -- the clock's catch-up jumps where they happened (`jump <back-edge count> <edges>`,
+decimal; see "The clock" below), and, when the run ended in a way the runtime saw (a
+normal exit, a fault, a failed guest check or an interrupt), a final `# end <poll> <frame>`. A replay holds the last
 state up to that end before handing over to the live pad; without the marker it hands over
 at the last change, which can be well before where the run stopped, so a log that lacks
 one (a run killed from outside) can be given one by hand. Lines can be edited or written
@@ -104,7 +105,8 @@ thread; with `--symbolizer=<llvm-symbolizer> --outer=1` instead it names each sa
 outermost function of its inline chain -- the recompiled function a guest load was inlined
 into, rather than `LD32`. Symbolise against the binary that was profiled: any other build
 puts samples in the wrong functions. Both device tools take `GCN_REPLAY=<dir>` to drive a run
-with an input log, and the harness `--fast` to run unpaced.
+with an input log, and the harness `--fast` to run unpaced; `GCN_INPUT_LOG=<dir>` has the
+harness record its own run's log, as the app does.
 
 The GX front end runs on a thread of its own and the vertex transform on worker threads (see
 "Threads" in `graphics.md`). `GCN_GX_SYNC=1` puts the front end back on the guest thread,
@@ -131,11 +133,24 @@ Guest time is virtual by default. Every backward branch in recompiled code count
 back-edge, and the time base is that count times a constant (`TICKS_PER_EDGE` in
 `cpu.cpp`); events are due when the count reaches them, and the SDK's idle spin
 (`idle.txt` in the game's tables) jumps the count to the next event instead of iterating.
-The host is held to real time by sleeping when virtual time runs ahead; when the host
-cannot keep up, the game slows down rather than catching up later. So the game's view of
-time depends only on what it executed, which is what makes replays exact; the cost is that
-a scene heavier than a frame's budget of back-edges looks to the game like a dropped frame,
-at a threshold set by the constant rather than by the real console.
+The host is held to real time by sleeping when virtual time runs ahead. So the game's view
+of time depends only on what it executed, which is what makes replays exact; the cost is
+that a scene heavier than a frame's budget of back-edges looks to the game like a dropped
+frame, at a threshold set by the constant rather than by the real console.
+
+When the host cannot keep up, virtual time **catches up**: once it has fallen more than
+4 ms behind the wall clock, it jumps to it (`clock_pace` in `cpu.cpp`). The game's next
+reading of the time base then sees the frame it really took and steps the simulation
+accordingly, as it would on a console that dropped a frame; the AI DMA's blocks come due
+together and are delivered at speed, so the sound carries on; the retrace is late once.
+Without this the game ran at full speed in slow motion and the sound, produced a virtual
+block at a time, came up short of the device's real seconds -- audible dropouts whenever a
+scene was heavy. Each jump is written to the input log (`jump <count> <edges>`) at the
+back-edge count it was made at, and a replay makes exactly the recorded jumps at exactly
+those counts and none of its own, so a replay stays exact; a log with none replays as
+before. A host more than 100 ms behind is re-anchored rather than caught up (a load, a
+shader build). `GCN_CATCHUP=0` keeps the slow-motion behaviour; `GCN_CLOCKLOG` counts the
+jumps and their total.
 
 `GCN_CLOCK=host` restores wall-clock time (the ticker thread polls for due events every
 200 µs). `GCN_TIMESCALE=N` paces virtual time at N× real time (0: unpaced; `--fast` on

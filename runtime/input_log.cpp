@@ -6,6 +6,7 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -56,6 +57,14 @@ uint32_t g_replay_last_key;      // the last change, or the end marker when the 
 
 uint32_t replay_key() { return g_replay_by_frame ? gx_frames_submitted() : g_poll_seq; }
 
+// The clock's jumps, in the order recorded (see input_log_jump). Only the guest thread
+// takes them, but clock_update_limit asks for the next one from any thread that
+// schedules an event, so the next count is kept in an atomic.
+struct Jump { uint64_t at, edges; };
+std::vector<Jump> g_jumps;
+size_t g_jump_pos;
+std::atomic<uint64_t> g_next_jump_at{UINT64_MAX};
+
 void record(int chan, const PadState& s) {
     if (!g_out) return;
     if (g_have_last[chan] && same(g_last[chan], s)) return;
@@ -81,9 +90,10 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
     time_t now = time(nullptr);
     strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", localtime(&now));
     rtc_set_base(now);
-    fprintf(g_out, "# gcn-recomp input log v2\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
+    fprintf(g_out, "# gcn-recomp input log v3\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
     fprintf(g_out, "# poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r\n");
     fprintf(g_out, "# (hex; each line is that channel's state from that pad poll on)\n");
+    fprintf(g_out, "# jump <back-edge count> <edges>: the clock caught up with the host there (decimal)\n");
     fflush(g_out);
     if (plat_readable(memcard_path.c_str())) {
         if (!copy_file(memcard_path, dir + "/memcard_a.raw"))
@@ -121,6 +131,11 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
             continue;
         }
         if (line[0] == '\n') continue;
+        unsigned long long jat, jedges;
+        if (sscanf(line, "jump %llu %llu", &jat, &jedges) == 2) {
+            g_jumps.push_back(Jump{(uint64_t)jat, (uint64_t)jedges});
+            continue;
+        }
         unsigned key, frame, chan, conn, buttons, sx, sy, cx, cy, l, r;
         if (version >= 2) {
             if (sscanf(line, "%u %u %u %u %x %x %x %x %x %x %x", &key, &frame, &chan, &conn, &buttons, &sx, &sy, &cx, &cy, &l, &r) != 11) continue;
@@ -145,6 +160,8 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     }
     g_replay_last_key = std::max(g_replay.back().key, end_key);
     g_replay_by_frame = version < 2;
+    std::stable_sort(g_jumps.begin(), g_jumps.end(), [](const Jump& a, const Jump& b) { return a.at < b.at; });
+    g_next_jump_at = g_jumps.empty() ? UINT64_MAX : g_jumps[0].at;
     for (auto& s : g_replay_state) { s = PadState(); s.connected = true; }
     g_replay_loaded = true;
     memcard_out.clear();
@@ -156,11 +173,27 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
             memcard_out.clear();
         }
     }
-    fprintf(stderr, "[input] replaying %zu changes over %u %s from %s%s%s\n", g_replay.size(),
-            g_replay_last_key, g_replay_by_frame ? "frames" : "polls", path.c_str(),
+    fprintf(stderr, "[input] replaying %zu changes over %u %s and %zu clock jumps from %s%s%s\n", g_replay.size(),
+            g_replay_last_key, g_replay_by_frame ? "frames" : "polls", g_jumps.size(), path.c_str(),
             memcard_out.empty() ? "" : " (with its card snapshot)",
             g_replay_by_frame ? " (v1 log: keyed by frame, so only approximate)" : "");
     return true;
+}
+
+void input_log_jump(uint64_t at, uint64_t edges) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_out) return;
+    fprintf(g_out, "jump %llu %llu\n", (unsigned long long)at, (unsigned long long)edges);
+    fflush(g_out);
+}
+
+uint64_t input_replay_next_jump_at() { return g_next_jump_at.load(); }
+
+uint64_t input_replay_take_jump(uint64_t count) {
+    if (g_jump_pos >= g_jumps.size() || g_jumps[g_jump_pos].at > count) return 0;
+    const uint64_t edges = g_jumps[g_jump_pos++].edges;
+    g_next_jump_at = g_jump_pos < g_jumps.size() ? g_jumps[g_jump_pos].at : UINT64_MAX;
+    return edges;
 }
 
 bool input_replay_active() {

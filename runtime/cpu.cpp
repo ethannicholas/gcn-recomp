@@ -1,6 +1,7 @@
 // Memory, CPU helper routines, timing and event scheduling.
 #include "runtime.h"
 #include "platform.h"
+#include "input_log.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -364,6 +365,7 @@ void irq_request() { g_vlimit = 0; }
 // a known count away, so jump straight to it; the spin's iterations would have been
 // nothing but clock. On the host clock, give the CPU up for a moment instead of spinning.
 static uint64_t g_vskipped;
+static uint64_t g_jumps, g_jump_edges;   // the clock's catch-up jumps; see clock_pace
 extern "C" void idle_hint(CPU* c) {
     if (g_virtual_clock) {
         uint64_t limit = g_vlimit, cur = g_vcount;
@@ -381,7 +383,9 @@ extern std::atomic<uint64_t> g_next_event_at;
 void clock_update_limit() {
     if (!g_virtual_clock) { g_vlimit = UINT64_MAX; return; }  // the ticker asks for polls
     uint64_t at = std::min(g_next_event_at.load(), g_dec_deadline.load());
-    g_vlimit = at == UINT64_MAX ? UINT64_MAX : (at + TICKS_PER_EDGE - 1) / TICKS_PER_EDGE;
+    uint64_t limit = at == UINT64_MAX ? UINT64_MAX : (at + TICKS_PER_EDGE - 1) / TICKS_PER_EDGE;
+    // A replay's next recorded jump is made from a poll at its count (clock_pace).
+    g_vlimit = std::min(limit, input_replay_next_jump_at());
 }
 
 uint32_t gx_frames_submitted();
@@ -397,26 +401,60 @@ static void clock_log() {
     if (vt < next_at) return;
     next_at = vt + TB_FREQ;
     uint64_t edges = g_vcount - g_vskipped, frames = gx_frames_submitted(), host = host_ns();
-    fprintf(stderr, "[clock] virtual %6.1fs host %6.1fs  frames %u (+%u)  work edges/frame %.0fk (%.0f%% of a field)\n",
+    fprintf(stderr, "[clock] virtual %6.1fs host %6.1fs  frames %u (+%u)  work edges/frame %.0fk (%.0f%% of a field)  jumps %u (%.0f ms)\n",
             (double)vt / TB_FREQ, (double)host / 1e9, (unsigned)frames, (unsigned)(frames - last_frames),
             frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) / 1000.0 : 0.0,
-            frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) * TICKS_PER_EDGE * 100.0 / (TB_FREQ / 59.94) : 0.0);
+            frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) * TICKS_PER_EDGE * 100.0 / (TB_FREQ / 59.94) : 0.0,
+            (unsigned)g_jumps, (double)g_jump_edges * TICKS_PER_EDGE * 1000.0 / TB_FREQ);
     last_edges = edges; last_frames = frames;
+}
+
+// Catching up. A host that cannot keep real time -- a heavy room on a headset -- left
+// virtual time behind the wall clock. The game saw nothing wrong: every frame was a
+// frame, so it ran at full speed in slow motion, and the sound, delivered a virtual DMA
+// block at a time, came up short of the device's real seconds -- the dropouts. The
+// hardware would have dropped frames instead, its DSP keeping real time and the game's
+// own step growing with the frame. So in play, when virtual time has fallen more than a
+// few milliseconds behind the host's, it jumps to it: the game's next reading of the
+// time base sees the frame it really took, the AI DMA's blocks come due together and are
+// delivered at speed (aid_start_block), the retrace is simply late once, and the sound
+// carries on. Each jump is written to the input log with the back-edge count it was
+// made at, and a replay makes exactly those jumps at exactly those counts and none of
+// its own, so a replay is still exact. GCN_CATCHUP=0 keeps the slow-motion behaviour. A
+// host more than kForgiveNs behind is re-anchored as it always was: a stall that size
+// is a load or a shader build, not a frame to make up.
+static const bool g_catchup = !(getenv("GCN_CATCHUP") && atoi(getenv("GCN_CATCHUP")) == 0);
+static constexpr int64_t kCatchupNs = 4000000;
+static constexpr int64_t kForgiveNs = 100000000;
+
+static void clock_jump(uint64_t edges) {
+    g_vcount += edges;
+    g_vskipped += edges;
+    g_jumps++;
+    g_jump_edges += edges;
 }
 
 // Hold virtual time to real time. Called from irq_poll, i.e. whenever an event is due,
 // which is at least every SI poll (1/120 s). When the host falls behind, the shortfall is
-// forgiven rather than caught up: the game slows down instead of fast-forwarding later.
+// caught up (above) or, under GCN_CATCHUP=0 or in a replay with no jump recorded here,
+// forgiven: the game then slows down instead of fast-forwarding later.
 void clock_pace() {
     clock_log();
-    if (!g_virtual_clock || g_time_scale <= 0) return;
+    if (!g_virtual_clock) return;
+    if (const uint64_t edges = input_replay_take_jump(g_vcount)) clock_jump(edges);
+    if (g_time_scale <= 0) return;
     int64_t virt_ns = (int64_t)((double)now_ticks() * (1e9 / TB_FREQ) / g_time_scale);
     int64_t ahead = virt_ns - (int64_t)host_ns() - g_pace_offset_ns;
     if (ahead > 300000) {
         if (ahead > 50000000) ahead = 50000000;
         std::this_thread::sleep_for(std::chrono::nanoseconds(ahead));
-    } else if (ahead < -100000000) {
+    } else if (ahead < -kForgiveNs) {
         g_pace_offset_ns += ahead;  // too far behind: re-anchor
+    } else if (ahead < -kCatchupNs && g_catchup && !input_replay_active()) {
+        const double ticks = (double)-ahead * (TB_FREQ / 1e9) * g_time_scale;
+        const uint64_t edges = (uint64_t)((ticks + TICKS_PER_EDGE - 1) / TICKS_PER_EDGE);
+        input_log_jump(g_vcount, edges);
+        clock_jump(edges);
     }
 }
 

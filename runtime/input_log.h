@@ -45,3 +45,14 @@ bool input_pad_poll(int chan, PadState& s);
 
 // Whether a replay is in progress (loaded and not yet past its last poll).
 bool input_replay_active();
+
+// The clock's catch-up jumps (clock_pace in cpu.cpp): a jump of `edges` back-edges made
+// when the guest's back-edge count was `at`. Recorded so that a replay makes the same
+// jump at the same count, which keeps it exact: the guest then reads the same time base
+// at every instruction. A log without any (recorded before version 3, or on a host that
+// kept up) replays without any.
+void input_log_jump(uint64_t at, uint64_t edges);
+// The count the next recorded jump is due at, UINT64_MAX when none: the clock polls there.
+uint64_t input_replay_next_jump_at();
+// If a recorded jump is due at `count` (or was passed), takes it and returns its size.
+uint64_t input_replay_take_jump(uint64_t count);
