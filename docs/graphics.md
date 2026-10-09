@@ -49,6 +49,38 @@ game's business: `render_set_eye_hook` takes a per-frame callback that returns a
 transform, a HUD transform and the draws to leave out, and a game project installs it.
 Nothing here knows what the game is.
 
+## What the render thread spends a stereo frame on
+
+A stereo frame is the batch drawn three times: a flat pass into the EFB, then each eye
+(`render_execute_eye`). The vertex buffer and the CPU transform are shared; what repeats is
+the state applications and the draw calls, and on a mobile driver those are most of the
+render thread. Three things keep them down, each with a switch that restores the old
+behaviour for comparison:
+
+- **The flat pass is trimmed** (`flat_pass_trim`). In stereo it exists only to produce the
+  render-to-texture copies the eyes sample, since an eye never draws into the EFB and the
+  picture the flat pass paints is never shown. So it stops after the last copy something
+  will read: the off-screen passes (reflections, sprite sheets) are drawn in full, and the
+  main scene only as far as a copy that is read as copied. A whole-frame copy or a
+  spray-sized grab the eye substitutes its own grab for does not count as read; a copy with
+  no reader this frame does, since a game may sample it in a later one. For a first-person
+  game that is nearly the whole main scene left out. `GCN_EYE_FULLFLAT=1` draws it all.
+- **Uniforms are shadowed per program** (`UniformShadow`). A uniform keeps its value in its
+  program across switches, so a group whose inputs match what that program already holds is
+  not re-uploaded, whether or not the program just changed. Two generation counters say when
+  a record is stale: one for the EFB scale, one for the pass and the eye's matrices.
+  Before this every program switch re-uploaded a dozen groups. `GCN_APPLYSTATS=1` prints
+  what each pass actually sent.
+- **The texture and the sampler of a unit are bound separately**, since the texture changes
+  at nearly every draw and the sampler almost never.
+
+And on GL ES the eye's depth attachment is invalidated at the end of each eye pass
+(`glInvalidateFramebuffer`): on a tiled GPU a depth buffer left valid is written out of
+tile memory to RAM, and at a headset's eye size with multisampling that is tens of
+megabytes per eye per frame for a buffer nothing reads. `GCN_EYE_KEEPDEPTH=1` leaves it.
+
+The next lever, not taken, is `GL_OVR_multiview2`: both eyes from one set of draw calls.
+
 ## Depth bands in an eye
 
 GX has no depth-range call, but a viewport carries a z range, and a game can confine a draw

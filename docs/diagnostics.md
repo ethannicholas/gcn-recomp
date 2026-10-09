@@ -131,7 +131,13 @@ virtual and host time compare and the work per presented frame.
 
 `GCN_FRAMETIME=1` prints a line per frame from each thread: the guest's interval between
 presents and how much of it the GX front end took, the batch's shape, and the renderer's
-time to issue it.
+time to issue it (`[rt]` for the flat pass; in stereo `[eye-rt]` adds, per eye, the flat
+pass's time and the eye's own). `GCN_APPLYSTATS=1` prints every 64th frame, per pass, how
+many state applications there were and which groups of GL state each actually sent --
+program, projection, viewport, TEV registers, textures, samplers, blend and so on -- which
+is what a state application costs on a given game. `GCN_EYE_FULLFLAT=1` and
+`GCN_EYE_KEEPDEPTH=1` undo the two stereo savings described in `graphics.md`, for
+measuring them.
 
 ## Textures
 

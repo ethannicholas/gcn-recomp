@@ -53,11 +53,31 @@ static inline void set_lod_bias(GLuint s, float bias) {
 }
 #endif
 
+// The inputs a program's uniforms were last computed from; see AppliedState. `gen` and
+// `view_gen` say whether the record is current at all (g_uniform_gen, g_view_gen).
+struct UniformShadow {
+    uint32_t gen = 0, view_gen = 0;
+    float proj[7];
+    uint8_t view_space, background, foreground;
+    float viewport[6];
+    uint32_t scissor_off;      // bp[0x59]
+    uint32_t psize_reg;        // bp[0x22]
+    uint32_t tev_reg[4][2], tev_konst[4][2];
+    uint32_t aref;             // bp[0xF3]
+    uint32_t ind[9];           // bp[0x06..0x0E]
+    uint32_t indcs[2];         // bp[0x25..0x26]
+    uint32_t fog[5];           // bp[0xEE..0xF2]
+    uint32_t screen_uv;
+    float ripple[2];
+    float tsz[16];
+};
+
 struct Program {
     GLuint prog;
     GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_konst, u_texsize, u_indmtx, u_indscale,
         u_alpharef, u_fog, u_fogcolor, u_indcoordscale;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
+    mutable UniformShadow shadow;
 };
 
 // Samples kept per hardware pixel, in each axis. See render_set_internal_scale.
@@ -622,12 +642,14 @@ void render_set_window_size(int w, int h) { g_win_w = w; g_win_h = h; }
 // dst * scale but matched for reuse by their logical size alone, so a survivor would be
 // reused at the old resolution and quietly sample wrong. They go with the EFB.
 static void gl_state_invalidate();
+static void uniforms_invalidate();
 void render_set_internal_scale(int scale) {
     if (scale < 1) scale = 1;
     if (scale > kMaxInternalScale) scale = kMaxInternalScale;
     if (scale == g_scale) return;
     g_scale = scale;
     gl_state_invalidate();
+    uniforms_invalidate();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_efb_color);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * g_scale, EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -818,27 +840,67 @@ static bool is_eye_screen_tex(uint32_t id) {
 // own terms. The shadow holds within one pass: an EFB copy, a present or an eye's grab
 // changes GL state behind it, and so does the start of a new pass, whose eye matrices
 // differ -- each of those invalidates it.
+// What apply_state last put into GL, so that it can put in only what differs.
+//
+// A race frame applies around a thousand states, and measured over a million consecutive
+// pairs, 94% of them differ in a texture -- 1.1 texmaps on average -- while the projection,
+// viewport, scissor, fog, indirect matrices and point size are the same more than 99% of
+// the time, the program 81%, the TEV registers 76%, blend and depth 90%. Re-issuing the
+// forty-odd GL calls of a full application for every one of those was most of the
+// renderer's CPU time; the typical application is now a texture bind and its size.
+//
+// This holds the bindings and the fixed-function state, which are global to the context.
+// The uniforms are kept with their program instead (UniformShadow): a uniform belongs to
+// its program and keeps its value across switches, so a program switched back to still
+// holds what it was last given, and a group whose inputs match is left alone whether or not
+// the program changed. Before that, every switch re-uploaded every group -- a dozen and more
+// calls -- and a frame here switched programs one draw in six. The shadow holds within one
+// pass: an EFB copy, a present or an eye's grab changes GL state behind it, and so does the
+// start of a new pass, whose eye matrices differ -- each of those invalidates it.
 struct AppliedState {
     bool valid = false;
     ShaderKey key;
     const Program* pr = nullptr;
-    float proj[7], viewport[6];
-    uint8_t view_space;
     uint32_t bp[256];
-    uint32_t tev_reg[4][2], tev_konst[4][2];
-    uint32_t screen_uv;
-    float ripple[2];
     uint32_t tex_id[8];
     uint8_t tex_sub[8];       // the unit holds an eye grab, not the game's texture
     GLuint sampler[8];
-    float tsz[16];
     int prim;
     bool hud_depth;
-    bool background;
-    bool foreground;
 };
 static AppliedState g_applied;
 static void gl_state_invalidate() { g_applied.valid = false; }
+
+// A program's uniform record is current while its `gen` matches g_uniform_gen, and the
+// groups that depend on the pass -- the eye's matrices, the morph, the eye target's size,
+// whether this is the flat view at all -- while `view_gen` matches g_view_gen as well.
+// Nothing inside the renderer touches a program's uniforms except apply_state, so the
+// first counter moves only for the EFB scale (the point size is in EFB pixels), and the
+// second at the start of every pass and whenever the eye is placed.
+static uint32_t g_uniform_gen = 1, g_view_gen = 1;
+static void uniforms_invalidate() { g_uniform_gen++; }
+static void view_invalidate() { g_view_gen++; }
+
+// GCN_APPLYSTATS=1: which groups of state apply_state actually had to send, summed over a
+// pass, printed every 64th frame. What a game changes between draws decides what a state
+// application costs, and this is how to see it.
+static const bool g_applystats = getenv("GCN_APPLYSTATS") != nullptr;
+static struct ApplyStats {
+    uint32_t applies, program, proj, viewport, psize, tev, aref, ind, indcs, fog, screen, ripple,
+        texbind, sampbind, tsz, blend, depth, cull, scissor;
+} g_astat;
+static void apply_stats_flush(const char* pass, uint32_t frame) {
+    if (!g_applystats) return;
+    if ((frame & 63) == 0) {
+        const ApplyStats& a = g_astat;
+        fprintf(stderr, "[apply] f%u %s applies %u: prog %u proj %u vp %u psz %u tev %u aref %u ind %u "
+                "indcs %u fog %u scr %u rip %u tex %u samp %u tsz %u blend %u depth %u cull %u sciss %u\n",
+                frame, pass, a.applies, a.program, a.proj, a.viewport, a.psize, a.tev, a.aref, a.ind,
+                a.indcs, a.fog, a.screen, a.ripple, a.texbind, a.sampbind, a.tsz, a.blend, a.depth, a.cull,
+                a.scissor);
+    }
+    memset(&g_astat, 0, sizeof(g_astat));
+}
 
 static void apply_state(const PixelState& st, int prim) {
     int xoff, yoff;
@@ -846,22 +908,24 @@ static void apply_state(const PixelState& st, int prim) {
     const uint32_t* bp = st.bp;
     const uint32_t* abp = g_applied.bp;
     ShaderKey key = make_shader_key(st);
-    // `same` means the previous application is still in GL and the program is unchanged,
-    // so a uniform whose inputs match may be left alone.
+    g_astat.applies++;
+    // `same` means the previous application is still in GL and the program is unchanged.
     const bool same = g_applied.valid && key == g_applied.key;
     const Program& pr = same ? *g_applied.pr : get_program(key);
     if (!same) {
+        g_astat.program++;
         glUseProgram(pr.prog);
         g_applied.key = key;
         g_applied.pr = &pr;
     }
-    // Shorthand for "this group's inputs are what was last uploaded to this program".
-    auto same_bp = [&](uint32_t lo, uint32_t hi) {
-        if (!same) return false;
-        for (uint32_t r = lo; r <= hi; r++) if (bp[r] != abp[r]) return false;
-        return true;
+    // What this program was last given; see UniformShadow. A group is uploaded when its
+    // inputs differ from the record, or the record is not current.
+    UniformShadow& u = pr.shadow;
+    const bool held = u.gen == g_uniform_gen;
+    const bool view_held = held && u.view_gen == g_view_gen;
+    auto held_words = [&](const uint32_t* a, const uint32_t* b, size_t n) {
+        return held && memcmp(a, b, n * sizeof(uint32_t)) == 0;
     };
-    auto same_reg = [&](uint32_t r) { return same && bp[r] == abp[r]; };
 
     // Projection. In VR a perspective batch is world geometry and gets the eye's
     // projection instead of the game's; an orthographic one is a 2D element and goes on
@@ -908,15 +972,16 @@ static void apply_state(const PixelState& st, int prim) {
     const bool background = sky_at_infinity && g_bg_from > 0.0f && perspective && !st.view_space &&
                             band_lo >= g_bg_from;
     const bool foreground = g_fg_to > 0.0f && g_fg_scale != 1.0f && perspective && band_hi <= g_fg_to;
-    const bool same_proj = same && memcmp(st.proj, g_applied.proj, sizeof(st.proj)) == 0 &&
-                           st.view_space == g_applied.view_space && background == g_applied.background &&
-                           foreground == g_applied.foreground;
+    const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
+                           st.view_space == u.view_space && background == u.background &&
+                           foreground == u.foreground;
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
     // copy, on a flat panel hanging in front of the camera while the real racer went on
     // moving in the world. The seam at the billboard's edge is the lesser problem.
     if (!same_proj) {
+        g_astat.proj++;
         if (g_vr_active && g_morph < 1.0f) {
             // Part way between theater and stereo: see morph_chain.
             float M[16], F[16], C[16];
@@ -976,27 +1041,32 @@ static void apply_state(const PixelState& st, int prim) {
         // takes, plus how w is formed: -z under a frustum, 1 under an ortho batch.
         const float zp[4] = {p[4], p[5], perspective ? -1.0f : 0.0f, perspective ? 0.0f : 1.0f};
         glUniform4fv(pr.u_zproj, 1, zp);
-        memcpy(g_applied.proj, st.proj, sizeof(st.proj));
-        g_applied.view_space = st.view_space;
-        g_applied.background = background;
-        g_applied.foreground = foreground;
+        memcpy(u.proj, st.proj, sizeof(st.proj));
+        u.view_space = st.view_space;
+        u.background = background;
+        u.foreground = foreground;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
-    if (!(same && same_reg(0x59) && memcmp(vp, g_applied.viewport, sizeof(st.viewport)) == 0)) {
+    if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
+        g_astat.viewport++;
         float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
         float vpb[4] = {2.0f * vp[5] / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f, 0, 0};
         glUniform4fv(pr.u_vp_a, 1, vpa);
         glUniform4fv(pr.u_vp_b, 1, vpb);
-        memcpy(g_applied.viewport, vp, sizeof(st.viewport));
+        memcpy(u.viewport, vp, sizeof(st.viewport));
+        u.scissor_off = bp[0x59];
     }
-    if (!same_reg(0x22)) {
+    if (!(held && bp[0x22] == u.psize_reg)) {
+        g_astat.psize++;
         float psize = ((bp[0x22] >> 8) & 0xFF) / 6.0f * g_scale;
         glUniform1f(pr.u_point_size, psize < 1 ? 1 : psize);
+        u.psize_reg = bp[0x22];
     }
 
     // TEV registers
-    if (!(same && memcmp(st.tev_reg, g_applied.tev_reg, sizeof(st.tev_reg)) == 0 &&
-          memcmp(st.tev_konst, g_applied.tev_konst, sizeof(st.tev_konst)) == 0)) {
+    if (!(held && memcmp(st.tev_reg, u.tev_reg, sizeof(st.tev_reg)) == 0 &&
+          memcmp(st.tev_konst, u.tev_konst, sizeof(st.tev_konst)) == 0)) {
+        g_astat.tev++;
         GLint regs[16], kon[16];
         for (int r = 0; r < 4; r++) {
             uint32_t ra = st.tev_reg[r][0], bg = st.tev_reg[r][1];
@@ -1008,15 +1078,18 @@ static void apply_state(const PixelState& st, int prim) {
         }
         glUniform4iv(pr.u_reg, 4, regs);
         glUniform4iv(pr.u_konst, 4, kon);
-        memcpy(g_applied.tev_reg, st.tev_reg, sizeof(st.tev_reg));
-        memcpy(g_applied.tev_konst, st.tev_konst, sizeof(st.tev_konst));
+        memcpy(u.tev_reg, st.tev_reg, sizeof(st.tev_reg));
+        memcpy(u.tev_konst, st.tev_konst, sizeof(st.tev_konst));
     }
-    if (!same_reg(0xF3)) {
+    if (!(held && bp[0xF3] == u.aref)) {
+        g_astat.aref++;
         GLint aref[2] = {(GLint)(bp[0xF3] & 0xFF), (GLint)((bp[0xF3] >> 8) & 0xFF)};
         glUniform2iv(pr.u_alpharef, 1, aref);
+        u.aref = bp[0xF3];
     }
     // Indirect matrices
-    if (!same_bp(0x06, 0x0E)) {
+    if (!held_words(bp + 0x06, u.ind, 9)) {
+        g_astat.ind++;
         GLint im[18];
         GLint isc[3];
         for (int m = 0; m < 3; m++) {
@@ -1027,8 +1100,10 @@ static void apply_state(const PixelState& st, int prim) {
         }
         glUniform3iv(pr.u_indmtx, 6, im);
         glUniform1iv(pr.u_indscale, 3, isc);
+        memcpy(u.ind, bp + 0x06, sizeof(u.ind));
     }
-    if (!same_bp(0x25, 0x26)) {
+    if (!held_words(bp + 0x25, u.indcs, 2)) {
+        g_astat.indcs++;
         float ics[8];
         for (int i = 0; i < 4; i++) {
             uint32_t ss = bp[0x25 + i / 2] >> ((i & 1) * 8);
@@ -1036,13 +1111,16 @@ static void apply_state(const PixelState& st, int prim) {
             ics[i * 2 + 1] = 1.0f / (float)(1u << ((ss >> 4) & 15));
         }
         glUniform2fv(pr.u_indcoordscale, 4, ics);
+        memcpy(u.indcs, bp + 0x25, sizeof(u.indcs));
     }
     // Fog
-    if (!same_bp(0xEE, 0xF2)) {
+    if (!held_words(bp + 0xEE, u.fog, 5)) {
+        g_astat.fog++;
         float fog[4] = {fog_float(bp[0xEE]), fog_float(bp[0xF1]), (float)(bp[0xEF] & 0xFFFFFF), (float)(bp[0xF0] & 0x1F)};
         glUniform4fv(pr.u_fog, 1, fog);
         float fogc[3] = {((bp[0xF2] >> 16) & 0xFF) / 255.0f, ((bp[0xF2] >> 8) & 0xFF) / 255.0f, (bp[0xF2] & 0xFF) / 255.0f};
         glUniform3fv(pr.u_fogcolor, 1, fogc);
+        memcpy(u.fog, bp + 0xEE, sizeof(u.fog));
     }
 
     // Which texgens feed a copy of the whole frame. In an eye those lookups are taken
@@ -1060,11 +1138,12 @@ static void apply_state(const PixelState& st, int prim) {
                 screen_uv |= 1u << ((order >> 3) & 7);
         }
     }
-    if (!same || screen_uv != g_applied.screen_uv) {
+    if (!(view_held && screen_uv == u.screen_uv)) {
+        g_astat.screen++;
         glUniform1i(pr.u_screen_uv, (GLint)screen_uv);
         glUniform2f(pr.u_screen_px, g_eye_w ? 1.0f / (float)g_eye_w : 0.0f,
                     g_eye_h ? 1.0f / (float)g_eye_h : 0.0f);
-        g_applied.screen_uv = screen_uv;
+        u.screen_uv = screen_uv;
     }
 
     // The indirect offset that distorts a substituted lookup is an absolute displacement
@@ -1102,16 +1181,18 @@ static void apply_state(const PixelState& st, int prim) {
             ripple[1] *= (1.0f - k) * p[2] * g_panel[5] / D + k;
         }
     }
-    if (!same || ripple[0] != g_applied.ripple[0] || ripple[1] != g_applied.ripple[1]) {
+    if (!(view_held && ripple[0] == u.ripple[0] && ripple[1] == u.ripple[1])) {
+        g_astat.ripple++;
         glUniform2fv(pr.u_screen_ripple, 1, ripple);
-        g_applied.ripple[0] = ripple[0];
-        g_applied.ripple[1] = ripple[1];
+        u.ripple[0] = ripple[0];
+        u.ripple[1] = ripple[1];
     }
 
     // Textures. The bindings are global, so a unit already holding this texture under
-    // this sampler is left alone whatever the program; the sizes are a uniform.
+    // this sampler is left alone whatever the program; the sizes are a uniform. The
+    // texture and the sampler are bound separately: a frame here changed the texture on
+    // a unit at nearly every draw and the sampler almost never.
     float tsz[16];
-    bool tsz_changed = !same;
     for (int m = 0; m < 8; m++) {
         tsz[m * 2] = tsz[m * 2 + 1] = 1.0f;
         uint32_t id = st.tex_id[m];
@@ -1136,33 +1217,37 @@ static void apply_state(const PixelState& st, int prim) {
                 id = 0;
             }
         }
-        if (tsz[m * 2] != g_applied.tsz[m * 2] || tsz[m * 2 + 1] != g_applied.tsz[m * 2 + 1]) tsz_changed = true;
-        g_applied.tsz[m * 2] = tsz[m * 2];
-        g_applied.tsz[m * 2 + 1] = tsz[m * 2 + 1];
-        if (g_applied.valid && g_applied.tex_id[m] == id && g_applied.tex_sub[m] == sub &&
-            g_applied.sampler[m] == sampler)
-            continue;
+        const bool tex_held = g_applied.valid && g_applied.tex_id[m] == id && g_applied.tex_sub[m] == sub;
+        const bool samp_held = g_applied.valid && g_applied.sampler[m] == sampler;
+        if (tex_held && samp_held) continue;
         glActiveTexture(GL_TEXTURE0 + m);
-        if (sub) {
-            // The grab carries its own filtering; a sampler object would override it.
-            glBindTexture(GL_TEXTURE_2D, (is_grab_tex(id) ? g_spray_grab : g_eye_grab).tex);
-            glBindSampler(m, 0);
-        } else if (gt) {
-            glBindTexture(GL_TEXTURE_2D, gt->tex);
-            glBindSampler(m, sampler);
-        } else {
-            glBindTexture(GL_TEXTURE_2D, 0);
+        if (!tex_held) {
+            g_astat.texbind++;
+            if (sub) glBindTexture(GL_TEXTURE_2D, (is_grab_tex(id) ? g_spray_grab : g_eye_grab).tex);
+            else glBindTexture(GL_TEXTURE_2D, gt ? gt->tex : 0);
+            g_applied.tex_id[m] = id;
+            g_applied.tex_sub[m] = sub;
         }
-        g_applied.tex_id[m] = id;
-        g_applied.tex_sub[m] = sub;
-        g_applied.sampler[m] = sampler;
+        if (!samp_held) {
+            // The grab carries its own filtering; a sampler object would override it, so
+            // a substituted unit gets none (0), as does an empty one.
+            g_astat.sampbind++;
+            glBindSampler(m, sampler);
+            g_applied.sampler[m] = sampler;
+        }
     }
-    if (tsz_changed) glUniform2fv(pr.u_texsize, 8, tsz);
-
+    if (!(held && memcmp(tsz, u.tsz, sizeof(tsz)) == 0)) {
+        g_astat.tsz++;
+        glUniform2fv(pr.u_texsize, 8, tsz);
+        memcpy(u.tsz, tsz, sizeof(tsz));
+    }
+    u.gen = g_uniform_gen;
+    u.view_gen = g_view_gen;
     // Blend / logic op, colour mask
     const bool same_blend = g_applied.valid && bp[0x41] == abp[0x41] && bp[0x43] == abp[0x43];
     uint32_t bm = bp[0x41];
     if (!same_blend) {
+        g_astat.blend++;
         bool blend = bm & 1, logic = (bm >> 1) & 1, sub = (bm >> 11) & 1;
         if (sub) {
             glEnable(GL_BLEND);
@@ -1191,6 +1276,7 @@ static void apply_state(const PixelState& st, int prim) {
     // on one plane. It is submitted last, so submission order is the layering.
     const bool hud_depth = g_vr_active && on_hud_frame;
     if (!(g_applied.valid && bp[0x40] == abp[0x40] && hud_depth == g_applied.hud_depth)) {
+        g_astat.depth++;
         uint32_t zm = bp[0x40];
         if (zm & 1) {
             glEnable(GL_DEPTH_TEST);
@@ -1208,6 +1294,7 @@ static void apply_state(const PixelState& st, int prim) {
     // Cull
     uint32_t cull = (bp[0x00] >> 14) & 3;
     if (!(g_applied.valid && cull == ((abp[0x00] >> 14) & 3) && prim == g_applied.prim)) {
+        g_astat.cull++;
         static bool nocull = getenv("GCN_NOCULL") != nullptr;
         if (prim != 0 || cull == 0 || nocull) glDisable(GL_CULL_FACE);
         else {
@@ -1226,6 +1313,7 @@ static void apply_state(const PixelState& st, int prim) {
     // Scissor (EFB coords, y down), measured from the same origin as the viewport.
     const bool same_scissor = g_applied.valid && bp[0x20] == abp[0x20] && bp[0x21] == abp[0x21] && bp[0x59] == abp[0x59];
     if (!same_scissor) {
+        g_astat.scissor++;
         int x0 = (int)(bp[0x20] >> 12 & 0x7FF) - xoff, y0 = (int)(bp[0x20] & 0x7FF) - yoff;
         int x1 = (int)(bp[0x21] >> 12 & 0x7FF) - xoff + 1, y1 = (int)(bp[0x21] & 0x7FF) - yoff + 1;
         if (x0 < 0) x0 = 0;
@@ -1425,7 +1513,9 @@ static void world_pitch_matrix(float R[16]) {
     R[15] = 1.0f;
 }
 
+static void view_invalidate();
 static void compose_world_view() {
+    view_invalidate();
     mat4_mul(g_vr_view, g_world_xform, g_vr_view_world);
     memcpy(g_vr_view_sky, g_vr_view_world, sizeof(g_vr_view_sky));
     g_vr_view_sky[12] = g_vr_view_sky[13] = g_vr_view_sky[14] = 0.0f;
@@ -1499,6 +1589,7 @@ void render_set_vr_morph(float t, const float panel[16]) {
     constexpr float kFloor = 0.002f;
     g_morph = t >= 1.0f ? 1.0f : kFloor + (1.0f - kFloor) * (t < 0.0f ? 0.0f : t);
     if (panel) memcpy(g_panel, panel, sizeof(g_panel));
+    view_invalidate();
 }
 
 // One draw's matrices part way between theater and stereo.
@@ -1641,7 +1732,7 @@ void render_hud_frame(float dist, float tan_half_fovy, float scale, float height
     // depth test for these draws and lets submission order do the layering.
 }
 
-static bool execute_batch(Batch& b, bool do_present);
+static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out = nullptr);
 
 // The size of the frame the game actually scans out, which is the display copy's. It is
 // not the EFB's size: the EFB is 640x528 and the game displays 640x480 of it.
@@ -1729,6 +1820,83 @@ static bool samples_grab_copy(const PixelState& st) {
     return false;
 }
 
+// Which draws the flat pass can leave out when it runs only to feed the eyes.
+//
+// In stereo the flat pass exists for the render-to-texture copies: the eyes sample them,
+// and an eye never draws into the EFB. The picture it paints is never shown. So it need not
+// draw past the last copy whose contents something will read -- the main scene after that
+// point is drawn by each eye anyway, and here it was a thousand draw calls a frame, a third
+// of the render thread, spent on pixels that went straight to the next clear.
+//
+// What is read: every copy an off-screen pass samples (those draws run only here), and
+// every copy an eye samples as copied. An eye takes over the lookups of a whole-frame copy
+// and of the small grabs the spray uses, once it has a grab of its own to substitute
+// (is_eye_screen_tex), and those need no flat scene behind them. A copy with no reader in
+// this frame is kept all the same: a game can copy the scene once and sample it for the
+// frames that follow, so an unread copy is not an unneeded one. Only a whole-frame copy or a
+// grab the eye would substitute for is taken as unread. GCN_EYE_FULLFLAT=1 draws the whole
+// flat pass as before.
+//
+// `skip` is mark_offscreen_passes' answer; `out` gets one byte per command, 1 to leave out.
+// Empty when nothing is to be left out.
+static void flat_pass_trim(const Batch& b, const std::vector<uint8_t>& skip, std::vector<uint8_t>& out) {
+    out.clear();
+    static const bool full = getenv("GCN_EYE_FULLFLAT") != nullptr;
+    if (full) return;
+    uint32_t dw, dh;
+    display_size(b, dw, dh);
+    // Copy textures read as copied this frame. A frame has a handful of copies, so a list.
+    std::vector<uint32_t> read;
+    auto note_read = [&](uint32_t id) {
+        for (uint32_t r : read) if (r == id) return;
+        read.push_back(id);
+    };
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw) continue;
+        const PixelState& st = b.states[c.state];
+        // Whether an eye substitutes its grab in this draw: the same test apply_state makes
+        // for screen_uv, which then takes over every eye-screen texture the draw binds.
+        bool subst = false;
+        if (!skip[i]) {
+            const uint32_t nstg = ((st.bp[0x00] >> 10) & 15) + 1;
+            for (uint32_t s = 0; s < nstg && !subst; s++) {
+                const uint32_t order = st.bp[0x28 + s / 2] >> ((s & 1) * 12);
+                const uint32_t map = order & 7;
+                subst = (order & 0x40) && st.tex_is_efb[map] && st.tex_id[map] &&
+                        is_eye_screen_tex(st.tex_id[map]);
+            }
+        }
+        for (int m = 0; m < 8; m++) {
+            if (!st.tex_is_efb[m] || !st.tex_id[m]) continue;
+            if (subst && is_eye_screen_tex(st.tex_id[m])) continue;
+            note_read(st.tex_id[m]);
+        }
+    }
+    size_t last = 0;
+    bool any = false;
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::EfbCopy || c.copy.to_xfb) continue;
+        const EfbCopyCmd& cc = c.copy;
+        bool needed = true;
+        if (cc.tex_id && !cc.depth &&
+            ((g_eye_grab.tex && is_fullscreen_copy(cc, dw, dh)) || (g_spray_grab.tex && is_grab_copy(cc)))) {
+            needed = false;
+            for (uint32_t r : read) needed |= r == cc.tex_id;
+        }
+        if (needed) { last = i; any = true; }
+    }
+    const size_t from = any ? last + 1 : 0;
+    bool trimmed = false;
+    for (size_t i = from; i < b.cmds.size(); i++)
+        if (b.cmds[i].type == CmdType::Draw && !skip[i]) trimmed = true;
+    if (!trimmed) return;
+    out.assign(b.cmds.size(), 0);
+    for (size_t i = from; i < b.cmds.size(); i++)
+        if (b.cmds[i].type == CmdType::Draw && !skip[i]) out[i] = 1;
+}
+
 // Draw one eye's view of a batch into `fbo`.
 //
 // The vertex buffer, the CPU-side transform in xf.cpp and any render-to-texture results
@@ -1742,8 +1910,11 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     // untextured and put a black quad on the water. So the first eye runs the whole frame
     // flat into the EFB exactly as the hardware would, minus the scanout, and the eyes
     // then re-project only the main scene on top of correct textures.
-    static std::vector<uint8_t> skip;
+    static std::vector<uint8_t> skip, trim;
     mark_offscreen_passes(b, skip);
+    const auto t_start = std::chrono::steady_clock::now();
+    double ms_flat = 0.0;
+    size_t n_trimmed = 0;
     if (do_copies) {
         // Where the eye stands and what it leaves out are read off the batch, so they
         // are settled before anything is drawn from it -- the flat pass included, which
@@ -1751,7 +1922,10 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         eye_prepare(b, skip);
         compose_world_view();
         g_vr_active = false;
-        execute_batch(b, false);  // which also notes this batch's whole-frame copies
+        flat_pass_trim(b, skip, trim);
+        for (uint8_t t : trim) n_trimmed += t;
+        execute_batch(b, false, trim.empty() ? nullptr : &trim);  // which also notes this batch's whole-frame copies
+        if (g_frametime) ms_flat = ms_since(t_start);
     }
     // GCN_EYELOG=1 reports how a frame was split, which is the only way to tell a scene
     // rendered at the wrong field of view from a composite quad standing in for one.
@@ -1780,6 +1954,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     g_vr_active = true;
     g_eye_w = w;
     g_eye_h = h;
+    view_invalidate();   // this eye's matrices and target
     bool grabbed = false, grabbed_spray = false;
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
     glViewport(0, 0, w, h);
@@ -1910,10 +2085,30 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         glDrawElements(mode[c.prim], c.count, GL_UNSIGNED_INT, (const void*)(uintptr_t)(c.first * sizeof(uint32_t)));
     }
     if (eyelog && do_copies)
-        fprintf(stderr, "[eye]   drawn=%d skipped_composite=%d spray=%d\n", n_drawn,
-                n_skipped, n_spray);
+        fprintf(stderr, "[eye]   drawn=%d skipped_composite=%d spray=%d flat_trimmed=%zu\n", n_drawn,
+                n_skipped, n_spray, n_trimmed);
+    // The renderer's half of GCN_FRAMETIME for an eye: the flat pass (first eye only) and
+    // this eye's own draws, CPU time.
+    if (g_frametime)
+        fprintf(stderr, "[eye-rt] f%u %s flat %6.2fms eye %6.2fms  draws %d\n", g_render_frame,
+                do_copies ? "first" : "second", ms_flat, ms_since(t_start) - ms_flat, n_drawn);
+    apply_stats_flush(do_copies ? "eye0" : "eye1", g_render_frame);
     if (morph && g_clip_ok)
         for (GLenum i = 0; i < 4; i++) glDisable(kClipDistance0 + i);
+#ifdef GCN_GL_ES
+    // The eye's depth buffer is finished with: nothing reads it, and the next pass clears
+    // it. On a tiled GPU, which every standalone headset has, a depth attachment left
+    // valid at the end of a pass is written out of tile memory to RAM tile by tile, and
+    // at the eye's size with multisampling that is a store of several tens of megabytes
+    // per eye per frame, for nothing. Saying so lets the driver drop it. Desktop GL 3.3
+    // has no glInvalidateFramebuffer, and an immediate-mode GPU would gain nothing.
+    // GCN_EYE_KEEPDEPTH=1 leaves it in, for comparing.
+    static const bool keep_depth = getenv("GCN_EYE_KEEPDEPTH") != nullptr;
+    if (!keep_depth) {
+        const GLenum attachment = GL_DEPTH_ATTACHMENT;
+        glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &attachment);
+    }
+#endif
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     g_vr_active = false;
     return true;
@@ -1953,7 +2148,7 @@ static void evict_textures() {
 // Runs a batch into the EFB the way the hardware would. With do_present false the final
 // scanout is skipped but everything else -- including every render-to-texture copy -- still
 // happens, which is how the stereo path obtains the textures its eye passes sample.
-static bool execute_batch(Batch& b, bool do_present) {
+static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out) {
     g_render_frame++;
     evict_textures();
     const auto t_start = std::chrono::steady_clock::now();
@@ -1988,6 +2183,7 @@ static bool execute_batch(Batch& b, bool do_present) {
     bool presented = false;
     uint32_t cur_state = UINT32_MAX;
     gl_state_invalidate();
+    view_invalidate();   // the flat view, after an eye
     int cur_prim = -1;
     // GCN_NO_COMP drops draws that sample a copy of the whole frame, in the flat path too.
     // The duplicate racer on the water is visible without any of the VR code, so this is
@@ -2007,6 +2203,9 @@ static bool execute_batch(Batch& b, bool do_present) {
                 touch_textures(b.states[c.state]);
                 break;
             }
+            // A draw the eyes will make themselves, whose only product here would be a
+            // picture nobody sees; see flat_pass_trim.
+            if (leave_out && (*leave_out)[ci]) break;
             const bool comp = (no_comp || complog || only_comp) &&
                               samples_fullscreen_copy(b.states[c.state]);
             if (only_comp && !comp) break;
@@ -2182,6 +2381,7 @@ static bool execute_batch(Batch& b, bool do_present) {
     if (g_frametime)
         fprintf(stderr, "[rt] f%u render %6.2fms (tex %5.2f vbo %5.2f)  applies %4u  programs %zu\n",
                 g_render_frame, ms_since(t_start), ms_tex, ms_vbo, n_apply, g_programs.size());
+    apply_stats_flush("flat", g_render_frame);
     return presented;
 }
 
