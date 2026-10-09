@@ -77,7 +77,9 @@ the headset's target, `--eye-yaw=deg`/`--eye-pitch=deg` turn the head (dump at t
 anything that does not move is head-locked), `--eye-fov=UP,DOWN` gives the eye a
 headset's asymmetric field in degrees (45,45 by default; a Quest 3's is about 43,52, and
 the HUD frame is sized from the larger, so where a 2D element lands against the world can
-only be checked with the field the headset has), and `--first-person` with `--fp-window=a-b`
+only be checked with the field the headset has), `--eye-pos=X,Y,Z` moves the head that far
+from the game's camera in metres (a step to the side is what tells near from far: a
+rotation shows no parallax), and `--first-person` with `--fp-window=a-b`
 calls the game's `set_first_person` hook. `GCN_EYE_GPU=1` times the eye passes,
 `GCN_EYE_MORPH=0,0.5,1` dumps the theater/stereo morph at those points beside the flat
 frame, and `GCN_STEREOLOG=1` prints the game's `wants_stereo` answer whenever it changes.
@@ -200,8 +202,10 @@ use, which every lookup prolonged.
 
 - `GCN_DRAWLOG=<frame>` lists every draw in one frame with its index, its depth band and
   view-space box, and its textures by id and content hash (the hash is the same in every
-  run; an EFB copy is starred); `GCN_DRAW_SKIP=a-b`
-  then drops a range of them, to attribute a piece of the image to the draws that made it.
+  run; an EFB copy is starred); in stereo it also prints, per draw the eye makes, which
+  layer the eye gave it (`[eyedraw]`: world, sky, the foreground or HUD bands, the HUD
+  frame). `GCN_DRAW_SKIP=a-b` then drops a range of them, in the eyes too, to attribute a
+  piece of the image to the draws that made it.
   `GCN_DRAWLOG_VERBOSE=1` adds each draw's TEV setup (stage orders, colour and alpha
   combiners, konst selectors, the colour registers and konsts, alpha test, Z and blend
   modes) and its first vertices with colours and texture coordinates.

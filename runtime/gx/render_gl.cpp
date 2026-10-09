@@ -129,6 +129,8 @@ static float g_world_xform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
 // First person (render_set_first_person): while on, the game's eye hook is asked per frame
 // where the eye stands, and g_eye_overridden says it answered for the frame being drawn.
 static EyeHook g_eye_hook = nullptr;
+// Which placement apply_state gave the last state in an eye, for the eye's draw log.
+static const char* g_eye_layer_name = "-";
 static EyeFilter g_eye_filter = nullptr;
 static bool g_fp_on = false;
 static bool g_eye_overridden = false;
@@ -1140,6 +1142,7 @@ static void apply_state(const PixelState& st, int prim) {
             glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, F);
             glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, C);
             glUniform1i(pr.u_vr, 3);
+            g_eye_layer_name = "morph";
         } else if (g_vr_active && !on_hud_frame) {
             // A camera-placed 3D object is viewed with the head transform but without the
             // world's pitch correction; see view_space_3d above.
@@ -1159,6 +1162,9 @@ static void apply_state(const PixelState& st, int prim) {
             }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, game_proj ? P : g_vr_proj);
             glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, view);
+            g_eye_layer_name = background ? "sky" : hud_layer ? (view_space_3d ? "hud-band(view)" : "hud-band(world)")
+                             : foreground ? (view_space_3d ? "foreground(view)" : "foreground(world)")
+                             : view_space_3d ? "view-space-3d" : "world";
             static const bool game_depth = !(getenv("GCN_EYE_FGDEPTH") && atoi(getenv("GCN_EYE_FGDEPTH")) == 0);
             glUniform1i(pr.u_vr, fg_layer && game_depth ? 4 : 1);
         } else if (g_vr_active) {
@@ -1181,6 +1187,7 @@ static void apply_state(const PixelState& st, int prim) {
             mat4_mul(g_vr_proj, b, M);
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
             glUniform1i(pr.u_vr, 2);
+            g_eye_layer_name = "hud-frame";
         } else if (g_flat_eye != 0.0f && perspective &&
                    !(g_panel_band > 0.0f && band_hi > band_lo && band_hi <= g_panel_band)) {
             // One of a stereo pair on the panel (a draw in the panel band falls through to
@@ -2256,6 +2263,19 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     uint32_t cur_state = UINT32_MAX;
     gl_state_invalidate();
     int cur_prim = -1;
+    static int eye_skip_lo = -1, eye_skip_hi = -1;
+    static bool eye_skip_parsed = false;
+    if (!eye_skip_parsed) {
+        eye_skip_parsed = true;
+        if (const char* s = getenv("GCN_DRAW_SKIP")) {
+            eye_skip_lo = atoi(s);
+            const char* dash = strchr(s, '-');
+            eye_skip_hi = dash ? atoi(dash + 1) : eye_skip_lo;
+        }
+    }
+    static const uint32_t eye_drawlog_frame = getenv("GCN_DRAWLOG") ? (uint32_t)atoi(getenv("GCN_DRAWLOG")) : 0;
+    const bool eye_drawlog = eye_drawlog_frame && g_render_frame == eye_drawlog_frame;
+    int eye_draw_index = 0;   // the flat draw log's numbering: every draw command, in order
     for (size_t i = 0; i < b.cmds.size(); i++) {
         Cmd& c = b.cmds[i];
         // Copies and the present are the first eye's business, done against the EFB.
@@ -2264,8 +2284,8 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             gl_state_invalidate();
             continue;
         }
-        if (skip[i]) { n_skipped++; continue; }
-        if (!g_hide.empty() && g_hide[i]) continue;
+        if (skip[i]) { n_skipped++; eye_draw_index++; continue; }
+        if (!g_hide.empty() && g_hide[i]) { eye_draw_index++; continue; }
         // GCN_EYE_SKIPCOMP drops the screen-space passes entirely, for comparing against
         // drawing them flat across the eye. Dropping the water one leaves bare seabed.
         static const bool skipcomp = getenv("GCN_EYE_SKIPCOMP") != nullptr;
@@ -2310,6 +2330,11 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             n_spray++;
         }
         n_drawn++;
+        // GCN_DRAW_SKIP=a-b leaves those draws out of the eye too, by the index the flat
+        // pass's draw log gives them, and GCN_DRAWLOG=<frame> says which layer the eye
+        // gave each draw (see eye_layer_name), beside its band: how a draw that lands
+        // somewhere surprising in an eye is told from one the game put there.
+        if (eye_skip_lo >= 0 && eye_draw_index >= eye_skip_lo && eye_draw_index <= eye_skip_hi) { eye_draw_index++; continue; }
         if (c.state != cur_state || c.prim != cur_prim) {
             apply_state(b.states[c.state], c.prim);
             // apply_state binds the EFB's scissor and viewport expectations; the eye
@@ -2319,6 +2344,12 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             cur_state = c.state;
             cur_prim = c.prim;
         }
+        if (eye_drawlog && do_copies) {
+            const PixelState& st = b.states[c.state];
+            fprintf(stderr, "[eyedraw] %d st=%u %s band=%.5f..%.5f view_space=%d\n", eye_draw_index, c.state, g_eye_layer_name,
+                    (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f, st.viewport[5] / 16777215.0f, (int)st.view_space);
+        }
+        eye_draw_index++;
         draw_cmd(b, c);
     }
     if (eyelog && do_copies)

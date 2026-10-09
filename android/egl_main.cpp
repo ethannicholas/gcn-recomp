@@ -59,6 +59,11 @@ static float g_eye_pitch = 0.0f;  // --eye-pitch: degrees of looking down
 // HUD frame is sized from the larger of the two, so a 2D element's placement against the
 // world can only be checked with the field the headset has.
 static float g_eye_fov_up = 45.0f, g_eye_fov_down = 45.0f;
+// --eye-pos=X,Y,Z: the head moved from the game's camera, in metres (x right, y up, z
+// back). Rotation alone shows no parallax; a step to the side tells what is near from what
+// is far -- a HUD meant to be at arm's length moves across the room, one at ten metres
+// barely moves.
+static float g_eye_pos[3] = {0.0f, 0.0f, 0.0f};
 static GLuint g_eye_fbo, g_eye_tex, g_eye_depth;
 static int g_eye_w = 960, g_eye_h = 720;
 
@@ -144,11 +149,22 @@ static void eye_matrices(float* proj, float* view, float* hud) {
     X[0] = X[15] = 1.0f;
     X[5] = cosf(b);  X[6] = sinf(b);
     X[9] = -sinf(b); X[10] = cosf(b);
-    // view = X * Y, column-major.
+    // view = X * Y * T, column-major: the world moved by -pos, then turned.
+    float T[16];
+    memset(T, 0, sizeof(T));
+    T[0] = T[5] = T[10] = T[15] = 1.0f;
+    T[12] = -g_eye_pos[0] * u; T[13] = -g_eye_pos[1] * u; T[14] = -g_eye_pos[2] * u;
+    float XY[16];
     for (int c = 0; c < 4; c++)
         for (int r = 0; r < 4; r++) {
             float v = 0.0f;
             for (int k = 0; k < 4; k++) v += X[k * 4 + r] * Y[c * 4 + k];
+            XY[c * 4 + r] = v;
+        }
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) {
+            float v = 0.0f;
+            for (int k = 0; k < 4; k++) v += XY[k * 4 + r] * T[c * 4 + k];
             view[c * 4 + r] = v;
         }
     // The HUD frame is anchored in front of the game's camera, not the head, so --eye-yaw
@@ -173,10 +189,10 @@ static void eye_matrices(float* proj, float* view, float* hud) {
         ev[e].tan_down = -tan_down;
     }
     const float sep = g_eye_count > 1 ? 0.064f * u : 0.0f;
-    ev[0].pos[0] = ev[0].pos[1] = ev[0].pos[2] = 0.0f;
-    ev[1].pos[0] = sep * cosf(a);  // the head's right, (cos yaw, 0, sin yaw) after the turn
-    ev[1].pos[1] = 0.0f;
-    ev[1].pos[2] = sep * sinf(a);
+    for (int i = 0; i < 3; i++) ev[0].pos[i] = g_eye_pos[i] * u;
+    ev[1].pos[0] = ev[0].pos[0] + sep * cosf(a);  // the head's right, (cos yaw, 0, sin yaw) after the turn
+    ev[1].pos[1] = ev[0].pos[1];
+    ev[1].pos[2] = ev[0].pos[2] + sep * sinf(a);
     vr::set_eye_views(ev);
 }
 
@@ -384,6 +400,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--fast")) g_fast = true;
         else if (!strncmp(argv[i], "--eye-yaw=", 10)) g_eye_yaw = (float)atof(argv[i] + 10);
         else if (!strncmp(argv[i], "--eye-pitch=", 12)) g_eye_pitch = (float)atof(argv[i] + 12);
+        else if (!strncmp(argv[i], "--eye-pos=", 10)) {
+            sscanf(argv[i] + 10, "%f,%f,%f", &g_eye_pos[0], &g_eye_pos[1], &g_eye_pos[2]);
+        }
         else if (!strncmp(argv[i], "--eye-fov=", 10)) {
             g_eye_fov_up = (float)atof(argv[i] + 10);
             const char* comma = strchr(argv[i] + 10, ',');
