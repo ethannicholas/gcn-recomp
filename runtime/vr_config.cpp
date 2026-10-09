@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 // Messages go to stderr: the headset app pipes it into logcat, and the headless harness
 // is run from a shell.
@@ -69,9 +70,29 @@ static GameHooks& hooks() {
 void set_game_hooks(const GameHooks& h) { hooks() = h; }
 const GameHooks& game_hooks() { return hooks(); }
 
+// Written by the frontend's render thread, read by the guest's; a pose is seven floats, so
+// a lock is cheaper than anything cleverer.
+static std::mutex g_hand_lock;
+static HandPose g_hands[2];
+static bool g_hand_valid[2];
+
+void set_hand_pose(Hand h, const HandPose* p) {
+    std::lock_guard<std::mutex> l(g_hand_lock);
+    g_hand_valid[h] = p != nullptr;
+    if (p) g_hands[h] = *p;
+}
+
+bool hand_pose(Hand h, HandPose* out) {
+    std::lock_guard<std::mutex> l(g_hand_lock);
+    if (g_hand_valid[h]) *out = g_hands[h];
+    return g_hand_valid[h];
+}
+
 VrConfig load_config(const std::string& dir) {
     VrConfig d;
     if (hooks().config_defaults) hooks().config_defaults(d);
-    return vr_config_load(dir, d);
+    const VrConfig c = vr_config_load(dir, d);
+    if (hooks().config_loaded) hooks().config_loaded(c);
+    return c;
 }
 }  // namespace vr

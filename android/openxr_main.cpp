@@ -155,6 +155,9 @@ struct Xr {
     XrAction a_btn, b_btn, x_btn, y_btn, menu, trig_l, trig_r, grip_l, grip_r, stick_l, stick_r;
     XrAction toggle;   // right thumbstick click: the game's camera or its first person, in stereo
     XrAction stereo_toggle;   // left thumbstick click: theater or stereo, by hand
+    XrAction aim;             // each controller's aim pose, for the game (vr::hand_pose)
+    XrPath hand_paths[2] = {XR_NULL_PATH, XR_NULL_PATH};
+    XrSpace aim_spaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
 };
 static Xr g_xr;
 static VrConfig g_vrcfg;
@@ -485,6 +488,17 @@ static bool xr_create_actions() {
     g_xr.stick_r = make_action("stick_r", "Right stick", XR_ACTION_TYPE_VECTOR2F_INPUT);
     g_xr.toggle  = make_action("view_toggle", "First person", XR_ACTION_TYPE_BOOLEAN_INPUT);
     g_xr.stereo_toggle = make_action("stereo_toggle", "Theater or stereo", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    g_xr.hand_paths[vr::kLeftHand] = xr_path("/user/hand/left");
+    g_xr.hand_paths[vr::kRightHand] = xr_path("/user/hand/right");
+    {
+        XrActionCreateInfo ci{XR_TYPE_ACTION_CREATE_INFO};
+        ci.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        strcpy(ci.actionName, "aim");
+        strcpy(ci.localizedActionName, "Aim");
+        ci.countSubactionPaths = 2;
+        ci.subactionPaths = g_xr.hand_paths;
+        XR_TRY(xrCreateAction(g_xr.action_set, &ci, &g_xr.aim));
+    }
 
     const XrActionSuggestedBinding binds[] = {
         {g_xr.a_btn,   xr_path("/user/hand/right/input/a/click")},
@@ -501,6 +515,8 @@ static bool xr_create_actions() {
         // A GameCube controller has no stick clicks, so both are free for switching views.
         {g_xr.toggle,  xr_path("/user/hand/right/input/thumbstick/click")},
         {g_xr.stereo_toggle, xr_path("/user/hand/left/input/thumbstick/click")},
+        {g_xr.aim,     xr_path("/user/hand/left/input/aim/pose")},
+        {g_xr.aim,     xr_path("/user/hand/right/input/aim/pose")},
     };
     XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
     sb.interactionProfile = xr_path("/interaction_profiles/oculus/touch_controller");
@@ -512,6 +528,14 @@ static bool xr_create_actions() {
     ai.countActionSets = 1;
     ai.actionSets = &g_xr.action_set;
     XR_TRY(xrAttachSessionActionSets(g_xr.session, &ai));
+
+    for (int h = 0; h < 2; h++) {
+        XrActionSpaceCreateInfo asi{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        asi.action = g_xr.aim;
+        asi.subactionPath = g_xr.hand_paths[h];
+        asi.poseInActionSpace.orientation.w = 1.0f;
+        XR_TRY(xrCreateActionSpace(g_xr.session, &asi, &g_xr.aim_spaces[h]));
+    }
     return true;
 }
 
@@ -579,6 +603,31 @@ static void read_pad(PadState& p) {
     }
     p.cstick_x = to_u8(r.x);
     p.cstick_y = to_u8(r.y);
+}
+
+// Where the controllers are, for the game (vr::hand_pose): located for the time the frame
+// will be shown, like the eyes, and converted the way mat_view converts them. Withdrawn
+// whenever the eyes are not being drawn.
+static void publish_hands(XrTime t, bool on) {
+    for (int h = 0; h < 2; h++) {
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (!on || XR_FAILED(xrLocateSpace(g_xr.aim_spaces[h], g_xr.space, t, &loc)) ||
+            (loc.locationFlags & need) != need) {
+            vr::set_hand_pose((vr::Hand)h, nullptr);
+            continue;
+        }
+        const XrPosef& p = loc.pose;
+        vr::HandPose hp;
+        hp.pos[0] = (p.position.x - g_head_zero[0]) * g_vrcfg.units_per_metre + g_vrcfg.offset_x;
+        hp.pos[1] = (p.position.y - g_head_zero[1]) * g_vrcfg.units_per_metre + g_vrcfg.offset_y;
+        hp.pos[2] = (p.position.z - g_head_zero[2]) * g_vrcfg.units_per_metre + g_vrcfg.offset_z;
+        hp.rot[0] = p.orientation.x;
+        hp.rot[1] = p.orientation.y;
+        hp.rot[2] = p.orientation.z;
+        hp.rot[3] = p.orientation.w;
+        vr::set_hand_pose((vr::Hand)h, &hp);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1053,7 @@ void android_main(android_app* app) {
                         g_head_zero[0] = g_head_zero[1] = g_head_zero[2] = 0.0f;
                     }
                 }
+                publish_hands(fs.predictedDisplayTime, true);
                 for (int e = 0; e < 2; e++) {
                     auto& eye = g_xr.eyes[e];
                     uint32_t ei = 0;
@@ -1039,6 +1089,7 @@ void android_main(android_app* app) {
                 if (both_eyes) have_proj = true;
             }
         } else if (fs.shouldRender) {
+            publish_hands(0, false);
             // Touch the swapchain only when there is a new game frame to put in it.
             //
             // The compositor does not need a new image every display frame: a quad layer

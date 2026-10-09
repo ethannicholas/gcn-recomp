@@ -28,11 +28,13 @@ option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every pol
 #   TABLES <dir>               hle.txt, names.txt, patches.txt, special_calls.txt, idle.txt
 #   FPS <n>                    the game's frame rate, for the benchmark's percentage
 #   [IMAGE_DIR <dir>]          where to look for the user's .iso/.ciso (default rom/)
-#   [SOURCES <files>...]       the game project's own runtime sources, compiled into the
-#                              game executable and the headset app: hooks the runtime
-#                              offers a game (render_set_eye_hook in runtime/gx/render_gl.h,
+#   [SOURCES <files>...]       the game project's own runtime sources, compiled into every
+#                              target that links the game, the benchmark included, since a
+#                              patch in TABLES may call into them: hooks the runtime offers a
+#                              game (render_set_eye_hook in runtime/gx/render_gl.h,
 #                              vr::GameHooks in runtime/vr_game.h), installed from a static
-#                              initializer
+#                              initializer. The benchmark has no renderer, so they must not
+#                              need one to link.
 #   [ANDROID_PACKAGE <id>]     e.g. com.example.game. On an Android build, also build the
 #                              headset app (lib<target>.so, a NativeActivity that
 #                              tools/package-apk.ps1 packages) and <target>_egl, the
@@ -214,7 +216,7 @@ function(gcn_add_game)
   # Headless benchmark: reports how fast the guest advances, with no graphics or audio
   # in the way. Used to compare host CPUs.
   if(HAVE_GAME_ISO)
-    add_executable(${G_NAME}_bench ${BENCH_SOURCES})
+    add_executable(${G_NAME}_bench ${BENCH_SOURCES} ${G_SOURCES})
     _gcn_set_standards(${G_NAME}_bench)
     target_include_directories(${G_NAME}_bench PRIVATE ${RT} ${RECOMP_GEN_DIR})
     target_link_libraries(${G_NAME}_bench PRIVATE game_recomp)

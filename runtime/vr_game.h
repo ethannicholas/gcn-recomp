@@ -18,6 +18,11 @@ struct GameHooks {
     // its camera pitch, where its HUD reads well.
     void (*config_defaults)(VrConfig& c) = nullptr;
 
+    // Called with the configuration once vr.txt has been read over those defaults, for a
+    // game whose hooks run off the render thread and need its values or its own keys
+    // (VrConfig::extra).
+    void (*config_loaded)(const VrConfig& c) = nullptr;
+
     // Called once per game frame with that frame's batch, from the render thread: true to
     // present the world in stereo, false for the theater panel. The view follows a change
     // in the answer, held for two frames so a transient cannot flap it; the left
@@ -33,6 +38,22 @@ struct GameHooks {
 
 void set_game_hooks(const GameHooks& h);
 const GameHooks& game_hooks();
+
+// The controllers, for a game that puts something in the viewer's hands. Each pose is the
+// controller's aim pose (the ray it points along) in the frame the eyes are placed in:
+// game units, x right, y up, z back, origin at the game's camera -- the eyes' own
+// conversion (units_per_metre, the offsets, the head's zero) applied to it. A game whose
+// vertices are turned on their way to the eye (world_pitch_deg, an EyeHook) undoes that
+// itself. The headset frontend publishes them while it draws the eyes and withdraws them
+// otherwise, so a game that follows them only does so while the viewer can see the result.
+// Readable from any thread; the guest's is the one that wants them.
+enum Hand { kLeftHand, kRightHand };
+struct HandPose {
+    float pos[3];
+    float rot[4];  // a unit quaternion: x, y, z, w
+};
+void set_hand_pose(Hand h, const HandPose* p);  // null: not tracked, or not in stereo
+bool hand_pose(Hand h, HandPose* out);
 
 // The defaults with the game's adjustments applied, then `dir`/vr.txt over them.
 VrConfig load_config(const std::string& dir);
