@@ -341,12 +341,26 @@ static bool g_virtual_clock = true;
 volatile uint64_t g_vcount;
 volatile uint64_t g_vlimit = UINT64_MAX;
 static int64_t g_pace_offset_ns;  // virtual time the host gave up on catching up with
+// The clock's base: virtual time is g_vbase_ticks plus the edges since g_vbase_count at
+// the current rate. A change of rate (clock_set_cpu_scale) moves the base to the present
+// so that the time already elapsed keeps its value. Scaling the whole count instead, as
+// this did at first, rescaled the elapsed time too: switching a game from 30 to 60 fps a
+// few minutes in halved the virtual clock, every pending timer became minutes away, and
+// the paced game froze for as long; switching back doubled it and the pacer slept the
+// same again (the Quest, 2026-10-10). An unpaced harness run never showed it, since its
+// idle jumps cross any gap for free.
+static uint64_t g_vbase_ticks, g_vbase_count;
 
 bool clock_is_virtual() { return g_virtual_clock; }
 void clock_set_scale(double s) { g_time_scale = s; }
 double clock_scale() { return g_time_scale; }
+static inline uint64_t virtual_ticks() { return g_vbase_ticks + (g_vcount - g_vbase_count) * g_ticks_per_edge; }
 void clock_set_cpu_scale(double s) {
-    if (s > 0) g_ticks_per_edge = std::max<uint64_t>(1, (uint64_t)((double)kTicksPerEdge / s + 0.5));
+    if (s <= 0) return;
+    g_vbase_ticks = virtual_ticks();
+    g_vbase_count = g_vcount;
+    g_ticks_per_edge = std::max<uint64_t>(1, (uint64_t)((double)kTicksPerEdge / s + 0.5));
+    clock_update_limit();  // the pending limit was counted at the old rate
 }
 double clock_cpu_scale() { return (double)kTicksPerEdge / (double)g_ticks_per_edge; }
 
@@ -367,7 +381,7 @@ uint64_t host_ns() {
 }
 
 uint64_t now_ticks() {
-    if (g_virtual_clock) return g_vcount * g_ticks_per_edge;
+    if (g_virtual_clock) return virtual_ticks();
     return (uint64_t)((double)host_ns() * (TB_FREQ / 1e9) * (g_time_scale > 0 ? g_time_scale : 1.0));
 }
 
@@ -395,7 +409,9 @@ extern std::atomic<uint64_t> g_next_event_at;
 void clock_update_limit() {
     if (!g_virtual_clock) { g_vlimit = UINT64_MAX; return; }  // the ticker asks for polls
     uint64_t at = std::min(g_next_event_at.load(), g_dec_deadline.load());
-    uint64_t limit = at == UINT64_MAX ? UINT64_MAX : (at + g_ticks_per_edge - 1) / g_ticks_per_edge;
+    uint64_t limit = at == UINT64_MAX ? UINT64_MAX
+                   : at <= g_vbase_ticks ? g_vbase_count
+                   : g_vbase_count + (at - g_vbase_ticks + g_ticks_per_edge - 1) / g_ticks_per_edge;
     // A replay's next recorded jump is made from a poll at its count (clock_pace).
     g_vlimit = std::min(limit, input_replay_next_jump_at());
 }

@@ -166,7 +166,15 @@ jumps and their total.
 N times as fast as the console's: the ticks per edge are divided by N, so the same frame of
 work takes 1/N of the virtual time. A game that paces itself on the retrace and is patched
 to wait for one field instead of two needs this, or the virtual clock itself makes its
-frames two fields long; 2 is the most the clock resolves (one tick per edge).
+frames two fields long; 2 is the most the clock resolves (one tick per edge). The scale can
+change while the game runs: the clock keeps a base (ticks and count at the last change) and
+counts from there at the new rate, so the time already elapsed keeps its value and the
+pending limit is recounted. It did not at first -- virtual time was simply the count times
+the ticks per edge -- and a switch a few minutes into a paced run rescaled all of that time:
+halving it put every pending timer minutes away, doubling it put the guest minutes ahead of
+the host and the pacer slept at every poll, and either way the game stood still for about as
+long as it had run. An unpaced run never shows this, since its idle jumps cross any gap at
+no cost, which is why switching mid-run looked safe in the harness.
 
 `GCN_CLOCK=host` restores wall-clock time (the ticker thread polls for due events every
 200 µs). `GCN_TIMESCALE=N` paces virtual time at N× real time (0: unpaced; `--fast` on
