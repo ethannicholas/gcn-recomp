@@ -230,8 +230,9 @@ use, which every lookup prolonged.
   walking the guest's own stack; names come from the game's `symbols.txt`.
 - Build with `-DGCN_TRACE_CALLS=ON` to keep a real guest call stack, printed by the crash
   dump (`GCN_TRACE_DEPTH` sets how many frames). Compiling with `-DGCN_WATCH` adds
-  `GCN_COUNT=addr,...` (call counts per function, printed on interrupt) and
-  `GCN_WATCH_ADDR=<hex>` (report every change to that word).
+  `GCN_COUNT=addr,...` (call counts per function, printed on interrupt),
+  `GCN_WATCH_ADDR=<hex>` (report every change to that word) and the store histogram
+  below.
 - `--log-all` enables every log category, including the DSP mailbox and DVD reads;
   `--log=exi,dsp` enables just those (`cpu os hw dvd gx vi si exi dsp ai thr`).
 - Build with `-DGCN_GUEST_CHECKS=ON` to call the game project's consistency check (a
@@ -244,6 +245,41 @@ use, which every lookup prolonged.
   read the corrupted word's address off the report, replay again on a `-DGCN_WATCH` build
   with `GCN_WATCH_ADDR=<that>` and the store that did it is named. A check that fires
   right after a DMA names the runtime itself.
+
+## Finding a game's per-frame steps
+
+A game that steps its simulation by per-frame constants runs at double speed when paced
+at twice its native frame rate; running it at that rate for real means finding every step
+and halving it. The mechanism is in three parts: a static candidate list that the game
+project makes from the generated C (a store of a value computed from the old value at the
+same address: `x += t`, `x *= k`, `x = x*k + b`, or an integer `x += 1`), two runs of a
+`-DGCN_WATCH` build that narrow it, and the recompiler's `steps.txt`, which scales what is
+left.
+
+- `GCN_STORE_HIST=<from>-<to>` (debug build) counts how often each store site in the
+  recompiled code ran between those two presented frames and prints the table when the
+  window closes, one `[sthist] <pc> <count>` line per site. A site that ran once per frame
+  of the window is a per-frame step; one that ran two hundred times is in a loop over
+  objects or vertices; one that did not run is not in this scene.
+- `GCN_STORE_HIST_PCS=<file>` (hex addresses, one per line) adds, for every address one of
+  those sites wrote, who else wrote it: `[stwr] <addr> <pc>:<count> ...`. That tells a
+  value carried from frame to frame (its only writers are steps) from a temporary that
+  something assigns afresh each frame before a step adds to it, which must not be scaled.
+- `steps.txt` in the game's tables lists, per instruction address, which operand (`A`, `B`
+  or `C`) carries the value from the previous frame. The recompiler emits that instruction
+  through `runtime/step.cpp` (`ppc.translate_step`): `x += t` becomes `x += s*t`, `x *= k`
+  becomes `x *= k^s`, `x = x*k + b` keeps its fixed point and approaches it at `k^s`, and an
+  integer increment is taken on every `1/s`-th frame. The game sets `s` with
+  `step_set_scale` (0.5 at twice the native rate) and calls `step_frame()` once a game
+  frame. A patch in `patches.txt` at the same address wins.
+- `GCN_STEP_SKIP=<file>` leaves the listed sites (hex addresses or `lo-hi` ranges) unscaled
+  and `GCN_STEP_ONLY=<file>` scales only those: how a site that breaks the game is bisected
+  out of a list of hundreds without a rebuild.
+
+What this cannot tell apart on its own is a counter from a cursor: an integer stepped by
+four was a buffer offset whose halving faulted the GX flush, and one stepped by another
+word was a sum that stalled the game, so the game project's list keeps integer steps to
+those that count by one. The method and what it found are in the game project's notes.
 
 ## Panics and faults
 

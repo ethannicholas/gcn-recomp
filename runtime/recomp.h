@@ -67,16 +67,17 @@ static inline void wr_pop(CPU* c) {
 
 #ifdef GCN_WATCH
 void debug_watch_check(CPU* c, uint32_t fn);
+void debug_watch_store(CPU* c, uint32_t pc, uint32_t ea);
 #define ENTER(addr) (wr_push(c, (addr)), debug_watch_check(c, (addr)))
-#define WATCH_STORE(pc) debug_watch_check(c, (pc) | 1u)
+#define WATCH_STORE(pc, ea) debug_watch_store(c, (pc), (ea))
 #define EXIT() wr_pop(c)
 #elif defined(GCN_TRACE_CALLS)
 #define ENTER(addr) wr_push(c, (addr))
-#define WATCH_STORE(pc) ((void)0)
+#define WATCH_STORE(pc, ea) ((void)0)
 #define EXIT() wr_pop(c)
 #else
 #define ENTER(addr) ((void)0)
-#define WATCH_STORE(pc) ((void)0)
+#define WATCH_STORE(pc, ea) ((void)0)
 #define EXIT() ((void)0)
 #endif
 
@@ -86,6 +87,13 @@ void debug_watch_check(CPU* c, uint32_t fn);
 void heap_trace_alloc(CPU* c, uint32_t heap_array_var);
 void heap_trace_alloc_result(CPU* c, int ok);
 void heap_trace_free(CPU* c);
+
+/* The step scale (runtime/step.cpp): what a per-frame step listed in the game's steps.txt
+   is scaled by. */
+double gcn_step_scale(uint32_t pc);
+uint32_t gcn_step_int(uint32_t pc);
+double gcn_step_pow(uint32_t pc, double k);
+double gcn_step_damp(uint32_t pc, double x, double k, double b);
 
 /* How a recompiled function returns. */
 #define RET() do { EXIT(); return; } while (0)

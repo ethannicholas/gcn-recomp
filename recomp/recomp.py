@@ -4,7 +4,7 @@
 Usage: recomp.py <main.dol> <dtk symbols.txt> <outdir> <tables dir>
 
 The tables directory holds the per-game steering files: names.txt, hle.txt,
-patches.txt, special_calls.txt and idle.txt (any may be absent).
+patches.txt, special_calls.txt, idle.txt and steps.txt (any may be absent).
 """
 import collections
 import os
@@ -45,6 +45,29 @@ def load_list(path):
 
 STORE_OPS = {36, 37, 38, 39, 44, 45, 47, 52, 53, 54, 55, 60, 61}
 STORE_XO31 = {151, 183, 215, 247, 407, 439, 662, 918, 150, 663, 695, 727, 759, 983, 725, 1014}
+
+
+def store_ea(i):
+    """The C expression for the address a store instruction wrote, valid after the store
+    (an update form has already moved its base register onto the address)."""
+    op = i >> 26
+    a = (i >> 16) & 31
+    b = (i >> 11) & 31
+    if op in STORE_OPS:
+        if op in (37, 39, 45, 53, 55, 61):  # the update forms
+            return f'c->r[{a}]'
+        if op in (60,):
+            return ppc.ea_d(a, ppc.sx12(i))
+        return ppc.ea_d(a, ppc.sx16(i))
+    if op == 31 and ((i >> 1) & 0x3FF) in STORE_XO31:
+        if ((i >> 1) & 0x3FF) in (183, 247, 439, 695, 759):
+            return f'c->r[{a}]'
+        if ((i >> 1) & 0x3FF) == 725:  # stswi: rB is the byte count
+            return ppc.ea_d(a, 0)
+        return ppc.ea_x(a, b)
+    if op == 4 and ((i >> 1) & 0x3F) in (7, 39):
+        return f'c->r[{a}]' if ((i >> 1) & 0x3F) == 39 else ppc.ea_x(a, b)
+    return '0u'
 
 
 def is_store(i):
@@ -202,6 +225,14 @@ def main():
                 a, code = line.split(None, 1)
                 patches[int(a, 16)] = code
 
+    # steps.txt: "ADDR  A|B|C" marks an instruction as a per-frame step whose named operand
+    # carries the value from the previous frame; it is emitted scaled by the runtime's step
+    # scale (ppc.translate_step, runtime/step.cpp). A patch at the same address wins.
+    steps = load_kv(os.path.join(tables, 'steps.txt'))
+    for a in steps:
+        if a in patches:
+            print(f'warning: steps.txt {a:08X} is also patched; the patch wins', file=sys.stderr)
+
     def emit_body(f, out):
         in_range = lambda t: f.addr <= t < f.end
         jt_sorted = sorted(f.jt_targets)
@@ -212,6 +243,10 @@ def main():
                 out.append(f'L_{pc:08X}:')
             if pc in patches:
                 out.append(f'\t/* {pc:08X} {i:08X} PATCHED */ {patches[pc]}')
+                last_uncond = False
+                continue
+            if pc in steps:
+                out.append(f'\t/* {pc:08X} {i:08X} STEP */ {ppc.translate_step(pc, i, steps[pc])}')
                 last_uncond = False
                 continue
             br = ppc.decode_branch(pc, i)
@@ -230,7 +265,7 @@ def main():
                 if (i >> 26) == 31 and ((i >> 1) & 0x3FF) == 146:
                     code += ' IRQ_CHECK();'
                 if is_store(i):
-                    code += f' WATCH_STORE(0x{pc:08X}u);'
+                    code += f' WATCH_STORE(0x{pc:08X}u, {store_ea(i)});'
                 out.append(f'\t/* {pc:08X} {i:08X} */ {code}')
                 continue
 

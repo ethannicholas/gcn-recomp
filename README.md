@@ -51,6 +51,9 @@ The game project provides:
   waiting for a runnable thread), where the runtime skips guest time to the next event.
 - `recomp/names.txt`, `recomp/patches.txt` — hand-named functions and instruction patches,
   usually empty.
+- `recomp/steps.txt` — the game's per-frame steps, for running it at another frame rate
+  (`docs/diagnostics.md`, "Finding a game's per-frame steps"); absent for a game that
+  does not try.
 
 ## Layout
 

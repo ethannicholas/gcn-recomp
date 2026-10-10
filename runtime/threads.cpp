@@ -384,6 +384,96 @@ static std::vector<std::pair<uint32_t, uint64_t>> g_count_fns = [] {
 void debug_print_counts() {
     for (auto& kv : g_count_fns) fprintf(stderr, "[count] %08X %s: %llu\n", kv.first, func_name(kv.first), (unsigned long long)kv.second);
 }
+// GCN_STORE_HIST=<from>-<to>: count how often each store in the recompiled code runs
+// between those two presented frames, and print the table once the window has closed, one
+// `[sthist] <pc> <count>` line per store site that ran. With the window set to a stretch of
+// steady play, a count equal to the number of frames marks a store that runs once a frame,
+// which is how a game project's static list of candidate per-frame steps is narrowed to
+// the ones that run.
+//
+// GCN_STORE_HIST_PCS=<file> (hex addresses, one per line) adds, for every address that one
+// of those stores wrote in the window, who else wrote it: `[stwr] <addr> <pc>:<count> ...`.
+// That tells a value carried from frame to frame (its only writers are the steps) from a
+// temporary recomputed every frame (something else assigns it first).
+namespace gx { extern std::atomic<uint32_t> g_frames_submitted; }
+namespace {
+struct Writers {
+    uint32_t pc[6];
+    uint32_t n[6];
+    uint8_t k = 0;
+    uint32_t more = 0;  // writes by pcs past the sixth
+};
+struct {
+    uint32_t from = 0, to = 0;
+    bool printed = false;
+    std::vector<uint32_t> counts;
+    std::vector<uint8_t> listed;  // per code word: is this pc in GCN_STORE_HIST_PCS
+    std::unordered_map<uint32_t, Writers> writers;
+} g_sthist = [] {
+    decltype(g_sthist) h;
+    if (const char* e = getenv("GCN_STORE_HIST")) {
+        h.from = (uint32_t)strtoul(e, nullptr, 10);
+        const char* dash = strchr(e, '-');
+        h.to = dash ? (uint32_t)strtoul(dash + 1, nullptr, 10) : 0xFFFFFFFFu;
+    }
+    return h;
+}();
+void store_hist_init() {
+    size_t words = (g_recomp_code_end - g_recomp_code_base) / 4 + 1;
+    g_sthist.counts.resize(words);
+    if (const char* path = getenv("GCN_STORE_HIST_PCS")) {
+        g_sthist.listed.resize(words);
+        if (FILE* f = fopen(path, "r")) {
+            char line[64];
+            while (fgets(line, sizeof(line), f)) {
+                uint32_t pc = (uint32_t)strtoul(line, nullptr, 16);
+                if (pc >= g_recomp_code_base && pc < g_recomp_code_end) g_sthist.listed[(pc - g_recomp_code_base) / 4] = 1;
+            }
+            fclose(f);
+        }
+    }
+}
+void store_hist_print() {
+    fprintf(stderr, "[sthist] frames %u-%u\n", g_sthist.from, g_sthist.to);
+    for (size_t i = 0; i < g_sthist.counts.size(); i++)
+        if (g_sthist.counts[i]) fprintf(stderr, "[sthist] %08X %u\n", (uint32_t)(g_recomp_code_base + i * 4), g_sthist.counts[i]);
+    for (auto& kv : g_sthist.writers) {
+        const Writers& w = kv.second;
+        bool listed = false;
+        for (int i = 0; i < w.k; i++) listed |= g_sthist.listed[(w.pc[i] - g_recomp_code_base) / 4] != 0;
+        if (!listed) continue;
+        fprintf(stderr, "[stwr] %08X", kv.first);
+        for (int i = 0; i < w.k; i++) fprintf(stderr, " %08X:%u", w.pc[i], w.n[i]);
+        if (w.more) fprintf(stderr, " more:%u", w.more);
+        fputc('\n', stderr);
+    }
+    fprintf(stderr, "[sthist] end\n");
+}
+void store_hist(uint32_t pc, uint32_t ea) {
+    uint32_t f = gx::g_frames_submitted.load(std::memory_order_relaxed);
+    if (f < g_sthist.from) return;
+    if (f >= g_sthist.to) {
+        if (!g_sthist.printed) {
+            g_sthist.printed = true;
+            if (!g_sthist.counts.empty()) store_hist_print();
+        }
+        return;
+    }
+    if (g_sthist.counts.empty()) store_hist_init();
+    if (pc < g_recomp_code_base || pc >= g_recomp_code_end) return;
+    g_sthist.counts[(pc - g_recomp_code_base) / 4]++;
+    if (g_sthist.listed.empty()) return;
+    Writers& w = g_sthist.writers[ea];
+    for (int i = 0; i < w.k; i++)
+        if (w.pc[i] == pc) { w.n[i]++; return; }
+    if (w.k < 6) { w.pc[w.k] = pc; w.n[w.k] = 1; w.k++; }
+    else w.more++;
+}
+}  // namespace
+extern "C" void debug_watch_store(CPU* c, uint32_t pc, uint32_t ea) {
+    if (g_sthist.to) store_hist(pc, ea);
+    debug_watch_check(c, pc | 1u);
+}
 extern "C" void debug_watch_check(CPU* c, uint32_t fn) {
     for (auto& kv : g_count_fns) if (kv.first == fn) kv.second++;
     static uint32_t addr = [] { const char* e = getenv("GCN_WATCH_ADDR"); return e ? (uint32_t)strtoul(e, nullptr, 16) : 0u; }();

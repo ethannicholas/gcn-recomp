@@ -71,6 +71,11 @@ double clock_scale();
 // How fast the emulated CPU is, as a multiple of the console's (GCN_CPU_SCALE): on the
 // virtual clock a frame's work is charged 1/N of the time. 1 by default; 2 at most.
 void clock_set_cpu_scale(double n);
+// The step scale (step.cpp): 1 normally; a game running at twice its native frame rate
+// sets 0.5 and calls step_frame() once a game frame.
+void step_set_scale(double s);
+double step_scale();
+void step_frame();
 double clock_cpu_scale();
 void clock_update_limit();   // recompute g_vlimit from the next event / decrementer deadline
 void clock_pace();           // sleep if virtual time is ahead of real time (virtual clock only)

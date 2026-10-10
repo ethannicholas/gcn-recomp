@@ -1,0 +1,87 @@
+// The step scale: running a game stepped per frame at another frame rate.
+//
+// A game that advances its simulation by per-frame constants runs at double speed when it
+// is paced at twice its frame rate. The fix is at the instructions that do the stepping:
+// the game project lists them in its steps.txt (which operand of each carries the value
+// from the previous frame), the recompiler emits those instructions through the functions
+// below (recomp/ppc.py, translate_step), and the game sets the scale: 0.5 when it runs at
+// twice its native rate, 1 otherwise. An integer step (a counter) cannot be halved, so it
+// is taken on every 1/scale-th frame instead: the game calls step_frame() once a frame.
+//
+// x += t becomes x += s*t; x *= k becomes x *= k^s; x = x*k + b keeps its fixed point
+// b/(1-k) and approaches it at the rate k^s. None of this is exact for a non-linear step,
+// and the two halves of a frame see a different order of updates than one whole one, so a
+// scaled run drifts from the native one; how far is for the game's own comparison to say.
+//
+// Each site passes its address, so that GCN_STEP_SKIP=<file> (hex addresses or lo-hi
+// ranges, one per line) can leave listed sites unscaled, and GCN_STEP_ONLY=<file> all but
+// the listed ones: that is how a site that breaks the game is bisected out of a list of
+// hundreds without a rebuild.
+#include "runtime.h"
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+namespace {
+double g_scale = 1.0;
+uint32_t g_frame = 0;
+
+// Per code word: is this site scaled. Empty means all are.
+std::vector<uint8_t> g_on;
+void load_list(const char* path, bool on_listed) {
+    g_on.assign((g_recomp_code_end - g_recomp_code_base) / 4 + 1, on_listed ? 0 : 1);
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "[step] cannot read %s\n", path); return; }
+    char line[128];
+    int n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char* end;
+        uint32_t lo = (uint32_t)strtoul(line, &end, 16), hi = lo;
+        if (end == line) continue;
+        if (*end == '-') hi = (uint32_t)strtoul(end + 1, nullptr, 16);
+        for (uint32_t a = lo; a <= hi && a < g_recomp_code_end; a += 4)
+            if (a >= g_recomp_code_base) { g_on[(a - g_recomp_code_base) / 4] = on_listed ? 1 : 0; n++; }
+    }
+    fclose(f);
+    fprintf(stderr, "[step] %s: %d sites %s\n", path, n, on_listed ? "scaled, the rest not" : "left unscaled");
+}
+const bool lists_loaded = [] {
+    if (const char* e = getenv("GCN_STEP_SKIP")) load_list(e, false);
+    if (const char* e = getenv("GCN_STEP_ONLY")) load_list(e, true);
+    return true;
+}();
+inline double scale_at(uint32_t pc) {
+    if (!g_on.empty() && pc >= g_recomp_code_base && pc < g_recomp_code_end && !g_on[(pc - g_recomp_code_base) / 4]) return 1.0;
+    return g_scale;
+}
+}
+
+void step_set_scale(double s) { g_scale = s > 0.0 ? s : 1.0; }
+double step_scale() { return g_scale; }
+void step_frame() { g_frame++; }
+
+extern "C" double gcn_step_scale(uint32_t pc) { return scale_at(pc); }
+
+extern "C" uint32_t gcn_step_int(uint32_t pc) {
+    double s = scale_at(pc);
+    if (s >= 1.0) return 1u;
+    uint32_t period = (uint32_t)llround(1.0 / s);
+    return (g_frame % period) == 0 ? 1u : 0u;
+}
+
+extern "C" double gcn_step_pow(uint32_t pc, double k) {
+    double s = scale_at(pc);
+    if (s == 1.0 || !(k > 0.0)) return k;
+    return pow(k, s);
+}
+
+extern "C" double gcn_step_damp(uint32_t pc, double x, double k, double b) {
+    double s = scale_at(pc);
+    if (s == 1.0) return fma(x, k, b);
+    if (k > 0.0 && k < 1.0) {
+        double k2 = pow(k, s);
+        return x * k2 + b * (1.0 - k2) / (1.0 - k);
+    }
+    return x * k + b * s;  // not an approach: scale the addend only
+}

@@ -685,3 +685,101 @@ def translate4(pc, i, d, a, b, cc, rc):
     if xo == 1014:  # dcbz_l
         return f'hle_dcbz_l(c, {ea_x(a, b)});'
     raise Unimpl(f'op4 xo {xo}')
+
+
+def translate_step(pc, i, x):
+    """The instruction at pc with its per-frame step scaled (a game's steps.txt).
+
+    x names the operand field (A, B or C) that carries a value from the previous frame;
+    whatever the instruction adds to it is multiplied by gcn_step_scale(), a factor it is
+    multiplied by is raised to that power, and an integer increment is multiplied by
+    gcn_step_int(), which is 1 on the frames the step falls on and 0 between them. A
+    multiply-add with the carried value as a factor (x*k + b, a damped approach) goes
+    through gcn_step_damp, which keeps the same fixed point. Raises Unimpl for a form this
+    does not cover."""
+    op = i >> 26
+    d = (i >> 21) & 31
+    a = (i >> 16) & 31
+    b = (i >> 11) & 31
+    cc = (i >> 6) & 31
+    rc = i & 1
+    S = f'gcn_step_scale(0x{pc:08X}u)'
+    I = f'gcn_step_int(0x{pc:08X}u)'
+    if op == 14 and x == 'A':  # addi
+        return f'c->r[{d}] = c->r[{a}] + (uint32_t){sx16(i)} * {I};'
+    if op == 31:
+        xo9 = (i >> 1) & 0x1FF
+        A, B, D = f'c->r[{a}]', f'c->r[{b}]', f'c->r[{d}]'
+        if xo9 == 266 and x in 'AB':  # add
+            e = f'{A} + {B} * {I}' if x == 'A' else f'{A} * {I} + {B}'
+            return f'{D} = {e};' + (' ' + cr0(D) if rc else '')
+        if xo9 == 40 and x == 'B':  # subf: rD = rB - rA
+            return f'{D} = {B} - {A} * {I};' + (' ' + cr0(D) if rc else '')
+        raise Unimpl(f'step op31 xo {xo9} x={x}')
+    if op in (59, 63):
+        xo5 = (i >> 1) & 0x1F
+        A, B, C = F(a), F(b), F(cc)
+        e = step_expr(xo5, A, B, C, x, S, pc)
+        if op == 59:
+            return f'{{ double v = (double)(float)({e}); {F(d)} = v; {P1(d)} = v; }}' + cr1(rc)
+        return f'{F(d)} = {e};' + cr1(rc)
+    if op == 4:
+        xo5 = (i >> 1) & 0x1F
+        A0, A1, B0, B1, C0, C1 = F(a), P1(a), F(b), P1(b), F(cc), P1(cc)
+        if xo5 in (12, 14):  # ps_muls0, ps_madds0: lane 1 uses C's lane 0
+            e0 = step_expr(25 if xo5 == 12 else 29, A0, B0, C0, x, S, pc)
+            e1 = step_expr(25 if xo5 == 12 else 29, A1, B1, C0, x, S, pc)
+        elif xo5 in (13, 15):
+            e0 = step_expr(25 if xo5 == 13 else 29, A0, B0, C1, x, S, pc)
+            e1 = step_expr(25 if xo5 == 13 else 29, A1, B1, C1, x, S, pc)
+        else:
+            e0 = step_expr(xo5, A0, B0, C0, x, S, pc)
+            e1 = step_expr(xo5, A1, B1, C1, x, S, pc)
+        return (f'{{ double v0 = (double)(float)({e0}), v1 = (double)(float)({e1}); '
+                f'{F(d)} = v0; {P1(d)} = v1; }}' + cr1(rc))
+    raise Unimpl(f'step op {op} x={x}')
+
+
+def step_expr(xo5, A, B, C, x, S, pc):
+    """The scaled expression for one floating-point arithmetic form (by its 5-bit extended
+    opcode) whose operand x carries the state."""
+    P, D = f'gcn_step_pow(0x{pc:08X}u, ', f'gcn_step_damp(0x{pc:08X}u, '
+    if xo5 == 21:  # add
+        if x == 'A':
+            return f'{A} + {S} * {B}'
+        if x == 'B':
+            return f'{S} * {A} + {B}'
+    if xo5 == 20 and x == 'A':  # sub
+        return f'{A} - {S} * {B}'
+    if xo5 == 25:  # mul
+        if x == 'A':
+            return f'{A} * {P}{C})'
+        if x == 'C':
+            return f'{P}{A}) * {C}'
+    if xo5 == 18 and x == 'A':  # div
+        return f'{A} / {P}{B})'
+    if xo5 == 29:  # madd: A*C + B
+        if x == 'B':
+            return f'fma({S} * {A}, {C}, {B})'
+        if x == 'A':
+            return f'{D}{A}, {C}, {B})'
+        if x == 'C':
+            return f'{D}{C}, {A}, {B})'
+    if xo5 == 28:  # msub: A*C - B
+        if x == 'A':
+            return f'{D}{A}, {C}, -{B})'
+        if x == 'C':
+            return f'{D}{C}, {A}, -{B})'
+    if xo5 == 30:  # nmsub: B - A*C
+        if x == 'B':
+            return f'-fma({S} * {A}, {C}, -{B})'
+        if x == 'A':
+            return f'{D}{A}, -{C}, {B})'
+        if x == 'C':
+            return f'{D}{C}, -{A}, {B})'
+    if xo5 == 31:  # nmadd: -(A*C + B)
+        if x == 'A':
+            return f'{D}{A}, -{C}, -{B})'
+        if x == 'C':
+            return f'{D}{C}, -{A}, -{B})'
+    raise Unimpl(f'step float xo {xo5} x={x}')
