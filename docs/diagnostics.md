@@ -29,6 +29,11 @@ the game still sees 60 Hz.
 Logs recorded before the virtual clock (version 1, keyed by presented frame) still load and
 replay approximately, as they always did.
 
+Pad polls are the SI's own, on a 120 Hz timer of virtual time, not the game's reads, so a
+log keyed by them replays at the same instants on a game patched to run at a different
+frame rate (`GCN_CPU_SCALE`, below): the inputs land at the same virtual times, and what
+differs from there is the game's own doing.
+
 The log format is text: a header (version, game, start time and its epoch), then one line
 per change of a channel's state --
 `poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r`, in
@@ -156,6 +161,12 @@ those counts and none of its own, so a replay stays exact; a log with none repla
 before. A host more than 100 ms behind is re-anchored rather than caught up (a load, a
 shader build). `GCN_CATCHUP=0` keeps the slow-motion behaviour; `GCN_CLOCKLOG` counts the
 jumps and their total.
+
+`GCN_CPU_SCALE=N` (or `clock_set_cpu_scale` from a game's sources) makes the emulated CPU
+N times as fast as the console's: the ticks per edge are divided by N, so the same frame of
+work takes 1/N of the virtual time. A game that paces itself on the retrace and is patched
+to wait for one field instead of two needs this, or the virtual clock itself makes its
+frames two fields long; 2 is the most the clock resolves (one tick per edge).
 
 `GCN_CLOCK=host` restores wall-clock time (the ticker thread polls for due events every
 200 µs). `GCN_TIMESCALE=N` paces virtual time at N× real time (0: unpaced; `--fast` on

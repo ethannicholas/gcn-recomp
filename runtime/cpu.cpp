@@ -322,14 +322,21 @@ static double g_time_scale = 1.0;
 
 // Virtual clock: guest time is the back-edge count times this. The value sets how much
 // work the guest can do per 60 Hz frame before it sees the retrace arrive late: with
-// TICKS_PER_EDGE ticks per loop iteration, a frame holds FIELD_TICKS / TICKS_PER_EDGE
+// g_ticks_per_edge ticks per loop iteration, a frame holds FIELD_TICKS / g_ticks_per_edge
 // iterations. It is a constant, not a measurement, because determinism is the point: the
 // same route must count the same ticks on every machine. Measured with GCN_CLOCKLOG
 // (2026-10-08): a game's ordinary play ran 45-60k back-edges of work per frame and its
 // heaviest cinematic peaked near 85k, so at 4 ticks per edge that cinematic took half a
 // field and at 2 a quarter. 2 leaves room for scenes heavier than those; the real Gekko,
 // at a few cycles per short loop iteration, is in the same range.
-static constexpr uint64_t TICKS_PER_EDGE = 2;
+//
+// GCN_CPU_SCALE=N (or clock_set_cpu_scale) runs the guest on a CPU N times as fast as
+// that: the ticks per edge are divided by N, so a frame of the same work takes 1/N of the
+// virtual time, which is how a game that paces itself on the retrace can be made to run
+// at a frame rate its own hardware could not reach. Integer-ish: 2 is one tick per edge,
+// which is as fast as the virtual clock resolves.
+static constexpr uint64_t kTicksPerEdge = 2;
+static uint64_t g_ticks_per_edge = kTicksPerEdge;
 static bool g_virtual_clock = true;
 volatile uint64_t g_vcount;
 volatile uint64_t g_vlimit = UINT64_MAX;
@@ -338,6 +345,10 @@ static int64_t g_pace_offset_ns;  // virtual time the host gave up on catching u
 bool clock_is_virtual() { return g_virtual_clock; }
 void clock_set_scale(double s) { g_time_scale = s; }
 double clock_scale() { return g_time_scale; }
+void clock_set_cpu_scale(double s) {
+    if (s > 0) g_ticks_per_edge = std::max<uint64_t>(1, (uint64_t)((double)kTicksPerEdge / s + 0.5));
+}
+double clock_cpu_scale() { return (double)kTicksPerEdge / (double)g_ticks_per_edge; }
 
 void timing_init() {
     g_t0 = std::chrono::steady_clock::now();
@@ -346,6 +357,7 @@ void timing_init() {
         double s = atof(e);
         if (s >= 0) g_time_scale = s;
     }
+    if (const char* e = getenv("GCN_CPU_SCALE")) clock_set_cpu_scale(atof(e));
     build_fn_table();
 }
 
@@ -355,7 +367,7 @@ uint64_t host_ns() {
 }
 
 uint64_t now_ticks() {
-    if (g_virtual_clock) return g_vcount * TICKS_PER_EDGE;
+    if (g_virtual_clock) return g_vcount * g_ticks_per_edge;
     return (uint64_t)((double)host_ns() * (TB_FREQ / 1e9) * (g_time_scale > 0 ? g_time_scale : 1.0));
 }
 
@@ -383,7 +395,7 @@ extern std::atomic<uint64_t> g_next_event_at;
 void clock_update_limit() {
     if (!g_virtual_clock) { g_vlimit = UINT64_MAX; return; }  // the ticker asks for polls
     uint64_t at = std::min(g_next_event_at.load(), g_dec_deadline.load());
-    uint64_t limit = at == UINT64_MAX ? UINT64_MAX : (at + TICKS_PER_EDGE - 1) / TICKS_PER_EDGE;
+    uint64_t limit = at == UINT64_MAX ? UINT64_MAX : (at + g_ticks_per_edge - 1) / g_ticks_per_edge;
     // A replay's next recorded jump is made from a poll at its count (clock_pace).
     g_vlimit = std::min(limit, input_replay_next_jump_at());
 }
@@ -392,7 +404,7 @@ uint32_t gx_frames_submitted();
 
 // GCN_CLOCKLOG=1: once per virtual second, how the guest's time relates to the host's and
 // how much the guest executed per presented frame. The edges/frame figure is what
-// TICKS_PER_EDGE is tuned against.
+// g_ticks_per_edge is tuned against.
 static void clock_log() {
     static bool on = getenv("GCN_CLOCKLOG") != nullptr;
     if (!on) return;
@@ -404,8 +416,8 @@ static void clock_log() {
     fprintf(stderr, "[clock] virtual %6.1fs host %6.1fs  frames %u (+%u)  work edges/frame %.0fk (%.0f%% of a field)  jumps %u (%.0f ms)\n",
             (double)vt / TB_FREQ, (double)host / 1e9, (unsigned)frames, (unsigned)(frames - last_frames),
             frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) / 1000.0 : 0.0,
-            frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) * TICKS_PER_EDGE * 100.0 / (TB_FREQ / 59.94) : 0.0,
-            (unsigned)g_jumps, (double)g_jump_edges * TICKS_PER_EDGE * 1000.0 / TB_FREQ);
+            frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) * g_ticks_per_edge * 100.0 / (TB_FREQ / 59.94) : 0.0,
+            (unsigned)g_jumps, (double)g_jump_edges * g_ticks_per_edge * 1000.0 / TB_FREQ);
     last_edges = edges; last_frames = frames;
 }
 
@@ -452,7 +464,7 @@ void clock_pace() {
         g_pace_offset_ns += ahead;  // too far behind: re-anchor
     } else if (ahead < -kCatchupNs && g_catchup && !input_replay_active()) {
         const double ticks = (double)-ahead * (TB_FREQ / 1e9) * g_time_scale;
-        const uint64_t edges = (uint64_t)((ticks + TICKS_PER_EDGE - 1) / TICKS_PER_EDGE);
+        const uint64_t edges = (uint64_t)((ticks + g_ticks_per_edge - 1) / g_ticks_per_edge);
         input_log_jump(g_vcount, edges);
         clock_jump(edges);
     }
