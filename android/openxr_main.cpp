@@ -162,7 +162,7 @@ struct Xr {
     XrActionSet action_set = XR_NULL_HANDLE;
     XrAction a_btn, b_btn, x_btn, y_btn, menu, trig_l, trig_r, grip_l, grip_r, stick_l, stick_r;
     XrAction toggle;   // right thumbstick click: the game's camera or its first person, in stereo
-    XrAction stereo_toggle;   // left thumbstick click: theater or stereo, by hand
+    XrAction left_click;      // left thumbstick click: the game's (vr::GameHooks::left_click)
     XrAction aim;             // each controller's aim pose, for the game (vr::hand_pose)
     XrPath hand_paths[2] = {XR_NULL_PATH, XR_NULL_PATH};
     XrSpace aim_spaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
@@ -528,7 +528,7 @@ static bool xr_create_actions() {
     g_xr.stick_l = make_action("stick_l", "Left stick", XR_ACTION_TYPE_VECTOR2F_INPUT);
     g_xr.stick_r = make_action("stick_r", "Right stick", XR_ACTION_TYPE_VECTOR2F_INPUT);
     g_xr.toggle  = make_action("view_toggle", "First person", XR_ACTION_TYPE_BOOLEAN_INPUT);
-    g_xr.stereo_toggle = make_action("stereo_toggle", "Theater or stereo", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    g_xr.left_click = make_action("left_click", "Left stick click", XR_ACTION_TYPE_BOOLEAN_INPUT);
     g_xr.hand_paths[vr::kLeftHand] = xr_path("/user/hand/left");
     g_xr.hand_paths[vr::kRightHand] = xr_path("/user/hand/right");
     {
@@ -553,9 +553,10 @@ static bool xr_create_actions() {
         {g_xr.grip_r,  xr_path("/user/hand/right/input/squeeze/value")},
         {g_xr.stick_l, xr_path("/user/hand/left/input/thumbstick")},
         {g_xr.stick_r, xr_path("/user/hand/right/input/thumbstick")},
-        // A GameCube controller has no stick clicks, so both are free for switching views.
+        // A GameCube controller has no stick clicks, so both are free: the right switches
+        // views, the left is the game's.
         {g_xr.toggle,  xr_path("/user/hand/right/input/thumbstick/click")},
-        {g_xr.stereo_toggle, xr_path("/user/hand/left/input/thumbstick/click")},
+        {g_xr.left_click, xr_path("/user/hand/left/input/thumbstick/click")},
         {g_xr.aim,     xr_path("/user/hand/left/input/aim/pose")},
         {g_xr.aim,     xr_path("/user/hand/right/input/aim/pose")},
     };
@@ -985,13 +986,9 @@ void android_main(android_app* app) {
     auto last_game_frame = std::chrono::steady_clock::now();
     uint64_t disp_frames = 0;  // monotonic, unlike xr_frames which the stats line resets
     bool have_content = false;
-    bool stereo = g_vrcfg.start_in_stereo, toggle_was_down = false, stereo_toggle_was_down = false;
+    bool stereo = g_vrcfg.start_in_stereo, toggle_was_down = false, left_click_was_down = false;
     const auto wants_stereo = vr::game_hooks().wants_stereo;
-    // The click stays the only switch for a game with no stereo hook, whatever vr.txt says.
-    const bool stereo_toggle = g_vrcfg.stereo_toggle || !wants_stereo;
-    LOGI("stereo: %s", !wants_stereo ? "left thumbstick click"
-                       : stereo_toggle ? "the game decides; left thumbstick click overrides"
-                                       : "the game decides");
+    LOGI("stereo: %s", wants_stereo ? "the game decides" : stereo ? "always" : "never");
     // `first_person` is the viewer's choice; it is *in effect* only in stereo. Leaving
     // stereo drops back to the game's camera at once, before the morph to theater begins:
     // the morph folds the world onto the panel the game's own camera drew, and starting it
@@ -1119,18 +1116,13 @@ void android_main(android_app* app) {
             toggle_was_down = false;
         }
 
-        // Clicking the left thumbstick switches between theater and stereo. For a game that
-        // says which it wants, that overrides it until the game's answer next changes, unless
-        // the game has turned the click off (stereo_toggle).
-        if (stereo_toggle && action_bool(g_xr.stereo_toggle)) {
-            if (!stereo_toggle_was_down) {
-                stereo = !stereo;
-                apply_view();
-                LOGI("switching to %s", stereo ? "stereo" : "theater");
-            }
-            stereo_toggle_was_down = true;
+        // The left thumbstick click is the game's. It used to switch between theater and
+        // stereo by hand, and was only ever pressed by accident.
+        if (action_bool(g_xr.left_click)) {
+            if (!left_click_was_down && vr::game_hooks().left_click) vr::game_hooks().left_click();
+            left_click_was_down = true;
         } else {
-            stereo_toggle_was_down = false;
+            left_click_was_down = false;
         }
 
         // Take at most one game frame per display frame, before choosing a view: both
@@ -1143,8 +1135,7 @@ void android_main(android_app* app) {
             gap_max = std::max(gap_max, std::chrono::duration<double, std::milli>(now - last_game_frame).count());
             last_game_frame = now;
             // Which view to present, when the game says. The view follows a *change* in the
-            // game's answer, so a click on the left thumbstick holds until the game next
-            // changes its mind. A change is held for two game frames before the view
+            // game's answer. A change is held for two game frames before the view
             // follows: the state behind it is written by the guest thread and read here, so
             // a sample can land on a transient: a game state flag read that way has been
             // caught non-zero for single frames over menus.

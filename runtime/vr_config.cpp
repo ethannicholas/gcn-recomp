@@ -46,7 +46,6 @@ VrConfig vr_config_load(const std::string& dir, const VrConfig& defaults) {
         else if (!strcmp(key, "log_frames")) c.log_frames = val != 0;
         else if (!strcmp(key, "dump_every")) c.dump_every = (int)val;
         else if (!strcmp(key, "start_in_stereo")) c.start_in_stereo = val != 0;
-        else if (!strcmp(key, "stereo_toggle")) c.stereo_toggle = val != 0;
         else if (!strcmp(key, "first_person")) c.first_person = val != 0;
         else if (!strcmp(key, "transition_s")) c.transition_s = (float)val;
         else if (!strcmp(key, "transition_out_s")) c.transition_out_s = (float)val;

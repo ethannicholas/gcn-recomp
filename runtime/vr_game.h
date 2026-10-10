@@ -26,15 +26,19 @@ struct GameHooks {
 
     // Called once per game frame with that frame's batch, from the render thread: true to
     // present the world in stereo, false for the theater panel. The view follows a change
-    // in the answer, held for two frames so a transient cannot flap it; the left
-    // thumbstick click overrides it until the answer next changes. Without this hook the
-    // view is the viewer's alone: start_in_stereo, then the click.
+    // in the answer, held for two frames so a transient cannot flap it. Without this hook
+    // the view is start_in_stereo's, for the whole run.
     bool (*wants_stereo)(const gx::Batch& b) = nullptr;
 
     // Turns the game's own alternative eye on or off (installing a gx::EyeHook and
     // calling gx::render_set_first_person, say). Called with on=false whenever the view
     // leaves stereo. Without this hook the right thumbstick click does nothing.
     void (*set_first_person)(bool on, const VrConfig& c) = nullptr;
+
+    // Called from the render thread when the left thumbstick is clicked: a GameCube
+    // controller has no stick clicks, so this one is the game's to use (the right one is
+    // set_first_person's). Pressed, not held: once per click.
+    void (*left_click)() = nullptr;
 
     // The controller state the headset frontend built from the Touch controllers, before
     // the game reads it and before it is logged, for a game that wants a button somewhere
