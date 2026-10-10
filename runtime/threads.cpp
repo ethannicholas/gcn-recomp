@@ -386,10 +386,13 @@ void debug_print_counts() {
 }
 // GCN_STORE_HIST=<from>-<to>: count how often each store in the recompiled code runs
 // between those two presented frames, and print the table once the window has closed, one
-// `[sthist] <pc> <count>` line per store site that ran. With the window set to a stretch of
-// steady play, a count equal to the number of frames marks a store that runs once a frame,
-// which is how a game project's static list of candidate per-frame steps is narrowed to
-// the ones that run.
+// `[sthist] <pc> <count> <streak>` line per store site that ran. With the window set to a
+// stretch of steady play, a count equal to the number of frames marks a store that runs
+// once a frame, which is how a game project's static list of candidate per-frame steps is
+// narrowed to the ones that run. The streak is how many of the frames the site ran in
+// directly followed another frame it ran in: a per-frame step that is only active for
+// part of the window (a countdown) still ran on consecutive frames, where a site that
+// fires on events did not.
 //
 // GCN_STORE_HIST_PCS=<file> (hex addresses, one per line) adds, for every address that one
 // of those stores wrote in the window, who else wrote it: `[stwr] <addr> <pc>:<count> ...`.
@@ -407,6 +410,8 @@ struct {
     uint32_t from = 0, to = 0;
     bool printed = false;
     std::vector<uint32_t> counts;
+    std::vector<uint32_t> last_frame;  // per site: the last presented frame it ran in, +1
+    std::vector<uint32_t> streak;      // per site: frames it ran in right after another
     std::vector<uint8_t> listed;  // per code word: is this pc in GCN_STORE_HIST_PCS
     std::unordered_map<uint32_t, Writers> writers;
 } g_sthist = [] {
@@ -421,6 +426,8 @@ struct {
 void store_hist_init() {
     size_t words = (g_recomp_code_end - g_recomp_code_base) / 4 + 1;
     g_sthist.counts.resize(words);
+    g_sthist.last_frame.resize(words);
+    g_sthist.streak.resize(words);
     if (const char* path = getenv("GCN_STORE_HIST_PCS")) {
         g_sthist.listed.resize(words);
         if (FILE* f = fopen(path, "r")) {
@@ -436,7 +443,7 @@ void store_hist_init() {
 void store_hist_print() {
     fprintf(stderr, "[sthist] frames %u-%u\n", g_sthist.from, g_sthist.to);
     for (size_t i = 0; i < g_sthist.counts.size(); i++)
-        if (g_sthist.counts[i]) fprintf(stderr, "[sthist] %08X %u\n", (uint32_t)(g_recomp_code_base + i * 4), g_sthist.counts[i]);
+        if (g_sthist.counts[i]) fprintf(stderr, "[sthist] %08X %u %u\n", (uint32_t)(g_recomp_code_base + i * 4), g_sthist.counts[i], g_sthist.streak[i]);
     for (auto& kv : g_sthist.writers) {
         const Writers& w = kv.second;
         bool listed = false;
@@ -461,7 +468,12 @@ void store_hist(uint32_t pc, uint32_t ea) {
     }
     if (g_sthist.counts.empty()) store_hist_init();
     if (pc < g_recomp_code_base || pc >= g_recomp_code_end) return;
-    g_sthist.counts[(pc - g_recomp_code_base) / 4]++;
+    size_t i = (pc - g_recomp_code_base) / 4;
+    g_sthist.counts[i]++;
+    if (g_sthist.last_frame[i] != f + 1) {  // the first run in this frame
+        if (g_sthist.last_frame[i] == f) g_sthist.streak[i]++;
+        g_sthist.last_frame[i] = f + 1;
+    }
     if (g_sthist.listed.empty()) return;
     Writers& w = g_sthist.writers[ea];
     for (int i = 0; i < w.k; i++)

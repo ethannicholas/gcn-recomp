@@ -258,9 +258,12 @@ left.
 
 - `GCN_STORE_HIST=<from>-<to>` (debug build) counts how often each store site in the
   recompiled code ran between those two presented frames and prints the table when the
-  window closes, one `[sthist] <pc> <count>` line per site. A site that ran once per frame
-  of the window is a per-frame step; one that ran two hundred times is in a loop over
-  objects or vertices; one that did not run is not in this scene.
+  window closes, one `[sthist] <pc> <count> <streak>` line per site. A site that ran once
+  per frame of the window is a per-frame step; one that ran two hundred times is in a loop
+  over objects or vertices; one that did not run is not in this scene. The streak counts
+  the frames it ran in that directly followed another frame it ran in, which tells a step
+  that is only active for part of the window (a countdown runs on consecutive frames) from
+  one that fires on events.
 - `GCN_STORE_HIST_PCS=<file>` (hex addresses, one per line) adds, for every address one of
   those sites wrote, who else wrote it: `[stwr] <addr> <pc>:<count> ...`. That tells a
   value carried from frame to frame (its only writers are steps) from a temporary that
