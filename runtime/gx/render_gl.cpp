@@ -2583,9 +2583,13 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                 // weapon held in front of the camera is a unit or two across.
                 const float band_hi = st.viewport[5] / 16777215.0f;
                 const float band_lo = band_hi - fabsf(st.viewport[2]) / 16777215.0f;
-                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c z=%.2f..%.2f x=%.2f..%.2f y=%.2f..%.2f band=%.5f..%.5f origin=%u slivers=%u%s",
+                // The projection's scales and offsets (XF 0x1020..0x1023) go with the box: a
+                // box is inside or outside a frustum only against the projection it was
+                // drawn with, and a frame may use several.
+                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c,%.4f,%.4f,%.4f,%.4f z=%.2f..%.2f x=%.2f..%.2f y=%.2f..%.2f band=%.5f..%.5f origin=%u slivers=%u%s",
                         draw_index, c.count, c.state, st.num_texgens,
-                        (int)st.proj[6] == 0 ? 'p' : 'o', zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi,
+                        (int)st.proj[6] == 0 ? 'p' : 'o', st.proj[0], st.proj[1], st.proj[2], st.proj[3],
+                        zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi,
                         at_origin, slivers, sliver_text.c_str());
                 if (slivers) fprintf(stderr, "\n       ");
                 // Each texture by id and, for a decoded one, by its content hash, which is

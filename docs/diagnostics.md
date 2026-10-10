@@ -211,7 +211,8 @@ use, which every lookup prolonged.
 
 ## Finding a draw or a function
 
-- `GCN_DRAWLOG=<frame>` lists every draw in one frame with its index, its depth band and
+- `GCN_DRAWLOG=<frame>` lists every draw in one frame with its index, its projection (type
+  and the XF scales and offsets, since a frame may use several), its depth band and
   view-space box, and its textures by id and content hash (the hash is the same in every
   run; an EFB copy is starred); in stereo it also prints, per draw the eye makes, which
   layer the eye gave it (`[eyedraw]`: world, sky, the foreground or HUD bands, the HUD
