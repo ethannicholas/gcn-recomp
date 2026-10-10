@@ -400,11 +400,8 @@ void debug_print_counts() {
 // temporary recomputed every frame (something else assigns it first).
 namespace gx { extern std::atomic<uint32_t> g_frames_submitted; }
 namespace {
-struct Writers {
-    uint32_t pc[6];
-    uint32_t n[6];
-    uint8_t k = 0;
-    uint32_t more = 0;  // writes by pcs past the sixth
+struct Writers {  // pc -> count
+    std::unordered_map<uint32_t, uint32_t> n;
 };
 struct {
     uint32_t from = 0, to = 0;
@@ -447,11 +444,10 @@ void store_hist_print() {
     for (auto& kv : g_sthist.writers) {
         const Writers& w = kv.second;
         bool listed = false;
-        for (int i = 0; i < w.k; i++) listed |= g_sthist.listed[(w.pc[i] - g_recomp_code_base) / 4] != 0;
+        for (auto& pn : w.n) listed |= g_sthist.listed[(pn.first - g_recomp_code_base) / 4] != 0;
         if (!listed) continue;
         fprintf(stderr, "[stwr] %08X", kv.first);
-        for (int i = 0; i < w.k; i++) fprintf(stderr, " %08X:%u", w.pc[i], w.n[i]);
-        if (w.more) fprintf(stderr, " more:%u", w.more);
+        for (auto& pn : w.n) fprintf(stderr, " %08X:%u", pn.first, pn.second);
         fputc('\n', stderr);
     }
     fprintf(stderr, "[sthist] end\n");
@@ -475,16 +471,63 @@ void store_hist(uint32_t pc, uint32_t ea) {
         g_sthist.last_frame[i] = f + 1;
     }
     if (g_sthist.listed.empty()) return;
-    Writers& w = g_sthist.writers[ea];
-    for (int i = 0; i < w.k; i++)
-        if (w.pc[i] == pc) { w.n[i]++; return; }
-    if (w.k < 6) { w.pc[w.k] = pc; w.n[w.k] = 1; w.k++; }
-    else w.more++;
+    g_sthist.writers[ea].n[pc]++;
 }
 }  // namespace
 extern "C" void debug_watch_store(CPU* c, uint32_t pc, uint32_t ea) {
     if (g_sthist.to) store_hist(pc, ea);
     debug_watch_check(c, pc | 1u);
+}
+// GCN_READERS=<file> (hex guest addresses or lo-hi ranges, one per line): within the
+// GCN_STORE_HIST window, which code reads those addresses. Printed with the histogram as
+// `[readers] <addr> <pc>:<count> ...`, the readers' counterpart of [stwr]: a value whose
+// unit a change of frame rate alters (a speed derived from a position difference) has to
+// be converted wherever it is read, and this is the list of where.
+namespace {
+struct Readers {
+    uint32_t lo, hi;
+    std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint32_t>> by_addr;  // addr -> pc -> count
+};
+std::vector<Readers> g_readers = [] {
+    std::vector<Readers> v;
+    const char* path = getenv("GCN_READERS");
+    if (!path) return v;
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "[readers] cannot read %s\n", path); return v; }
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char* end;
+        uint32_t lo = (uint32_t)strtoul(line, &end, 16), hi = lo + 3;
+        if (end == line) continue;
+        if (*end == '-') hi = (uint32_t)strtoul(end + 1, nullptr, 16);
+        v.push_back({lo, hi, {}});
+    }
+    fclose(f);
+    return v;
+}();
+void readers_print() {
+    for (auto& r : g_readers)
+        for (auto& kv : r.by_addr) {
+            fprintf(stderr, "[readers] %08X", kv.first);
+            for (auto& pn : kv.second) fprintf(stderr, " %08X:%u", pn.first, pn.second);
+            fputc('\n', stderr);
+        }
+}
+}  // namespace
+extern "C" void debug_watch_load(uint32_t pc, uint32_t ea) {
+    if (g_readers.empty()) return;
+    uint32_t f = gx::g_frames_submitted.load(std::memory_order_relaxed);
+    if (f < g_sthist.from) return;
+    if (f >= g_sthist.to) {
+        static bool printed = false;
+        if (!printed) { printed = true; readers_print(); }
+        return;
+    }
+    for (auto& r : g_readers) {
+        if (ea < r.lo || ea > r.hi) continue;
+        r.by_addr[ea][pc]++;
+        return;
+    }
 }
 extern "C" void debug_watch_check(CPU* c, uint32_t fn) {
     for (auto& kv : g_count_fns) if (kv.first == fn) kv.second++;

@@ -13,6 +13,14 @@
 // and the two halves of a frame see a different order of updates than one whole one, so a
 // scaled run drifts from the native one; how far is for the game's own comparison to say.
 //
+// Each site also names a power p of the scale (1 when the table leaves it out): what a
+// step stands for is s^p. A rate is p = 1. A force that a Verlet integrator adds straight
+// to a position (x += v + F, with v the displacement of the previous step) is p = 2, since
+// the displacement carries over whole and the force acts over the square of the step. A
+// rate the game derives from a position difference (a speed measured as x - x_prev) is in
+// units of the step, and p = -1 on its store converts it back to the game's units
+// wherever it is read.
+//
 // Each site passes its address, so that GCN_STEP_SKIP=<file> (hex addresses or lo-hi
 // ranges, one per line) can leave listed sites unscaled, and GCN_STEP_ONLY=<file> all but
 // the listed ones: that is how a site that breaks the game is bisected out of a list of
@@ -51,9 +59,12 @@ const bool lists_loaded = [] {
     if (const char* e = getenv("GCN_STEP_ONLY")) load_list(e, true);
     return true;
 }();
-inline double scale_at(uint32_t pc) {
+inline double scale_at(uint32_t pc, double p) {
     if (!g_on.empty() && pc >= g_recomp_code_base && pc < g_recomp_code_end && !g_on[(pc - g_recomp_code_base) / 4]) return 1.0;
-    return g_scale;
+    if (g_scale == 1.0 || p == 1.0) return g_scale;
+    if (p == 2.0) return g_scale * g_scale;
+    if (p == -1.0) return 1.0 / g_scale;
+    return pow(g_scale, p);
 }
 }
 
@@ -61,23 +72,23 @@ void step_set_scale(double s) { g_scale = s > 0.0 ? s : 1.0; }
 double step_scale() { return g_scale; }
 void step_frame() { g_frame++; }
 
-extern "C" double gcn_step_scale(uint32_t pc) { return scale_at(pc); }
+extern "C" double gcn_step_scale(uint32_t pc, double p) { return scale_at(pc, p); }
 
-extern "C" uint32_t gcn_step_int(uint32_t pc) {
-    double s = scale_at(pc);
+extern "C" uint32_t gcn_step_int(uint32_t pc, double p) {
+    double s = scale_at(pc, p);
     if (s >= 1.0) return 1u;
     uint32_t period = (uint32_t)llround(1.0 / s);
     return (g_frame % period) == 0 ? 1u : 0u;
 }
 
-extern "C" double gcn_step_pow(uint32_t pc, double k) {
-    double s = scale_at(pc);
+extern "C" double gcn_step_pow(uint32_t pc, double p, double k) {
+    double s = scale_at(pc, p);
     if (s == 1.0 || !(k > 0.0)) return k;
     return pow(k, s);
 }
 
-extern "C" double gcn_step_damp(uint32_t pc, double x, double k, double b) {
-    double s = scale_at(pc);
+extern "C" double gcn_step_damp(uint32_t pc, double p, double x, double k, double b) {
+    double s = scale_at(pc, p);
     if (s == 1.0) return fma(x, k, b);
     if (k > 0.0 && k < 1.0) {
         double k2 = pow(k, s);

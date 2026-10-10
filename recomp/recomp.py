@@ -70,6 +70,38 @@ def store_ea(i):
     return '0u'
 
 
+LOAD_OPS = {32, 33, 34, 35, 40, 41, 42, 43, 48, 49, 50, 51, 56, 57}
+LOAD_XO31 = {23, 55, 87, 119, 279, 311, 343, 375, 535, 567, 599, 631, 534, 790, 20}
+
+
+def load_ea(i):
+    """The C expression for the address a load instruction reads, valid before the load
+    (it may overwrite its own base register, and an update form moves it)."""
+    op = i >> 26
+    a = (i >> 16) & 31
+    b = (i >> 11) & 31
+    if op in LOAD_OPS:
+        if op in (56, 57):
+            return ppc.ea_d(a, ppc.sx12(i))
+        return ppc.ea_d(a, ppc.sx16(i))
+    if op == 31 and ((i >> 1) & 0x3FF) in LOAD_XO31:
+        return ppc.ea_x(a, b)
+    if op == 4 and ((i >> 1) & 0x3F) in (6, 38):
+        return ppc.ea_x(a, b)
+    return '0u'
+
+
+def is_load(i):
+    op = i >> 26
+    if op in LOAD_OPS:
+        return True
+    if op == 31 and ((i >> 1) & 0x3FF) in LOAD_XO31:
+        return True
+    if op == 4 and ((i >> 1) & 0x3F) in (6, 38):
+        return True
+    return False
+
+
 def is_store(i):
     op = i >> 26
     if op in STORE_OPS:
@@ -225,10 +257,20 @@ def main():
                 a, code = line.split(None, 1)
                 patches[int(a, 16)] = code
 
-    # steps.txt: "ADDR  A|B|C" marks an instruction as a per-frame step whose named operand
-    # carries the value from the previous frame; it is emitted scaled by the runtime's step
-    # scale (ppc.translate_step, runtime/step.cpp). A patch at the same address wins.
-    steps = load_kv(os.path.join(tables, 'steps.txt'))
+    # steps.txt: "ADDR  A|B|C [power]" marks an instruction as a per-frame step whose named
+    # operand carries the value from the previous frame; it is emitted scaled by the
+    # runtime's step scale raised to the power (1 when absent: a rate; 2 a force, which a
+    # Verlet integrator adds to a position; -1 a derived rate to convert back to the game's
+    # units), see ppc.translate_step and runtime/step.cpp. "ADDR R power" scales the whole
+    # result instead. A patch at the same address wins.
+    steps = {}
+    path = os.path.join(tables, 'steps.txt')
+    if os.path.exists(path):
+        for line in open(path):
+            line = line.split('#', 1)[0].strip()
+            if line:
+                parts = line.split()
+                steps[int(parts[0], 16)] = (parts[1], float(parts[2]) if len(parts) > 2 else 1.0)
     for a in steps:
         if a in patches:
             print(f'warning: steps.txt {a:08X} is also patched; the patch wins', file=sys.stderr)
@@ -246,7 +288,7 @@ def main():
                 last_uncond = False
                 continue
             if pc in steps:
-                out.append(f'\t/* {pc:08X} {i:08X} STEP */ {ppc.translate_step(pc, i, steps[pc])}')
+                out.append(f'\t/* {pc:08X} {i:08X} STEP */ {ppc.translate_step(pc, i, *steps[pc])}')
                 last_uncond = False
                 continue
             br = ppc.decode_branch(pc, i)
@@ -266,6 +308,8 @@ def main():
                     code += ' IRQ_CHECK();'
                 if is_store(i):
                     code += f' WATCH_STORE(0x{pc:08X}u, {store_ea(i)});'
+                if is_load(i):
+                    code = f'WATCH_LOAD(0x{pc:08X}u, {load_ea(i)}); ' + code
                 out.append(f'\t/* {pc:08X} {i:08X} */ {code}')
                 continue
 

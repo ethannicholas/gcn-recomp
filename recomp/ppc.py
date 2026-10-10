@@ -687,7 +687,7 @@ def translate4(pc, i, d, a, b, cc, rc):
     raise Unimpl(f'op4 xo {xo}')
 
 
-def translate_step(pc, i, x):
+def translate_step(pc, i, x, p=1.0):
     """The instruction at pc with its per-frame step scaled (a game's steps.txt).
 
     x names the operand field (A, B or C) that carries a value from the previous frame;
@@ -695,16 +695,22 @@ def translate_step(pc, i, x):
     multiplied by is raised to that power, and an integer increment is multiplied by
     gcn_step_int(), which is 1 on the frames the step falls on and 0 between them. A
     multiply-add with the carried value as a factor (x*k + b, a damped approach) goes
-    through gcn_step_damp, which keeps the same fixed point. Raises Unimpl for a form this
-    does not cover."""
+    through gcn_step_damp, which keeps the same fixed point. p is the power of the step
+    scale the step takes (1 for a rate, 2 for a force a Verlet integrator adds to a
+    position, -1 for a rate derived from a position difference, to be converted back to
+    the game's units); x of R scales the whole result by that power instead, and x of P
+    on an add or subtract raises operand B to it, for the 1 - k beside an x *= k (a
+    damping split into a kept part and a lost part, each a factor of a frame). Raises
+    Unimpl for a form this does not cover."""
     op = i >> 26
     d = (i >> 21) & 31
     a = (i >> 16) & 31
     b = (i >> 11) & 31
     cc = (i >> 6) & 31
     rc = i & 1
-    S = f'gcn_step_scale(0x{pc:08X}u)'
-    I = f'gcn_step_int(0x{pc:08X}u)'
+    P = f'{p:g}'
+    S = f'gcn_step_scale(0x{pc:08X}u, {P})'
+    I = f'gcn_step_int(0x{pc:08X}u, {P})'
     if op == 14 and x == 'A':  # addi
         return f'c->r[{d}] = c->r[{a}] + (uint32_t){sx16(i)} * {I};'
     if op == 31:
@@ -719,7 +725,7 @@ def translate_step(pc, i, x):
     if op in (59, 63):
         xo5 = (i >> 1) & 0x1F
         A, B, C = F(a), F(b), F(cc)
-        e = step_expr(xo5, A, B, C, x, S, pc)
+        e = step_expr(xo5, A, B, C, x, S, pc, P)
         if op == 59:
             return f'{{ double v = (double)(float)({e}); {F(d)} = v; {P1(d)} = v; }}' + cr1(rc)
         return f'{F(d)} = {e};' + cr1(rc)
@@ -727,30 +733,43 @@ def translate_step(pc, i, x):
         xo5 = (i >> 1) & 0x1F
         A0, A1, B0, B1, C0, C1 = F(a), P1(a), F(b), P1(b), F(cc), P1(cc)
         if xo5 in (12, 14):  # ps_muls0, ps_madds0: lane 1 uses C's lane 0
-            e0 = step_expr(25 if xo5 == 12 else 29, A0, B0, C0, x, S, pc)
-            e1 = step_expr(25 if xo5 == 12 else 29, A1, B1, C0, x, S, pc)
+            e0 = step_expr(25 if xo5 == 12 else 29, A0, B0, C0, x, S, pc, P)
+            e1 = step_expr(25 if xo5 == 12 else 29, A1, B1, C0, x, S, pc, P)
         elif xo5 in (13, 15):
-            e0 = step_expr(25 if xo5 == 13 else 29, A0, B0, C1, x, S, pc)
-            e1 = step_expr(25 if xo5 == 13 else 29, A1, B1, C1, x, S, pc)
+            e0 = step_expr(25 if xo5 == 13 else 29, A0, B0, C1, x, S, pc, P)
+            e1 = step_expr(25 if xo5 == 13 else 29, A1, B1, C1, x, S, pc, P)
         else:
-            e0 = step_expr(xo5, A0, B0, C0, x, S, pc)
-            e1 = step_expr(xo5, A1, B1, C1, x, S, pc)
+            e0 = step_expr(xo5, A0, B0, C0, x, S, pc, P)
+            e1 = step_expr(xo5, A1, B1, C1, x, S, pc, P)
         return (f'{{ double v0 = (double)(float)({e0}), v1 = (double)(float)({e1}); '
                 f'{F(d)} = v0; {P1(d)} = v1; }}' + cr1(rc))
     raise Unimpl(f'step op {op} x={x}')
 
 
-def step_expr(xo5, A, B, C, x, S, pc):
+def step_expr(xo5, A, B, C, x, S, pc, P='1'):
     """The scaled expression for one floating-point arithmetic form (by its 5-bit extended
-    opcode) whose operand x carries the state."""
-    P, D = f'gcn_step_pow(0x{pc:08X}u, ', f'gcn_step_damp(0x{pc:08X}u, '
+    opcode) whose operand x carries the state, or, for x of R, whose whole result is
+    scaled; P is the power of the step scale, as a C literal."""
+    if x == 'R':
+        plain = {21: f'{A} + {B}', 20: f'{A} - {B}', 25: f'{A} * {C}', 18: f'{A} / {B}',
+                 29: f'fma({A}, {C}, {B})', 28: f'fma({A}, {C}, -{B})',
+                 30: f'-fma({A}, {C}, -{B})', 31: f'-fma({A}, {C}, {B})'}
+        if xo5 not in plain:
+            raise Unimpl(f'step float xo {xo5} x=R')
+        return f'{S} * ({plain[xo5]})'
+    D = f'gcn_step_damp(0x{pc:08X}u, {P}, '
+    P = f'gcn_step_pow(0x{pc:08X}u, {P}, '
     if xo5 == 21:  # add
         if x == 'A':
             return f'{A} + {S} * {B}'
         if x == 'B':
             return f'{S} * {A} + {B}'
+        if x == 'P':  # B is a per-frame factor (a k in 1 - k): raise it, do not scale it
+            return f'{A} + {P}{B})'
     if xo5 == 20 and x == 'A':  # sub
         return f'{A} - {S} * {B}'
+    if xo5 == 20 and x == 'P':
+        return f'{A} - {P}{B})'
     if xo5 == 25:  # mul
         if x == 'A':
             return f'{A} * {P}{C})'

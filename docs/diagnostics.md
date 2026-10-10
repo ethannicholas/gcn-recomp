@@ -268,6 +268,12 @@ left.
   those sites wrote, who else wrote it: `[stwr] <addr> <pc>:<count> ...`. That tells a
   value carried from frame to frame (its only writers are steps) from a temporary that
   something assigns afresh each frame before a step adds to it, which must not be scaled.
+- `GCN_READERS=<file>` (hex guest addresses or `lo-hi` ranges, one per line) is the
+  readers' side: within the same window, which code loads those addresses, printed as
+  `[readers] <addr> <pc>:<count> ...`. It answers where a value whose unit the frame rate
+  changes (a speed the game measures as this frame's position minus the last one's) is
+  consumed, which no static search tells apart from the other structures with a float at
+  the same offset.
 - `steps.txt` in the game's tables lists, per instruction address, which operand (`A`, `B`
   or `C`) carries the value from the previous frame. The recompiler emits that instruction
   through `runtime/step.cpp` (`ppc.translate_step`): `x += t` becomes `x += s*t`, `x *= k`
@@ -275,6 +281,16 @@ left.
   integer increment is taken on every `1/s`-th frame. The game sets `s` with
   `step_set_scale` (0.5 at twice the native rate) and calls `step_frame()` once a game
   frame. A patch in `patches.txt` at the same address wins.
+- A third column gives the power of `s` a site takes, 1 when absent. A game that
+  integrates a body by Verlet (`x += (x - x_prev) + F`, the displacement carried whole and
+  the force acting over the square of the step) is not a rate: the force's additions are
+  listed with power 2 and the position step is left alone, and the speed the game then
+  derives (`x - x_prev`, in units of the step) is stored with the letter `R` and power -1,
+  which scales the whole result back to the game's units for everything that reads it. The
+  letter `P` on an add or subtract raises operand B to the power instead of scaling it,
+  for the `1 - k` that sits beside a `k * x` when a damping is split into the part kept
+  and the part lost. Those sites are read out of the code, not found by the histogram,
+  and the game project keeps them in a table of their own that its emitter copies in.
 - `GCN_STEP_SKIP=<file>` leaves the listed sites (hex addresses or `lo-hi` ranges) unscaled
   and `GCN_STEP_ONLY=<file>` scales only those: how a site that breaks the game is bisected
   out of a list of hundreds without a rebuild.
