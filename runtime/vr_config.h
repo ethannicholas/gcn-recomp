@@ -93,6 +93,10 @@ struct VrConfig {
     // Start in stereo rather than theater. For a game with no stereo hook this is the
     // view until the left thumbstick is clicked.
     bool start_in_stereo = false;
+    // Whether clicking the left thumbstick switches between theater and stereo by hand. A
+    // game whose own answer is always right can turn it off, since a click lands by
+    // accident more often than on purpose; without a stereo hook it stays the only switch.
+    bool stereo_toggle = true;
 
     // Start with the game's own alternative eye (vr::GameHooks::set_first_person) on,
     // until the viewer has chosen; after that the app remembers the choice in

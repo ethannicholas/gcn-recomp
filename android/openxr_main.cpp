@@ -987,8 +987,11 @@ void android_main(android_app* app) {
     bool have_content = false;
     bool stereo = g_vrcfg.start_in_stereo, toggle_was_down = false, stereo_toggle_was_down = false;
     const auto wants_stereo = vr::game_hooks().wants_stereo;
-    LOGI("stereo: %s", wants_stereo ? "the game decides; left thumbstick click overrides"
-                                     : "left thumbstick click");
+    // The click stays the only switch for a game with no stereo hook, whatever vr.txt says.
+    const bool stereo_toggle = g_vrcfg.stereo_toggle || !wants_stereo;
+    LOGI("stereo: %s", !wants_stereo ? "left thumbstick click"
+                       : stereo_toggle ? "the game decides; left thumbstick click overrides"
+                                       : "the game decides");
     // `first_person` is the viewer's choice; it is *in effect* only in stereo. Leaving
     // stereo drops back to the game's camera at once, before the morph to theater begins:
     // the morph folds the world onto the panel the game's own camera drew, and starting it
@@ -1117,8 +1120,9 @@ void android_main(android_app* app) {
         }
 
         // Clicking the left thumbstick switches between theater and stereo. For a game that
-        // says which it wants, that overrides it until the game's answer next changes.
-        if (action_bool(g_xr.stereo_toggle)) {
+        // says which it wants, that overrides it until the game's answer next changes, unless
+        // the game has turned the click off (stereo_toggle).
+        if (stereo_toggle && action_bool(g_xr.stereo_toggle)) {
             if (!stereo_toggle_was_down) {
                 stereo = !stereo;
                 apply_view();

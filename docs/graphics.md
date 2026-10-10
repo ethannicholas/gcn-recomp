@@ -113,7 +113,11 @@ The second pass reuses the uploaded vertices and textures (`execute_batch`'s `ag
 redoes the EFB copies from its own EFB, so a game that samples a copy of its own frame gets
 each eye's. What it does not do is keep two EFBs: the second pass starts from the first's
 leftovers, as the next frame would, and a game that relies on what the EFB held at the end
-of the last frame sees the other eye's. Nothing seen so far does. Cost is a second flat pass,
+of the last frame sees the other eye's. Nothing seen so far does. A game that samples a copy
+of its own frame *by screen position* -- a water reflection cut from the frame and mapped
+back by where each vertex lands -- does suffer: the copy is remade for the second pass from
+the shifted camera, but the mapping was computed by the game for its own, so the reflection
+lands off; one game turned the pair off for that. Cost is a second flat pass,
 about twice theater's; the eye path is not involved, so the panel keeps the compositor's
 reprojection. `GCN_THEATER_STEREO=<metres>` runs it on the desktop and in the harness,
 with the frame dumps in `_l`/`_r` pairs.
