@@ -95,7 +95,9 @@ $adb = Join-Path $sdk 'platform-tools\adb.exe'
 $devices = & $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\sdevice$' }
 if (-not $devices) { throw "No device in 'device' state." }
 
-& $adb install -r $signed
+# -d: a debuggable package may be installed over one with a higher version code, which
+# is what a build from before a manifest change is.
+& $adb install -r -d $signed
 if ($LASTEXITCODE -ne 0) { throw "adb install failed" }
 
 # The image lives in the app's external files directory, which needs no runtime

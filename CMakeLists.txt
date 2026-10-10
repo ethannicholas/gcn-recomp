@@ -33,8 +33,10 @@ option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every pol
 #                              patch in TABLES may call into them: hooks the runtime offers a
 #                              game (render_set_eye_hook in runtime/gx/render_gl.h,
 #                              vr::GameHooks in runtime/vr_game.h), installed from a static
-#                              initializer. The benchmark has no renderer, so they must not
-#                              need one to link.
+#                              initializer. The benchmark has no renderer; the hook
+#                              installers it may call are stubbed there
+#                              (runtime/gx/render_stub.cpp), and anything more of the
+#                              renderer a game source needs must go through a hook.
 #   [ANDROID_PACKAGE <id>]     e.g. com.example.game. On an Android build, also build the
 #                              headset app (lib<target>.so, a NativeActivity that
 #                              tools/package-apk.ps1 packages) and <target>_egl, the
@@ -126,9 +128,9 @@ function(gcn_add_game)
   # ---- Runtime ----
   file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${RT}/*.cpp)
 
-  # Alternative entry points and the SDL-free audio stub: none of these may land in a
-  # target that already has main.cpp or audio.cpp.
-  list(REMOVE_ITEM RUNTIME_SOURCES ${RT}/bench_main.cpp ${RT}/audio_stub.cpp)
+  # Alternative entry points and the stubs: none of these may land in a target that
+  # already has main.cpp, audio.cpp or the renderer.
+  list(REMOVE_ITEM RUNTIME_SOURCES ${RT}/bench_main.cpp ${RT}/audio_stub.cpp ${RT}/gx/render_stub.cpp)
 
   # Everything below the renderer and the SDL frontend -- the CPU, OS, hardware and GX
   # front end, including the batch queue in gx/xf.cpp -- is free of both GL and SDL.
@@ -137,7 +139,9 @@ function(gcn_add_game)
     ${RT}/main.cpp ${RT}/audio.cpp ${RT}/audio_sdl.cpp ${RT}/png.cpp
     ${RT}/gx/render_gl.cpp ${RT}/gx/gl_load.cpp ${RT}/gx/shadergen.cpp)
   list(APPEND CORE_SOURCES ${RT}/audio_stub.cpp)
-  set(BENCH_SOURCES ${CORE_SOURCES} ${RT}/bench_main.cpp)
+  # The benchmark compiles the game's SOURCES too (gcn_add_game), and a game's eye hook
+  # installs itself into the renderer; render_stub.cpp answers those calls with nothing.
+  set(BENCH_SOURCES ${CORE_SOURCES} ${RT}/bench_main.cpp ${RT}/gx/render_stub.cpp)
 
   # Render target: desktop OpenGL 3.3 core, or OpenGL ES 3.2 for Android and standalone
   # headsets. One renderer source serves both; see runtime/gx/gl.h. GL entry points are
