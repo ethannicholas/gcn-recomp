@@ -24,7 +24,9 @@
 // Each site passes its address, so that GCN_STEP_SKIP=<file> (hex addresses or lo-hi
 // ranges, one per line) can leave listed sites unscaled, and GCN_STEP_ONLY=<file> all but
 // the listed ones: that is how a site that breaks the game is bisected out of a list of
-// hundreds without a rebuild.
+// hundreds without a rebuild. GCN_STEP_POW=<file> (lines of `<hex address> <power>`)
+// overrides the power of the listed sites, for trying a reading of a site (a force as a
+// rate, a rate as a force) before it goes into the table.
 #include "runtime.h"
 #include <cmath>
 #include <cstdio>
@@ -54,13 +56,36 @@ void load_list(const char* path, bool on_listed) {
     fclose(f);
     fprintf(stderr, "[step] %s: %d sites %s\n", path, n, on_listed ? "scaled, the rest not" : "left unscaled");
 }
+// Per code word: a power that replaces the site's own, or NaN. Empty means none.
+std::vector<float> g_pow;
+void load_powers(const char* path) {
+    g_pow.assign((g_recomp_code_end - g_recomp_code_base) / 4 + 1, NAN);
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "[step] cannot read %s\n", path); return; }
+    char line[128];
+    int n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char* end;
+        uint32_t a = (uint32_t)strtoul(line, &end, 16);
+        if (end == line || a < g_recomp_code_base || a >= g_recomp_code_end) continue;
+        g_pow[(a - g_recomp_code_base) / 4] = (float)strtod(end, nullptr);
+        n++;
+    }
+    fclose(f);
+    fprintf(stderr, "[step] %s: %d sites with their own power\n", path, n);
+}
 const bool lists_loaded = [] {
     if (const char* e = getenv("GCN_STEP_SKIP")) load_list(e, false);
     if (const char* e = getenv("GCN_STEP_ONLY")) load_list(e, true);
+    if (const char* e = getenv("GCN_STEP_POW")) load_powers(e);
     return true;
 }();
 inline double scale_at(uint32_t pc, double p) {
     if (!g_on.empty() && pc >= g_recomp_code_base && pc < g_recomp_code_end && !g_on[(pc - g_recomp_code_base) / 4]) return 1.0;
+    if (!g_pow.empty() && pc >= g_recomp_code_base && pc < g_recomp_code_end) {
+        float q = g_pow[(pc - g_recomp_code_base) / 4];
+        if (q == q) p = q;
+    }
     if (g_scale == 1.0 || p == 1.0) return g_scale;
     if (p == 2.0) return g_scale * g_scale;
     if (p == -1.0) return 1.0 / g_scale;

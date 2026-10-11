@@ -302,6 +302,9 @@ left.
 - `GCN_STEP_SKIP=<file>` leaves the listed sites (hex addresses or `lo-hi` ranges) unscaled
   and `GCN_STEP_ONLY=<file>` scales only those: how a site that breaks the game is bisected
   out of a list of hundreds without a rebuild.
+- `GCN_STEP_POW=<file>` (lines of `<hex address> <power>`) gives the listed sites that power
+  instead of the table's, for trying a reading of a site -- a force as a rate, a difference
+  converted or not -- against a run at the native rate before it goes into the table.
 
 What this cannot tell apart on its own is a counter from a cursor: an integer stepped by
 four was a buffer offset whose halving faulted the GX flush, and one stepped by another
