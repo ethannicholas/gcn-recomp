@@ -306,6 +306,17 @@ left.
 - `GCN_STEP_POW=<file>` (lines of `<hex address> <power>`) gives the listed sites that power
   instead of the table's, for trying a reading of a site -- a force as a rate, a difference
   converted or not -- against a run at the native rate before it goes into the table.
+- A body the game integrates in N passes a frame, each pass a complete step of a fixed
+  size (its forces, dampings and constraint corrections all inside the pass), is not
+  served by scaling the sites in the pass: that runs N passes of size s per paced frame,
+  N/s a game frame, and the dampings and corrections act too often, so the body is
+  stiffer and more damped than the game's. It runs as the game's own with N*s passes
+  of the original size per paced frame: the game patches the count and brackets the
+  loop with `step_override(1)` and `step_override(NAN)`, under which every site returns
+  the scale 1. Only what runs once a paced frame outside the loop (a control law, a
+  measurement over the frame) keeps the table's scaling. A writer watch on one
+  accumulator over a frame (`GCN_WATCH_ADDR`) shows the passes directly: the same
+  sequence of stores N times between two frame marks.
 
 What this cannot tell apart on its own is a counter from a cursor: an integer stepped by
 four was a buffer offset whose halving faulted the GX flush, and one stepped by another

@@ -27,6 +27,14 @@
 // hundreds without a rebuild. GCN_STEP_POW=<file> (lines of `<hex address> <power>`)
 // overrides the power of the listed sites, for trying a reading of a site (a force as a
 // rate, a rate as a force) before it goes into the table.
+//
+// A body the game integrates in N passes a frame, each pass a complete step (forces,
+// dampings, constraints) of a fixed size, is not helped by scaling the sites inside the
+// pass: that runs N passes of size s per paced frame, N/s a game frame, and the body's
+// dampings and corrections act too often. It runs as the game's own when the pass count
+// is N*s per paced frame and the passes keep their size, which the game arranges by
+// patching the count and bracketing the loop with step_override(1) and
+// step_override(NAN): while a finite override is set it replaces the scale at every site.
 #include "runtime.h"
 #include <cmath>
 #include <cstdio>
@@ -35,6 +43,7 @@
 
 namespace {
 double g_scale = 1.0;
+double g_override = NAN;   // replaces g_scale while a game's override is in force
 uint32_t g_frame = 0;
 
 // Per code word: is this site scaled. Empty means all are.
@@ -86,15 +95,17 @@ inline double scale_at(uint32_t pc, double p) {
         float q = g_pow[(pc - g_recomp_code_base) / 4];
         if (q == q) p = q;
     }
-    if (g_scale == 1.0 || p == 1.0) return g_scale;
-    if (p == 2.0) return g_scale * g_scale;
-    if (p == -1.0) return 1.0 / g_scale;
-    return pow(g_scale, p);
+    double s = g_override == g_override ? g_override : g_scale;
+    if (s == 1.0 || p == 1.0) return s;
+    if (p == 2.0) return s * s;
+    if (p == -1.0) return 1.0 / s;
+    return pow(s, p);
 }
 }
 
 void step_set_scale(double s) { g_scale = s > 0.0 ? s : 1.0; }
 double step_scale() { return g_scale; }
+void step_override(double s) { g_override = s; }
 void step_frame() { g_frame++; }
 
 extern "C" double gcn_step_scale(uint32_t pc, double p) { return scale_at(pc, p); }

@@ -76,6 +76,9 @@ void clock_set_cpu_scale(double n);
 void step_set_scale(double s);
 double step_scale();
 void step_frame();
+// While a finite value is set it replaces the step scale at every site (step.cpp, a body
+// the game integrates in several passes a frame); NAN ends the override.
+void step_override(double s);
 double clock_cpu_scale();
 void clock_update_limit();   // recompute g_vlimit from the next event / decrementer deadline
 void clock_pace();           // sleep if virtual time is ahead of real time (virtual clock only)
