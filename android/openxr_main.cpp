@@ -229,9 +229,14 @@ void android_main(android_app* app) {
     plat.instance_next = &android_info;
     plat.graphics_binding = graphics_binding;
     plat.image_type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
-    // The renderer writes linear RGBA, so prefer a linear format over sRGB to avoid a
-    // second gamma encode.
-    plat.formats = {GL_RGBA8};
+    // The renderer writes the game's own gamma-encoded colour, and a Quest takes GL_RGBA8
+    // as linear and encodes it again, which showed the game too bright from the first
+    // build to 2026-10-11 (docs/graphics.md, "The swapchain is sRGB"). An sRGB swapchain
+    // written with the encode off (EXT_sRGB_write_control, in create_swapchains) stores
+    // it as it is for the compositor to decode. GCN_XR_SRGB=0 takes the linear one, for
+    // comparing the two in the headset.
+    plat.formats = {GL_SRGB8_ALPHA8, GL_RGBA8};
+    if (const char* e = getenv("GCN_XR_SRGB"); e && *e == '0') plat.formats = {GL_RGBA8};
     plat.gl_proc = gl_proc;
     plat.pump = pump;
     if (!xrf::init(plat)) app_exit("OpenXR setup failed");

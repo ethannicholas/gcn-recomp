@@ -100,16 +100,22 @@ asks for the newest core profile from 4.6 down and falls back to the renderer's 
 Three things differ from GL ES, and each is confined to
 `#ifdef GCN_GL_ES` in the frontend or the renderer:
 
-- **The swapchain is sRGB.** The renderer writes the game's gamma-encoded colour. GL ES on a
-  standalone headset is given `GL_RGBA8` and shows it as it is, but a desktop runtime takes a
-  linear format at its word and encodes it again, which washes the picture out. So the
-  desktop asks for `GL_SRGB8_ALPHA8` first and writes it with `GL_FRAMEBUFFER_SRGB` off, which
-  stores the colour unchanged for the compositor to decode as sRGB. This is the correct
-  look; a standalone headset given `GL_RGBA8` also takes it as linear, so the GL ES path
-  shows the game too bright and wants the same treatment, which is harder there (the eyes
-  draw into the swapchain directly, and ES will not copy between encodings). `GCN_XR_SRGB=0` takes
-  `GL_RGBA8` instead, to compare the two in a headset. Meta's `OculusMirror.exe` shows what its
-  compositor makes of either; with sRGB it matched the window's frame.
+- **The swapchain is sRGB.** The renderer writes the game's gamma-encoded colour. A runtime
+  takes a linear format at its word and encodes it again, which washes the picture out, on a
+  PC runtime and on a standalone headset alike (the Quest build was given `GL_RGBA8` and was
+  too bright from its first build to 2026-10-11; the PC port, compared against the game's own
+  window with Meta's `OculusMirror.exe`, is what showed it). So both ask for `GL_SRGB8_ALPHA8`
+  first and write it with the encode off, which stores the colour unchanged for the compositor
+  to decode as sRGB. On desktop GL that is `GL_FRAMEBUFFER_SRGB`, off by default. On GL ES
+  writes to an sRGB image are always encoded unless `EXT_sRGB_write_control` is there to turn
+  it off (`glDisable(GL_FRAMEBUFFER_SRGB_EXT)`, in `create_swapchains`, which then clears a
+  scratch sRGB target to mid-grey and logs what it reads back: 128 stored as it is, 188
+  encoded); without the extension the linear format is taken. The eyes draw straight into the
+  swapchain images on ES, and ES refuses `glCopyTexSubImage2D` between an sRGB attachment and
+  a linear texture, so the renderer's eye grabs (`grab_eye`) take the encoding of the target
+  they copy from and, when sRGB, are read without decoding (`EXT_texture_sRGB_decode`): the
+  water and the spray see the same values either way. `GCN_XR_SRGB=0` takes `GL_RGBA8` on
+  either platform, to compare the two in a headset.
 - **The eyes draw into a target of their own.** There is no
   `GL_EXT_multisampled_render_to_texture` on the desktop, so an eye renders into a
   multisampled RGBA8 renderbuffer (`msaa` samples), is resolved into an RGBA8 texture, and is

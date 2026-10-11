@@ -107,8 +107,9 @@ in the env file replays an input log relative to that directory. Its log is
 *inactive* means the runtime has bound it to nothing present, which is how an API layer
 eating an input shows. Each implicit layer's manifest names a `disable_environment`
 variable; setting those one at a time finds the one responsible. On PC, `XR_RUNTIME_JSON`
-picks a runtime for one launch, `GCN_XR_SRGB=0` takes a linear swapchain (see `graphics.md`,
-"PC VR"), and Meta's `OculusMirror.exe` shows what its compositor sends to the headset.
+picks a runtime for one launch and Meta's `OculusMirror.exe` shows what its compositor sends
+to the headset; on either platform `GCN_XR_SRGB=0` takes a linear swapchain (see `graphics.md`,
+"PC VR").
 `GCN_GL_DEBUG=1` on the desktop makes a debug context and prints the driver's errors and
 high- and medium-severity messages, each distinct one counted rather than repeated.
 `GCN_AUDIO_DEVICE=<name>` opens that SDL output device instead of the default (the PC VR

@@ -274,6 +274,49 @@ bool create_swapchains() {
     int64_t chosen = formats.empty() ? 0 : formats[0];
     for (auto it = g_xr.plat.formats.rbegin(); it != g_xr.plat.formats.rend(); ++it)
         if (std::find(formats.begin(), formats.end(), *it) != formats.end()) chosen = *it;
+#ifdef GCN_GL_ES
+    // An sRGB swapchain on GL ES (docs/graphics.md, "The swapchain is sRGB"): the renderer
+    // draws the game's gamma-encoded colour straight into the swapchain images, and ES
+    // encodes every write to an sRGB image unless EXT_sRGB_write_control turns that off.
+    // Without the extension the linear format is the one that shows the game unchanged
+    // (too bright, but not twice encoded).
+    if (chosen == GL_SRGB8_ALPHA8) {
+        bool write_control = false;
+        GLint n = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+        for (GLint i = 0; i < n && !write_control; i++) {
+            const char* e = (const char*)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+            write_control = e && !strcmp(e, "GL_EXT_sRGB_write_control");
+        }
+        if (!write_control) {
+            LOGE("no GL_EXT_sRGB_write_control: taking a linear swapchain");
+            chosen = std::find(formats.begin(), formats.end(), (int64_t)GL_RGBA8) != formats.end()
+                         ? GL_RGBA8 : formats[0];
+        } else {
+            constexpr GLenum kFramebufferSrgbExt = 0x8DB9;
+            glDisable(kFramebufferSrgbExt);
+            // Proof, since the driver's word is all there is: clear an sRGB target to
+            // mid-grey and read it back. Stored as it is, that is 128; encoded, 188.
+            GLuint tex = 0, fbo = 0;
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glGenFramebuffers(1, &fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            glDisable(GL_SCISSOR_TEST);
+            glColorMask(1, 1, 1, 1);
+            glClearColor(128.0f / 255.0f, 128.0f / 255.0f, 128.0f / 255.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            unsigned char px[4] = {0, 0, 0, 0};
+            glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &fbo);
+            glDeleteTextures(1, &tex);
+            LOGI("sRGB swapchain, encode on write off: mid-grey stored as %u (128 is right, 188 is encoded)", px[0]);
+        }
+    }
+#endif
     LOGI("swapchain format 0x%llx", (unsigned long long)chosen);
 
     // What the runtime recommends per eye. Needed before the panel as well as after it:

@@ -157,7 +157,7 @@ static void morph_chain(const float P[16], MorphKind kind, float chain[16], floa
 // included. One texture serving both would quietly re-point the water's lookup -- and the
 // game's own final composite, which samples the same whole-frame copy -- at whatever the
 // spray grabbed later. See grab_eye().
-struct EyeGrab { GLuint tex; int w, h; };
+struct EyeGrab { GLuint tex; int w, h; bool srgb; };
 static EyeGrab g_eye_grab, g_spray_grab;
 static int g_eye_w, g_eye_h;
 static bool is_fullscreen_tex(uint32_t id);
@@ -914,10 +914,26 @@ static void mat4_mul(const float* a, const float* b, float* c) {
 // draw -- and the spray wants the same thing at a later moment, so a frame throwing
 // spray pays for two. See is_grab_tex().
 static void grab_eye(EyeGrab& g, int w, int h) {
-    if (!g.tex || g.w != w || g.h != h) {
+    // The copy must keep the target's encoding: GL ES refuses glCopyTexSubImage2D between
+    // an sRGB attachment and a linear texture or the other way round, and a headset's eye
+    // is an sRGB swapchain image (openxr/xr_frontend.cpp, create_swapchains). An sRGB grab
+    // is then read without decoding (EXT_texture_sRGB_decode), so the shader sees the
+    // same values it would from a linear one: the game's own, never converted.
+    GLint encoding = GL_LINEAR, target = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target);
+    if (target)  // the default framebuffer has no GL_COLOR_ATTACHMENT0 to ask about
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                              GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING, &encoding);
+    const bool srgb = encoding == GL_SRGB;
+    if (!g.tex || g.w != w || g.h != h || g.srgb != srgb) {
         if (!g.tex) glGenTextures(1, &g.tex);
         glBindTexture(GL_TEXTURE_2D, g.tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        if (srgb) {
+            constexpr GLenum kTextureSrgbDecodeExt = 0x8A48, kSkipDecodeExt = 0x8A4A;
+            glTexParameteri(GL_TEXTURE_2D, kTextureSrgbDecodeExt, kSkipDecodeExt);
+        }
+        g.srgb = srgb;
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
