@@ -103,6 +103,17 @@ the runtime starts; `gcn_input.txt` there holds a `GCN_INPUT` script, and `GCN_R
 in the env file replays an input log relative to that directory. Its log is
 `adb logcat -s <game>`, with compositor and game frame counts every five seconds.
 
+`GCN_XR_INPUT_LOG=1` (either frontend) prints every button action's state on change:
+*inactive* means the runtime has bound it to nothing present, which is how an API layer
+eating an input shows. Each implicit layer's manifest names a `disable_environment`
+variable; setting those one at a time finds the one responsible. On PC, `XR_RUNTIME_JSON`
+picks a runtime for one launch, `GCN_XR_SRGB=0` takes a linear swapchain (see `graphics.md`,
+"PC VR"), and Meta's `OculusMirror.exe` shows what its compositor sends to the headset.
+`GCN_GL_DEBUG=1` on the desktop makes a debug context and prints the driver's errors and
+high- and medium-severity messages, each distinct one counted rather than repeated.
+`GCN_AUDIO_DEVICE=<name>` opens that SDL output device instead of the default (the PC VR
+shell picks the headset's on Meta's runtime by itself).
+
 ## Measuring the guest
 
 `GCN_PROFILE=<file>` (Linux and Android) samples the host's program counters with a profiling
@@ -322,6 +333,30 @@ What this cannot tell apart on its own is a counter from a cursor: an integer st
 four was a buffer offset whose halving faulted the GX flush, and one stepped by another
 word was a sum that stalled the game, so the game project's list keeps integer steps to
 those that count by one. The method and what it found are in the game project's notes.
+
+## Motion telemetry
+
+`runtime/telemetry.h`: a game publishes its vehicle's motion once a game frame, and
+`--telemetry[=host:port]` on the desktop (or `GCN_TELEMETRY`, empty for the default) sends it
+as SimRacingStudio's custom-game API packet to `127.0.0.1:33001`. `GCN_TELEMETRY_LOG=1`, or
+`log 1` in `telemetry.txt`, prints what is sent twice a second, plus every ease to or from rest
+and every crossfade.
+
+What is sent can never step, whatever the game publishes. A motion platform moves a person.
+The output eases to and from rest, crossfades across anything the game marks
+`Motion::discontinuity`, sends yaw washed out, and is clamped in range and rate per channel last
+of all. The reasons are in `publish()`. A game still has to mark its own discontinuities and
+must not difference across a pause: a frozen vehicle reads as a dead stop.
+
+The packet is version 102 of SRS's "api" format. Its layout comes from SRS's own listener,
+which unpacks it with Python's `struct` format `3sI50s50s50sfffifffffffffffIIII` and no
+byte-order prefix, so in Python's native alignment: 236 bytes, a pad byte after the `api` tag
+and two after the three 50-byte strings. Field names, in order: tag, version, game, vehicle,
+location, speed (km/h), rpm, max rpm, gear, pitch, roll, yaw, lateral velocity, lateral,
+vertical and longitudinal acceleration, four suspension travels, four wheel terrains. A version
+103 with longitudinal velocity, steering angle, fan powers and wind direction also exists. Its
+field order is not known, so it is not sent. A listener that decodes with that same format string
+is the way to test without moving a rig, given SRS holds 33001: send to another port.
 
 ## Panics and faults
 

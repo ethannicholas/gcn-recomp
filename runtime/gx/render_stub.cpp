@@ -9,4 +9,6 @@
 namespace gx {
 void render_set_eye_hook(EyeHook) {}
 void render_set_first_person(bool) {}
+bool render_first_person() { return false; }
+void render_set_frame_hook(FrameHook) {}
 }  // namespace gx

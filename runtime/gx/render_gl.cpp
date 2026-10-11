@@ -928,6 +928,27 @@ static void grab_eye(EyeGrab& g, int w, int h) {
     } else {
         glBindTexture(GL_TEXTURE_2D, g.tex);
     }
+#ifndef GCN_GL_ES
+    // A desktop eye target is an ordinary multisampled framebuffer, which cannot be copied
+    // from, only resolved by a blit. (On GL ES the samples are the render-to-texture
+    // extension's and the copy resolves them itself.) The blit honours the scissor; the
+    // caller invalidates the state cache after a grab, which puts it back.
+    GLint samples = 0;
+    glGetIntegerv(GL_SAMPLE_BUFFERS, &samples);
+    if (samples > 0) {
+        static GLuint resolve_fbo;
+        if (!resolve_fbo) glGenFramebuffers(1, &resolve_fbo);
+        GLint target = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.tex, 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)target);
+        glDisable(GL_SCISSOR_TEST);
+        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)target);
+        return;
+    }
+#endif
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
 }
 
@@ -1753,6 +1774,20 @@ void render_set_depth_layers(float background_from, float foreground_to, float f
 }
 
 void render_set_eye_hook(EyeHook hook) { g_eye_hook = hook; }
+static FrameHook g_frame_hook = nullptr;
+void render_set_frame_hook(FrameHook hook) { g_frame_hook = hook; }
+static void mark_offscreen_passes(const Batch& b, std::vector<uint8_t>& skip);
+// The game's look at a batch about to be drawn (render_set_frame_hook). `skip` is the
+// off-screen passes if the caller has them already.
+static void frame_observe(const Batch& b, const std::vector<uint8_t>* skip) {
+    if (!g_frame_hook) return;
+    static std::vector<uint8_t> own;
+    if (!skip) {
+        mark_offscreen_passes(b, own);
+        skip = &own;
+    }
+    g_frame_hook(b, *skip);
+}
 void render_set_eye_filter(EyeFilter filter) { g_eye_filter = filter; }
 
 // What an eye filter is told about a draw; see EyeFilter.
@@ -1773,6 +1808,8 @@ static EyeDrawFacts draw_facts(const PixelState& st) {
     }
     return f;
 }
+
+bool render_first_person() { return g_fp_on; }
 
 void render_set_first_person(bool on) {
     g_fp_on = on;
@@ -2172,6 +2209,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     double ms_flat = 0.0;
     size_t n_trimmed = 0;
     if (do_copies) {
+        frame_observe(b, &skip);
         // Where the eye stands and what it leaves out are read off the batch, so they
         // are settled before anything is drawn from it -- the flat pass included, which
         // leaves the hidden draws out of the EFB too.
@@ -2695,6 +2733,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
 }
 
 bool render_execute(Batch& b) {
+    frame_observe(b, nullptr);
     g_hide.clear();   // the flat view shows everything, whatever the eyes leave out
     return execute_batch(b, true);
 }
@@ -2703,6 +2742,7 @@ void render_set_panel_band(float band) { g_panel_band = band; }
 
 bool render_execute_stereo_pair(Batch& b, unsigned fbo_l, unsigned fbo_r, float eye_sep,
                                 float panel_width) {
+    frame_observe(b, nullptr);
     g_hide.clear();
     const GLuint out = g_output_fbo;
     g_flat_halfw = panel_width > 0.0f ? 0.5f * panel_width : 1.0f;

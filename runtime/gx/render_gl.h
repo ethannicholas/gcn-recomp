@@ -110,6 +110,15 @@ struct EyeOverride {
 using EyeHook = bool (*)(const Batch& b, const std::vector<uint8_t>& offscreen, uint32_t frame, EyeOverride& out);
 void render_set_eye_hook(EyeHook hook);
 void render_set_first_person(bool on);
+bool render_first_person();   // what render_set_first_person last said
+
+// A game's look at every frame the renderer is given, however it is drawn -- flat, as a
+// stereo pair or through the eyes: called once per batch, before anything is drawn from it
+// and before the eye hook, with the off-screen passes marked as the eye hook gets them. For
+// a game that follows something on screen every frame whatever the view -- its player's
+// vehicle, for motion telemetry, say.
+using FrameHook = void (*)(const Batch& b, const std::vector<uint8_t>& offscreen);
+void render_set_frame_hook(FrameHook hook);
 
 // Draw one eye's view of a batch into `fbo`. Both eyes share the vertex buffer, the
 // CPU-side transform and any render-to-texture results, so only uniforms and draw

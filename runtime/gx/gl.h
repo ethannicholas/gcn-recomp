@@ -53,3 +53,8 @@ using GLLoadProc = void* (*)(const char* name);
 // "GDI Generic" 1.1, say) resolves successfully but leaves every GL 2.0+ entry point
 // null, so calling into the renderer afterwards would dereference a null pointer.
 int gl_load_with(GLLoadProc proc);
+
+// GCN_GL_DEBUG: the driver's debug output (GL 4.3 / KHR_debug) on stderr -- errors and
+// anything it rates high or medium, each distinct message counted rather than repeated.
+// Needs a context created with the debug flag. False if the driver has no debug output.
+bool gl_debug_enable(GLLoadProc proc);

@@ -8,6 +8,10 @@
 #include "gx/gl.h"
 #include "hw/pad.h"
 #include "vr_game.h"
+#include "telemetry.h"
+#ifdef GCN_OPENXR
+#include "xr_desktop.h"
+#endif
 #ifdef _WIN32
 // Console app: keep our own main() rather than SDL2main's WinMain shim.
 #define SDL_MAIN_HANDLED
@@ -128,9 +132,10 @@ static uint8_t axis_to_u8(int v, bool invert) {
     return (uint8_t)std::clamp(r, 0, 255);
 }
 
-static void update_pad() {
-    PadState p;
-    p.connected = true;
+// The keyboard and the first game controller, merged into `p`: buttons are added, and a
+// stick or trigger is taken over only while it is pushed, so that they can share the pad
+// with a headset's controllers (xr_desktop.cpp).
+static void merge_desktop_pad(PadState& p) {
     const uint8_t* k = SDL_GetKeyboardState(nullptr);
     if (k[SDL_SCANCODE_RETURN]) p.buttons |= PAD_START;
     if (k[SDL_SCANCODE_X]) p.buttons |= PAD_A;
@@ -149,8 +154,10 @@ static void update_pad() {
     if (k[SDL_SCANCODE_RIGHT]) sx += 100;
     if (k[SDL_SCANCODE_UP]) sy += 100;
     if (k[SDL_SCANCODE_DOWN]) sy -= 100;
-    p.stick_x = (uint8_t)(128 + sx);
-    p.stick_y = (uint8_t)(128 + sy);
+    if (sx || sy) {
+        p.stick_x = (uint8_t)(128 + sx);
+        p.stick_y = (uint8_t)(128 + sy);
+    }
     if (g_ctrl) {
         auto b = [&](SDL_GameControllerButton btn) { return SDL_GameControllerGetButton(g_ctrl, btn); };
         if (b(SDL_CONTROLLER_BUTTON_A)) p.buttons |= PAD_A;
@@ -166,15 +173,34 @@ static void update_pad() {
         int lx = SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_LEFTX);
         int ly = SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_LEFTY);
         if (abs(lx) > 4000 || abs(ly) > 4000) { p.stick_x = axis_to_u8(lx, false); p.stick_y = axis_to_u8(ly, true); }
-        p.cstick_x = axis_to_u8(SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_RIGHTX), false);
-        p.cstick_y = axis_to_u8(SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_RIGHTY), true);
+        int rx = SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_RIGHTX);
+        int ry = SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_RIGHTY);
+        if (abs(rx) > 1000 || abs(ry) > 1000) { p.cstick_x = axis_to_u8(rx, false); p.cstick_y = axis_to_u8(ry, true); }
         int lt = SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
         int rt = SDL_GameControllerGetAxis(g_ctrl, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
-        if (lt > 1000) { p.trig_l = (uint8_t)(lt * 255 / 32767); if (lt > 30000) p.buttons |= PAD_L; }
-        if (rt > 1000) { p.trig_r = (uint8_t)(rt * 255 / 32767); if (rt > 30000) p.buttons |= PAD_R; }
+        if (lt > 1000) { p.trig_l = std::max(p.trig_l, (uint8_t)(lt * 255 / 32767)); if (lt > 30000) p.buttons |= PAD_L; }
+        if (rt > 1000) { p.trig_r = std::max(p.trig_r, (uint8_t)(rt * 255 / 32767)); if (rt > 30000) p.buttons |= PAD_R; }
     }
+}
+
+static void update_pad() {
+    PadState p;
+    p.connected = true;
+    merge_desktop_pad(p);
     input_script_apply(p);
     pad_set_state(0, p);
+}
+
+// The window's events. False once the user has asked to quit.
+static bool pump_events() {
+    SDL_Event e;
+    bool running = true;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) running = false;
+        else if (e.type == SDL_CONTROLLERDEVICEADDED && !g_ctrl) g_ctrl = SDL_GameControllerOpen(e.cdevice.which);
+        else if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
+    }
+    return running;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,8 +210,10 @@ int main(int argc, char** argv) {
     if (!plat_readable(iso_default.c_str())) iso_default = plat_find_file("rom", ".iso");
     if (iso_default.empty()) iso_default = plat_find_file("rom", ".ciso");
     const char* iso = iso_default.c_str();
-    bool headless = false, hidden = false, input_log = true, first_person = false, fast = false;
+    bool headless = false, hidden = false, input_log = true, first_person = false, fast = false, vr = false;
     std::string input_log_dir, replay_dir;
+    // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
+    const char* telemetry_to = getenv("GCN_TELEMETRY");
     int scale = 2;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--log-all")) for (auto& e : g_log_enabled) e = true;
@@ -193,6 +221,9 @@ int main(int argc, char** argv) {
             if (!log_enable_list(argv[i] + 6)) { fprintf(stderr, "--log: unknown category in %s (cpu,os,hw,dvd,gx,vi,si,exi,dsp,ai,thr)\n", argv[i] + 6); return 1; }
         }
         else if (!strcmp(argv[i], "--eye")) g_eye_mode = true;
+        else if (!strcmp(argv[i], "--vr")) vr = true;
+        else if (!strcmp(argv[i], "--telemetry")) telemetry_to = "";
+        else if (!strncmp(argv[i], "--telemetry=", 12)) telemetry_to = argv[i] + 12;
         else if (!strcmp(argv[i], "--first-person")) first_person = true;
         else if (!strcmp(argv[i], "--no-input-log")) input_log = false;
         else if (!strncmp(argv[i], "--input-log=", 12)) input_log_dir = argv[i] + 12;
@@ -208,6 +239,16 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') iso = argv[i];
     }
     plat_install_crash_handlers(on_interrupt, on_fault);
+    if (telemetry_to && !telemetry::configure(telemetry_to)) {
+        fprintf(stderr, "--telemetry: could not set up the telemetry socket\n");
+        return 1;
+    }
+#ifndef GCN_OPENXR
+    if (vr) {
+        fprintf(stderr, "--vr: this build has no OpenXR frontend (GCN_OPENXR is off, or this platform has none).\n");
+        return 1;
+    }
+#endif
 
     if (!plat_readable(iso)) {
         fprintf(stderr, "No game image found. Put your " GCN_GAME_TITLE " .iso or .ciso in rom/ or pass its path.\n");
@@ -255,16 +296,30 @@ int main(int argc, char** argv) {
     SDL_SetMainReady();
 #endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) fatal("SDL_Init: %s", SDL_GetError());
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, GCN_GL_MAJOR);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, GCN_GL_MINOR);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+    const bool gl_debug = getenv("GCN_GL_DEBUG") != nullptr;
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG |
+                                                  (gl_debug ? SDL_GL_CONTEXT_DEBUG_FLAG : 0));
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_Window* win = SDL_CreateWindow(GCN_GAME_TITLE " (recompiled)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        1280, 960, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
                                        (hidden ? SDL_WINDOW_HIDDEN : 0));
     if (!win) fatal("SDL_CreateWindow: %s", SDL_GetError());
-    SDL_GLContext ctx = SDL_GL_CreateContext(win);
+    // Ask for the newest core profile first: the renderer needs only GCN_GL_MAJOR.MINOR, but an
+    // OpenXR runtime may want more of the context it shares (Meta's wants 4.0), and drivers
+    // hand back exactly the version asked for.
+    SDL_GLContext ctx = nullptr;
+    static const int kTry[][2] = {{4, 6}, {4, 5}, {4, 3}, {4, 1}, {4, 0}};
+    for (const auto& v : kTry) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, v[0]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, v[1]);
+        if ((ctx = SDL_GL_CreateContext(win))) break;
+    }
+    if (!ctx) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, GCN_GL_MAJOR);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, GCN_GL_MINOR);
+        ctx = SDL_GL_CreateContext(win);
+    }
     static const char* kGLHelp =
         "  The renderer needs an OpenGL " GCN_STR(GCN_GL_MAJOR) "." GCN_STR(GCN_GL_MINOR)
         " core profile. If this host only\n"
@@ -281,9 +336,19 @@ int main(int argc, char** argv) {
               glGetString(GL_RENDERER) ? (const char*)glGetString(GL_RENDERER) : "?", kGLHelp);
     }
     LOG(LOG_GX, "GL: %s / %s", glGetString(GL_RENDERER), glGetString(GL_VERSION));
+    if (gl_debug) gl_debug_enable(SDL_GL_GetProcAddress);
     // Beside the memory card: both are state this machine accumulates for this game.
     plat_make_dirs("saves");
     gx::render_set_shader_cache("saves/shaders.bin");
+#ifdef GCN_OPENXR
+    // --vr: the headset takes over from here, the window staying up as a mirror.
+    if (vr) {
+        const int rc = xr_desktop_main({win, pump_events, merge_desktop_pad}, iso);
+        input_log_end();
+        threads_request_quit();
+        plat_exit_now(rc);
+    }
+#endif
     gx::render_init(scale);
     if (g_eye_mode) eye_init();
     if (first_person) gx::render_set_first_person(true);
@@ -299,12 +364,7 @@ int main(int argc, char** argv) {
     const float theater_stereo_m = getenv("GCN_THEATER_STEREO") ? (float)atof(getenv("GCN_THEATER_STEREO")) : 0.0f;
     auto t0 = std::chrono::steady_clock::now();
     while (running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = false;
-            else if (e.type == SDL_CONTROLLERDEVICEADDED && !g_ctrl) g_ctrl = SDL_GameControllerOpen(e.cdevice.which);
-            else if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
-        }
+        running = pump_events();
         update_pad();
         int dw, dh;
         SDL_GL_GetDrawableSize(win, &dw, &dh);

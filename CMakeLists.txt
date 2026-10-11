@@ -19,6 +19,34 @@ option(GCN_BENCH_ONLY "Build only the headless benchmark (no SDL2, no renderer)"
 option(GCN_TRACE_CALLS "Maintain a guest call stack (diagnostics)" OFF)
 option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every poll, DMA and frame (diagnostics)" OFF)
 
+# PC VR: the desktop executable's --vr. Windows only for now: the frontend binds OpenXR to
+# the window's WGL context (openxr/xr_desktop.cpp), and no other desktop binding is written.
+if(WIN32 AND NOT GCN_BENCH_ONLY)
+  set(_gcn_openxr_default ON)
+else()
+  set(_gcn_openxr_default OFF)
+endif()
+option(GCN_OPENXR "Build the desktop executable's OpenXR frontend (--vr)" ${_gcn_openxr_default})
+
+# The OpenXR loader, from Khronos' SDK source at the version the Android build's AAR is.
+# Static, and nothing but the loader.
+macro(_gcn_fetch_openxr_loader)
+  if(NOT TARGET openxr_loader)
+    include(FetchContent)
+    set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+    set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SDK_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_ALL_EXTENSIONS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(openxr_sdk
+      URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.63.tar.gz
+      URL_HASH SHA256=5b8dac0608f49498fe8e95f562fe6bcf0bc781e561f137348a8c251d06a88b6f
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(openxr_sdk)
+  endif()
+endmacro()
+
 # gcn_add_game(
 #   NAME <target>              executable name; the benchmark is <target>_bench
 #   TITLE <string>             shown in the window title and messages
@@ -200,8 +228,9 @@ function(gcn_add_game)
   elseif(APPLE)
     list(APPEND GCN_PLATFORM_LIBS "-framework OpenGL")
   elseif(WIN32)
-    # opengl32 for the GL entry points, dbghelp to symbolize crash backtraces.
-    list(APPEND GCN_PLATFORM_LIBS opengl32 dbghelp)
+    # opengl32 for the GL entry points, dbghelp to symbolize crash backtraces, ws2_32 for
+    # telemetry's socket.
+    list(APPEND GCN_PLATFORM_LIBS opengl32 dbghelp ws2_32)
   else()
     find_package(OpenGL REQUIRED)
     list(APPEND GCN_PLATFORM_LIBS OpenGL::GL)
@@ -227,7 +256,7 @@ function(gcn_add_game)
     target_compile_options(${G_NAME}_bench PRIVATE ${GCN_RUNTIME_WARNINGS})
     target_compile_definitions(${G_NAME}_bench PRIVATE ${GCN_GAME_DEFS})
     if(WIN32)
-      target_link_libraries(${G_NAME}_bench PRIVATE dbghelp)
+      target_link_libraries(${G_NAME}_bench PRIVATE dbghelp ws2_32)
     endif()
   endif()
 
@@ -255,6 +284,17 @@ function(gcn_add_game)
     target_link_libraries(${G_NAME} PRIVATE game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS})
     target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
     target_compile_definitions(${G_NAME} PRIVATE ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
+
+    # PC VR (--vr): the headset frontend in openxr/, on the window's own GL context. The
+    # loader is Khronos' own, built from source and linked statically, so the executable
+    # finds whichever runtime the system has active with nothing beside it.
+    if(GCN_OPENXR)
+      _gcn_fetch_openxr_loader()
+      target_sources(${G_NAME} PRIVATE ${GCN_RECOMP_DIR}/openxr/xr_frontend.cpp ${GCN_RECOMP_DIR}/openxr/xr_desktop.cpp)
+      target_include_directories(${G_NAME} PRIVATE ${GCN_RECOMP_DIR}/openxr ${RT})
+      target_link_libraries(${G_NAME} PRIVATE openxr_loader $<$<PLATFORM_ID:Windows>:ole32>)
+      target_compile_definitions(${G_NAME} PRIVATE GCN_OPENXR)
+    endif()
   endif()
 
   # ---- Android headset app and harness ----
@@ -297,9 +337,9 @@ function(gcn_add_game)
     # The installable app: android.app.NativeActivity loads lib<name>.so and calls
     # android_main(), so there is no Java source at all. The library name must match the
     # manifest's android.app.lib_name, which the template below fills in.
-    add_library(${G_NAME} SHARED ${ANDROID_SOURCES} ${AND_DIR}/openxr_main.cpp)
+    add_library(${G_NAME} SHARED ${ANDROID_SOURCES} ${AND_DIR}/openxr_main.cpp ${GCN_RECOMP_DIR}/openxr/xr_frontend.cpp)
     _gcn_set_standards(${G_NAME})
-    target_include_directories(${G_NAME} PRIVATE ${AND_DIR} ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR} ${OPENXR_INCLUDE})
+    target_include_directories(${G_NAME} PRIVATE ${AND_DIR} ${GCN_RECOMP_DIR}/openxr ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR} ${OPENXR_INCLUDE})
     target_link_libraries(${G_NAME} PRIVATE game_recomp native_app_glue ${OPENXR_LIB} EGL android log aaudio)
     target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
     # No default image: the app finds game.iso or game.ciso in its own files directory.

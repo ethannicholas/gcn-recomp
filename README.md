@@ -64,9 +64,12 @@ The game project provides:
   `cpu.cpp`, `threads.cpp` and `hle_os.cpp` are the CPU and OS; `hw/` the hardware
   registers; `gx/` the graphics pipeline; `main.cpp` the SDL frontend and `bench_main.cpp`
   the benchmark.
-- `android/`: the headset frontends. `openxr_main.cpp` is the OpenXR app (the game on a
-  theater panel or in stereo, Touch controllers as the pad), `egl_main.cpp` the headless
-  harness and `audio_aaudio.cpp` the audio device. The `vr.txt` settings
+- `openxr/`: the OpenXR frontend (the game on a theater panel or in stereo, the headset's
+  controllers as the pad). `xr_frontend.cpp` is the core every platform shares;
+  `xr_desktop.cpp` puts it on the desktop's GL context for PC VR (`--vr`, Windows).
+- `android/`: the standalone headset's shells. `openxr_main.cpp` puts the OpenXR frontend on
+  EGL and the NativeActivity, `egl_main.cpp` is the headless harness and `audio_aaudio.cpp`
+  the audio device. The `vr.txt` settings
   (`runtime/vr_config.*`) and what a game tells the headset (`runtime/vr_game.h`) are in the
   runtime, so the desktop can check a game's hooks too.
 - `tools/package-apk.ps1`: packages the app into an APK without Gradle, and installs it.

@@ -83,6 +83,50 @@ game's business: `render_set_eye_hook` takes a per-frame callback that returns a
 transform, a HUD transform and the draws to leave out, and a game project installs it.
 Nothing here knows what the game is.
 
+`render_set_frame_hook` is the other half: a game's look at every batch the renderer is given,
+flat or stereo, before anything is drawn from it and before the eye hook, with the off-screen
+passes marked. A game that follows something on screen in every view -- its player's vehicle,
+for motion telemetry -- does its finding there, and its eye hook can then hand back what the
+frame hook already worked out for the same batch. `render_first_person()` tells the frame
+hook whether the eye will want it.
+
+## PC VR: OpenXR on desktop GL
+
+`openxr/xr_frontend.cpp` is the OpenXR frontend for every platform; `openxr/xr_desktop.cpp`
+binds it to the SDL window's WGL context through `XR_KHR_opengl_enable` (`--vr`), and
+`android/openxr_main.cpp` to EGL. A runtime may want a newer context than the renderer does
+(Meta's PC runtime wants 4.0, and a driver asked for 3.3 gives exactly 3.3), so the desktop
+asks for the newest core profile from 4.6 down and falls back to the renderer's minimum.
+Three things differ from GL ES, and each is confined to
+`#ifdef GCN_GL_ES` in the frontend or the renderer:
+
+- **The swapchain is sRGB.** The renderer writes the game's gamma-encoded colour. GL ES on a
+  standalone headset is given `GL_RGBA8` and shows it as it is, but a desktop runtime takes a
+  linear format at its word and encodes it again, which washes the picture out. So the
+  desktop asks for `GL_SRGB8_ALPHA8` first and writes it with `GL_FRAMEBUFFER_SRGB` off, which
+  stores the colour unchanged for the compositor to decode as sRGB. This is the correct
+  look; a standalone headset given `GL_RGBA8` also takes it as linear, so the GL ES path
+  shows the game too bright and wants the same treatment, which is harder there (the eyes
+  draw into the swapchain directly, and ES will not copy between encodings). `GCN_XR_SRGB=0` takes
+  `GL_RGBA8` instead, to compare the two in a headset. Meta's `OculusMirror.exe` shows what its
+  compositor makes of either; with sRGB it matched the window's frame.
+- **The eyes draw into a target of their own.** There is no
+  `GL_EXT_multisampled_render_to_texture` on the desktop, so an eye renders into a
+  multisampled RGBA8 renderbuffer (`msaa` samples), is resolved into an RGBA8 texture, and is
+  then blitted into the swapchain image. The resolve has its own stop because a multisampled
+  blit may not change format, and the swapchain's is sRGB.
+- **The eye grab resolves.** The water and the spray copy the eye's own image mid-frame
+  (`grab_eye`). `glCopyTexSubImage2D` cannot read a multisampled framebuffer, so on the desktop
+  a multisampled target is blitted into the grab texture instead. (On GL ES the copy resolves
+  the render-to-texture samples itself.)
+
+The loader is Khronos' OpenXR-SDK at the same release as the Android AAR, fetched as source by
+CMake and linked statically (`GCN_OPENXR`, on by default on Windows), so the executable finds
+the system's active runtime with nothing beside it. On the machine this was written on,
+SteamVR, Virtual Desktop and NVIDIA CloudXR all offered `XR_KHR_opengl_enable`. The
+OpenXR-MotionCompensation layer draws its own overlay only into D3D11 and D3D12 sessions, so
+with GL that overlay is missing; whether its compensation still works with GL is untested.
+
 ## The theater panel as a stereo pair
 
 A game's 2D views -- menus, maps, a third-person camera -- are drawn by the game as 3D
