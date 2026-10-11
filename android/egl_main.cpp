@@ -81,9 +81,14 @@ static int g_fp_lo = -1, g_fp_hi = -1;
 static VrConfig g_vrcfg;
 
 static void eye_init() {
+    // GCN_EYE_SRGB=1 gives the eye the headset's target: an sRGB image written with the
+    // encode off (EXT_sRGB_write_control), as the OpenXR frontend's swapchain is, so that
+    // the renderer's grab path into sRGB textures runs here, where it can be timed and dumped.
+    const bool srgb = getenv("GCN_EYE_SRGB") && atoi(getenv("GCN_EYE_SRGB")) != 0;
+    if (srgb) glDisable(0x8DB9 /* GL_FRAMEBUFFER_SRGB_EXT */);
     glGenTextures(1, &g_eye_tex);
     glBindTexture(GL_TEXTURE_2D, g_eye_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_eye_w, g_eye_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8, g_eye_w, g_eye_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     const gx::Msrtt ms = g_eye_msaa > 1 ? gx::msrtt_load(gl_proc) : gx::Msrtt{};
