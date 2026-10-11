@@ -15,7 +15,9 @@
 
 uint8_t* g_mem;
 uint8_t* g_aram;
-bool g_log_enabled[LOG_COUNT] = {true, true, false, true, false, false, false, false, false, false, false};
+// Off by default: DVD, whose reads happen every frame and drown the rest of the console.
+// `--log=dvd` or `--log-all` turns them on.
+bool g_log_enabled[LOG_COUNT] = {true, true, false, false, false, false, false, false, false, false, false};
 
 static std::mutex g_log_mutex;
 static const char* kLogNames[LOG_COUNT] = {"CPU", "OS", "HW", "DVD", "GX", "VI", "SI", "EXI", "DSP", "AI", "THR"};

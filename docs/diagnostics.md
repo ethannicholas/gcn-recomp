@@ -241,7 +241,8 @@ use, which every lookup prolonged.
   `GCN_COUNT=addr,...` (call counts per function, printed on interrupt),
   `GCN_WATCH_ADDR=<hex>` (report every change to that word) and the store histogram
   below.
-- `--log-all` enables every log category, including the DSP mailbox and DVD reads;
+- `--log-all` enables every log category, including the DSP mailbox and DVD reads (off by
+  default, since the game reads the disc every frame);
   `--log=exi,dsp` enables just those (`cpu os hw dvd gx vi si exi dsp ai thr`).
 - Build with `-DGCN_GUEST_CHECKS=ON` to call the game project's consistency check (a
   function installed with `debug_set_guest_check`, which inspects the guest's own data
