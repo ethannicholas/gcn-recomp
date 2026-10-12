@@ -301,7 +301,7 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG |
                                                   (gl_debug ? SDL_GL_CONTEXT_DEBUG_FLAG : 0));
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_Window* win = SDL_CreateWindow(GCN_GAME_TITLE " (recompiled)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    SDL_Window* win = SDL_CreateWindow(GCN_APP_LABEL, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        1280, 960, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
                                        (hidden ? SDL_WINDOW_HIDDEN : 0));
     if (!win) fatal("SDL_CreateWindow: %s", SDL_GetError());
@@ -418,7 +418,7 @@ int main(int argc, char** argv) {
             double secs = std::chrono::duration<double>(now - t0).count();
             if (secs >= 2.0) {
                 char title[128];
-                snprintf(title, sizeof(title), GCN_GAME_TITLE " (recompiled) - %.1f fps", frames / secs);
+                snprintf(title, sizeof(title), GCN_APP_LABEL " - %.1f fps", frames / secs);
                 SDL_SetWindowTitle(win, title);
                 frames = 0;
                 t0 = now;

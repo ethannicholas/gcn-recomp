@@ -1,7 +1,6 @@
 // High-level emulation of the AX audio ucode (the "old" 2001 GameCube variant):
 // processes the command lists the AX library sends, mixes voices from ARAM and
 // writes the final 5ms stereo block that the AI DMA plays.
-// Behaviour follows Dolphin's AXUCode / AXVoice HLE.
 #include "../runtime.h"
 #include "ax.h"
 #include <algorithm>
@@ -133,7 +132,7 @@ void process_voice(PB& pb, int offset) {
     if (offset == 0) g_stat_voices++;
     int16_t samples[SPMS];
     Accel acc(pb);
-    // Sample rate conversion (linear interpolation, like Dolphin for linear/polyphase).
+    // Sample rate conversion: linear interpolation, for the linear and polyphase modes alike.
     uint32_t ratio = pb.get32(PB_RATIO_HI);
     uint32_t pos = pb.w[PB_FRAC];
     int16_t* last = (int16_t*)&pb.w[PB_LAST];
@@ -159,7 +158,7 @@ void process_voice(PB& pb, int offset) {
     }
     // Old (2001) ucode mixer control: main L/R always; bit0 AuxA, bit1 AuxB,
     // bit2 surround, bit3 volume ramps. Bit4 selects Dolby Pro Logic II mixing, where
-    // the low bits mean something else (as Dolphin reads them).
+    // the low bits mean something else.
     uint16_t mc = pb.w[PB_MIXER_CONTROL];
     bool ramp = mc & 8;
     bool auxa, auxb, surround;

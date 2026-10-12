@@ -32,8 +32,7 @@ void dsp_hle_reset() {
     dsp_send_mail(0x8071FEED, false);
 }
 
-// The fingerprint Dolphin's DSP HLE identifies ucodes by (Common::HashEctor), so a
-// ucode seen here can be looked up in its list of known ones.
+// A fingerprint of the ucode, logged so that one seen here can be told from another.
 static uint32_t ucode_hash(uint32_t mm, uint32_t len) {
     uint32_t h = 0;
     const uint8_t* p = phys_ptr(mm);

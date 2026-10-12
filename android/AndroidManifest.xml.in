@@ -28,7 +28,7 @@
         <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService" /></intent>
     </queries>
 
-    <application android:label="@G_TITLE@"
+    <application android:label="@G_LABEL@"
                  android:hasCode="false"
                  android:debuggable="true"
                  android:extractNativeLibs="true">
@@ -36,7 +36,7 @@
         <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3" />
 
         <activity android:name="android.app.NativeActivity"
-                  android:label="@G_TITLE@"
+                  android:label="@G_LABEL@"
                   android:exported="true"
                   android:launchMode="singleTask"
                   android:screenOrientation="landscape"

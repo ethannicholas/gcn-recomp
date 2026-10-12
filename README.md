@@ -26,6 +26,7 @@ add_subdirectory(gcn-recomp)
 gcn_add_game(
   NAME prime
   TITLE "Metroid Prime"
+  LABEL "Prime Recomp"
   DISC_ID GM8E01
   DOL_SHA1 39a2f928159ad46491e9b1ef0a72613d91e0cc40
   SYMBOLS ${CMAKE_SOURCE_DIR}/analysis/symbols.txt
@@ -39,6 +40,10 @@ file, `-DGCN_BENCH_ONLY=ON`) also builds the headset app, `lib<name>.so`, which
 `tools/package-apk.ps1` turns into an APK, and `<name>_egl`, the renderer headless on a
 device. A game tells those what it knows -- when to show stereo, how big its world is --
 through `vr::GameHooks` (`runtime/vr_game.h`) in its `SOURCES`.
+
+TITLE is the game's name, used in messages. LABEL, optional, is what the window and the
+headset app are called, so the app can carry a name of the project's own rather than the
+game's trademark.
 The game project provides:
 
 - `analysis/symbols.txt` — the DOL's function layout in decomp-toolkit's format, either

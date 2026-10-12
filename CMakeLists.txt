@@ -49,7 +49,10 @@ endmacro()
 
 # gcn_add_game(
 #   NAME <target>              executable name; the benchmark is <target>_bench
-#   TITLE <string>             shown in the window title and messages
+#   TITLE <string>             the game's name, for messages ("put your <title> .iso in rom/")
+#   LABEL <string>             what the window and the headset app are called; defaults
+#                              to TITLE. A name of the project's own keeps the game's
+#                              trademark off the app itself.
 #   DISC_ID <6 chars>          the game's disc ID; the image and the booted disc are checked against it
 #   DOL_SHA1 <hex>             the supported build's main.dol
 #   SYMBOLS <file>             decomp-toolkit symbols.txt for that DOL
@@ -72,7 +75,10 @@ endmacro()
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE" "SOURCES" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE" "SOURCES" ${ARGN})
+  if(NOT G_LABEL)
+    set(G_LABEL "${G_TITLE}")
+  endif()
   foreach(req NAME TITLE DISC_ID DOL_SHA1 SYMBOLS TABLES FPS)
     if(NOT G_${req})
       message(FATAL_ERROR "gcn_add_game: ${req} is required")
@@ -240,6 +246,7 @@ function(gcn_add_game)
   set(GCN_GAME_DEFS
     GCN_DEFAULT_ISO="${GAME_ISO}"
     GCN_GAME_TITLE="${G_TITLE}"
+    GCN_APP_LABEL="${G_LABEL}"
     GCN_DISC_ID="${G_DISC_ID}"
     GCN_GAME_FPS=${G_FPS})
   if(GCN_GUEST_CHECKS)
