@@ -1687,7 +1687,13 @@ static GLuint g_output_fbo = 0;
 // The most recent presented rect, so the output can be refreshed without the game
 // having produced a new frame (a VR compositor wants one every display frame, which is
 // far more often than this game renders).
+// Blit a rect of a texture laid out like the EFB (guest row r at GL row h - 1 - r) to the
+// output, letterboxed to 4:3.
+static void blit_rect_to_output(GLuint src_tex, uint32_t tex_w, uint32_t tex_h, uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh);
 static void blit_to_output(const EfbCopyCmd& c, GLuint src_tex) {
+    blit_rect_to_output(src_tex, EFB_W, EFB_H, c.src_x, c.src_y, c.src_w, c.src_h);
+}
+static void blit_rect_to_output(GLuint src_tex, uint32_t tex_w, uint32_t tex_h, uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh) {
     glBindFramebuffer(GL_FRAMEBUFFER, g_output_fbo);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
@@ -1709,14 +1715,97 @@ static void blit_to_output(const EfbCopyCmd& c, GLuint src_tex) {
     glBindTexture(GL_TEXTURE_2D, src_tex);
     glBindSampler(0, 0);
     glUniform1i(g_blit_u_src, 0);
-    float rect[4] = {(float)c.src_x / EFB_W, (float)(c.src_y + c.src_h) / EFB_H, (float)(c.src_x + c.src_w) / EFB_W, (float)c.src_y / EFB_H};
+    float rect[4] = {(float)rx / tex_w, (float)(ry + rh) / tex_h, (float)(rx + rw) / tex_w, (float)ry / tex_h};
     glUniform4fv(g_blit_u_rect, 1, rect);
     glBindVertexArray(g_copy_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(g_vao);
 }
 
+// The external framebuffers. A game whose EFB cannot hold a whole frame (anti-aliased,
+// the EFB is 640x264) renders it in halves and copies each to its place in the XFB, and
+// may copy strips elsewhere besides; presenting each display copy as a frame showed the
+// last strip. So display copies are assembled here into an image per XFB, keyed by the
+// address range the copies land in, and the image is presented when every one of its
+// rows has been written since it was last shown. The VI's timing registers say how many
+// rows a frame has; a copy that covers them all presents at once, as before.
+struct Xfb {
+    uint32_t base, stride, h;
+    GLuint tex, fbo;
+    std::vector<uint8_t> written;
+    uint32_t written_rows;
+};
+static std::vector<Xfb> g_xfbs;
+
+static Xfb& xfb_for(uint32_t dest, uint32_t w, uint32_t stride, uint32_t h) {
+    for (auto& x : g_xfbs)
+        if (x.stride == stride && x.h == h && dest >= x.base && dest < x.base + stride * h) return x;
+    Xfb x{};
+    x.base = dest;
+    x.stride = stride;
+    x.h = h;
+    glGenTextures(1, &x.tex);
+    glBindTexture(GL_TEXTURE_2D, x.tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(w * g_scale), (GLsizei)(h * g_scale), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glGenFramebuffers(1, &x.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, x.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, x.tex, 0);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    x.written.assign(h, 0);
+    g_xfbs.push_back(x);
+    if (g_xfbs.size() > 8) g_xfbs.erase(g_xfbs.begin());
+    return g_xfbs.back();
+}
+
+static void dump_xfb(const Xfb& x, uint32_t w) {
+    int pw = w * g_scale, ph = x.h * g_scale;
+    std::vector<uint8_t> px((size_t)pw * ph * 4), flipped((size_t)pw * ph * 4);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, x.fbo);
+    glReadPixels(0, 0, pw, ph, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    for (int y = 0; y < ph; y++) {
+        memcpy(&flipped[(size_t)y * pw * 4], &px[(size_t)(ph - 1 - y) * pw * 4], (size_t)pw * 4);
+        for (int xx = 0; xx < pw; xx++) flipped[((size_t)y * pw + xx) * 4 + 3] = 255;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/frame_%05u%s.png", g_dump_dir, g_present_count, g_dump_suffix);
+    write_png(path, flipped.data(), pw, ph);
+}
+
+// A display copy into its XFB. Returns the XFB when the copy completed a frame of it.
+static Xfb* xfb_write(const EfbCopyCmd& c) {
+    uint32_t h = vi_display_height();
+    if (!h || c.dst_h >= h) return nullptr;  // the copy is the whole frame: present it as such
+    uint32_t stride = c.dst_w * 2;
+    Xfb& x = xfb_for(c.dest, c.dst_w, stride, h);
+    uint32_t row0 = (c.dest - x.base) / stride;
+    uint32_t rows = std::min(c.dst_h, h - row0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_efb_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, x.fbo);
+    glDisable(GL_SCISSOR_TEST);
+    glBlitFramebuffer(c.src_x * g_scale, (EFB_H - c.src_y - c.src_h) * g_scale, (c.src_x + c.src_w) * g_scale, (EFB_H - c.src_y) * g_scale,
+                      0, (h - row0 - rows) * g_scale, c.dst_w * g_scale, (h - row0) * g_scale, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    for (uint32_t r = row0; r < row0 + rows; r++)
+        if (!x.written[r]) { x.written[r] = 1; x.written_rows++; }
+    if (x.written_rows < h) return nullptr;
+    std::fill(x.written.begin(), x.written.end(), 0);
+    x.written_rows = 0;
+    return &x;
+}
+
 static void present(const EfbCopyCmd& c) {
+    // A copy that is part of a frame: into the XFB, and nothing to show unless it was the
+    // last part.
+    Xfb* xfb = nullptr;
+    if (!g_pair_second) {
+        uint32_t h = vi_display_height();
+        if (h && c.dst_h < h) {
+            xfb = xfb_write(c);
+            if (!xfb) return;
+        }
+    }
     if (!g_pair_second) g_present_count++;
     // GCN_DUMP_RANGE=a-b restricts dumping to a window of presented frames, so a short
     // stretch can be captured every single frame. Flicker is only visible frame by frame.
@@ -1732,6 +1821,11 @@ static void present(const EfbCopyCmd& c) {
     }
     const bool in_range = range_lo < 0 || ((int)g_present_count >= range_lo &&
                                            (int)g_present_count <= range_hi);
+    if (xfb) {
+        if (g_dump_dir && g_dump_every && in_range && g_present_count % g_dump_every == 0) dump_xfb(*xfb, c.dst_w);
+        blit_rect_to_output(xfb->tex, c.dst_w, xfb->h, 0, 0, c.dst_w, xfb->h);
+        return;
+    }
     if (g_dump_dir && g_dump_every && in_range && g_present_count % g_dump_every == 0) dump_efb(c);
     blit_to_output(c, g_efb_color);
 }

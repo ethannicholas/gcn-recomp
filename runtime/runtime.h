@@ -25,6 +25,8 @@ constexpr uint32_t LC_BASE = 0x20000000;   // locked cache (guest 0xE0000000)
 // cache lines, and Dolphin maps 256KB here -- so commit as much, not a 16KB edge to fault on.
 constexpr uint32_t LC_SIZE = 0x40000;
 void mem_init();
+// The lines the VI scans out, from its timing registers (hw/vi.cpp); 0 before the game sets them.
+uint32_t vi_display_height();
 // Whether a recompiled function starts at `addr`.
 bool recomp_is_function(uint32_t addr);
 extern uint8_t* g_aram;

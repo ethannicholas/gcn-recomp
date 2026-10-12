@@ -112,6 +112,9 @@ static void on_interrupt() {
 }
 
 static void on_fault(const void* fault_addr, int code) {
+    if (const char* path = getenv("GCN_RAM_DUMP")) {
+        if (FILE* f = fopen(path, "wb")) { fwrite(g_mem, 1, RAM_SIZE, f); fclose(f); fprintf(stderr, "RAM written to %s\n", path); }
+    }
     uintptr_t a = (uintptr_t)fault_addr;
     if (a >= (uintptr_t)g_mem && a < (uintptr_t)g_mem + 0x40000000)
         fprintf(stderr, "\nFAULT: guest memory access at (addr & 0x3FFFFFFF) = %08lX\n", (unsigned long)(a - (uintptr_t)g_mem));

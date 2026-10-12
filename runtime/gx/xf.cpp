@@ -1499,6 +1499,7 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
     cc.src_w = (bp[0x4A] & 0x3FF) + 1;
     cc.src_h = ((bp[0x4A] >> 10) & 0x3FF) + 1;
     cc.to_xfb = (v >> 14) & 1;
+    cc.dest = dest_addr;
     bool half = (v >> 9) & 1;
     cc.dst_w = half ? cc.src_w / 2 : cc.src_w;
     cc.dst_h = half ? cc.src_h / 2 : cc.src_h;

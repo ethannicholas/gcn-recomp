@@ -82,6 +82,7 @@ enum class CmdType : uint8_t { Draw, EfbCopy, Present };
 struct EfbCopyCmd {
     uint32_t src_x, src_y, src_w, src_h;   // EFB rect
     uint32_t dst_w, dst_h;
+    uint32_t dest;                         // destination address in RAM (the XFB, or a texture)
     uint32_t tex_id;                       // destination texture (0 when to XFB)
     uint32_t format;                       // GX copy texture format (+0x10 if intensity)
     bool to_xfb;

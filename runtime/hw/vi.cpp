@@ -36,6 +36,13 @@ void vi_init() {
     event_schedule_in(FIELD_TICKS, vi_retrace);
 }
 
+// The lines the VI scans out: ACV per field, two fields unless progressive (DCR.NIN).
+uint32_t vi_display_height() {
+    uint32_t acv = (g_vi[0x00 >> 1] >> 4) & 0x3FF;
+    bool nin = (g_vi[0x02 >> 1] >> 2) & 1;
+    return nin ? acv : acv * 2;
+}
+
 uint16_t vi_read16(uint32_t off) {
     off &= 0xFF;
     switch (off) {
