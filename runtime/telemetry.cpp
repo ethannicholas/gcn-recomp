@@ -138,11 +138,21 @@ float get(const char* k, float fallback) { return key(k, fallback); }
 //    was `yaw_washout_s` ago, more or less -- the turn itself, returning to centre once it is
 //    over -- unwrapped, so a wrap is not a turn.
 // 4. Limits. Last of all, after the gains, every channel is clamped to a range and to a rate
-//    of change: angles to `max_angle` degrees and `angle_rate` degrees a second,
-//    accelerations to `max_accel` m/s^2 and `accel_rate` m/s^2 a second. However a value
-//    got there -- a crash into a wall reads 7 g for a frame -- this is the most the
-//    platform is asked to do. The step between two packets is bounded too, by bounding
-//    the time between them, so a stall in the game does not let a step through either.
+//    of change: angles to `max_angle` degrees, pitch and roll to `angle_rate` degrees a
+//    second and yaw to `yaw_rate`, accelerations to `max_accel` m/s^2 and `accel_rate`
+//    m/s^2 a second. However a value got there -- a crash into a wall reads 7 g for a
+//    frame -- this is the most the platform is asked to do. The step between two packets
+//    is bounded too, by bounding the time between them, so a stall in the game does not
+//    let a step through either.
+//
+//    The rates are the last guard, not the smoothing. At 60 degrees and 60 m/s^2 a second
+//    they were both, and a rider found the motion tame: a wave's chop held the
+//    accelerations at the limit four frames in five, slewing back and forth, so that a
+//    collision reached the platform as a few m/s^2 and sometimes the wrong way, and a dive
+//    off a ramp (the hull pitching at some 300 degrees a second) as a slow lean. Smoothing
+//    belongs upstream, where the game knows what is noise; the jerks the limits are here
+//    for are the discontinuities stages 1 and 2 already take out. Yaw keeps the slow rate:
+//    a heading that swings is the one jerk on a start line that is not yet explained.
 namespace {
 
 enum Ch { kSpeed, kPitch, kRoll, kYaw, kSurge, kSway, kHeave, kSlide, kChannels };
@@ -217,10 +227,11 @@ void publish(const Motion& in) {
     want[kSurge] *= key("surge_gain", 1.0f);
     want[kSway] *= key("sway_gain", 1.0f);
     want[kHeave] *= key("heave_gain", 1.0f);
-    const float max_angle = key("max_angle", 25.0f), angle_rate = key("angle_rate", 60.0f);
-    const float max_accel = key("max_accel", 15.0f), accel_rate = key("accel_rate", 60.0f);
+    const float max_angle = key("max_angle", 25.0f), angle_rate = key("angle_rate", 120.0f);
+    const float yaw_rate = key("yaw_rate", 60.0f);
+    const float max_accel = key("max_accel", 15.0f), accel_rate = key("accel_rate", 300.0f);
     const float range[kChannels] = {1000.0f, max_angle, max_angle, max_angle, max_accel, max_accel, max_accel, 10.0f};
-    const float rate[kChannels] = {200.0f, angle_rate, angle_rate, angle_rate, accel_rate, accel_rate, accel_rate, 20.0f};
+    const float rate[kChannels] = {200.0f, angle_rate, angle_rate, yaw_rate, accel_rate, accel_rate, accel_rate, 20.0f};
     for (int c = 0; c < kChannels; c++) {
         const float v = fminf(range[c], fmaxf(-range[c], want[c]));
         const float step = rate[c] * dt;

@@ -347,7 +347,9 @@ What is sent can never step, whatever the game publishes. A motion platform move
 The output eases to and from rest, crossfades across anything the game marks
 `Motion::discontinuity`, sends yaw washed out, and is clamped in range and rate per channel last
 of all. The reasons are in `publish()`. A game still has to mark its own discontinuities and
-must not difference across a pause: a frozen vehicle reads as a dead stop.
+must not difference across a pause: a frozen vehicle reads as a dead stop. Nor are the
+limits the game's smoothing: they are fast enough to let a collision through, so noise the
+game sends arrives as noise.
 
 The packet is version 102 of SRS's "api" format. Its layout comes from SRS's own listener,
 which unpacks it with Python's `struct` format `3sI50s50s50sfffifffffffffffIIII` and no
