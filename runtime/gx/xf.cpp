@@ -365,6 +365,13 @@ static void decode_vertex(const Layout& L, const uint8_t*& p, InVertex& v) {
         v.pos[2] = 0.0f;
         L.pos_rd(q, v.pos, L.pos_scale);
     }
+    // A vertex without a normal, or with a normal but no binormal and tangent, has the
+    // last ones loaded: the transform unit keeps them, as Dolphin has it. They were left
+    // uninitialised, and an emboss texgen offset its coordinate by whatever the memory
+    // held -- bright streaks of a bump-mapped hull's own texture crawling over it.
+    static float last_nrm[3] = {0, 0, 1}, last_bin[3] = {0, 0, 0}, last_tan[3] = {0, 0, 0};
+    if (!L.nrm_desc) memcpy(v.nrm, last_nrm, sizeof(last_nrm));
+    if (!L.nrm_desc || !L.nbt) { memcpy(v.bin, last_bin, sizeof(last_bin)); memcpy(v.tan, last_tan, sizeof(last_tan)); }
     if (L.nrm_desc) {
         const uint32_t csz = L.nrm_csz;
         if (L.nbt && L.idx3 && L.nrm_desc != 1) {
@@ -381,6 +388,8 @@ static void decode_vertex(const Layout& L, const uint8_t*& p, InVertex& v) {
                 L.nrm_rd(q + 6 * csz, v.tan, L.nrm_scale);
             }
         }
+        memcpy(last_nrm, v.nrm, sizeof(last_nrm));
+        if (L.nbt) { memcpy(last_bin, v.bin, sizeof(last_bin)); memcpy(last_tan, v.tan, sizeof(last_tan)); }
     }
     for (int ci = 0; ci < 2; ci++) {
         if (!L.col_desc[ci]) { v.col[ci] = 0xFFFFFFFF; continue; }
@@ -676,9 +685,19 @@ static void transform_vertex(const InVertex& v, GpuVertex& o, bool has_nrm) {
                             nm[6] * a[0] + nm[7] * a[1] + nm[8] * a[2]));
     };
     Vec3 nrm = has_nrm ? nmul(v.nrm) : v3(0, 0, 1);
-    // Only an emboss texgen reads these; see g_need_tangents.
+    // Only an emboss texgen reads these; see g_need_tangents. Not normalised: GX does not,
+    // and a game scales them so that the light's direction along them is the bump's offset
+    // in texture coordinates. Normalised, the offset was a sizeable fraction of the
+    // texture, and the second, shifted sample of the hull showed its panel lines elsewhere.
     Vec3 bin = v3(0, 0, 0), tan = v3(0, 0, 0);
-    if (has_nrm && g_need_tangents) { bin = nmul(v.bin); tan = nmul(v.tan); }
+    if (g_need_tangents) {
+        auto mul = [&](const float* a) {
+            return v3(nm[0] * a[0] + nm[1] * a[1] + nm[2] * a[2], nm[3] * a[0] + nm[4] * a[1] + nm[5] * a[2],
+                      nm[6] * a[0] + nm[7] * a[1] + nm[8] * a[2]);
+        };
+        bin = mul(v.bin);
+        tan = mul(v.tan);
+    }
 
     const uint32_t numcol = g_numcol;
     for (int ch = 0; ch < 2; ch++) {
@@ -1592,6 +1611,12 @@ void renderer_bp_write(uint32_t reg, uint32_t v) {
     }
 }
 
+std::atomic<uint32_t> g_copy_writebacks_done{0};
+std::atomic<bool> g_renderer_writes_back{false};
+static CopyWritebackFilter g_copy_writeback;
+static uint32_t g_copy_writebacks_asked;
+void set_copy_writeback(CopyWritebackFilter filter) { g_copy_writeback = filter; }
+
 void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
     const uint32_t* bp = g_state.bp;
     uint32_t v = bp[0x52];
@@ -1641,10 +1666,29 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
         pc.copy = cc;
         batch().cmds.push_back(pc);
     }
+    cc.writeback = !cc.to_xfb && g_copy_writeback && g_renderer_writes_back.load() &&
+                   g_copy_writeback(dest_addr, cc.dst_w, cc.dst_h, cc.format, cc.clear);
     Cmd c{};
     c.type = CmdType::EfbCopy;
     c.copy = cc;
     batch().cmds.push_back(c);
+    if (cc.writeback) {
+        // Everything up to the copy goes to the renderer now, and the front end waits for
+        // the bytes: the guest's next draw-done waits for the front end, so the CPU reads
+        // them only once they are there. The rest of the frame goes in a batch of its own.
+        const uint32_t ticket = ++g_copy_writebacks_asked;
+        g_have_last_state = false;
+        flush_batch();
+        const auto t0 = std::chrono::steady_clock::now();
+        while ((int32_t)(g_copy_writebacks_done.load() - ticket) < 0) {
+            if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(2)) {
+                fprintf(stderr, "[copy] write-back of %08X not done after 2 s; going on without it\n", dest_addr);
+                g_copy_writebacks_asked = g_copy_writebacks_done.load();
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
     static int trace_frame = getenv("GCN_TRACE_FRAME") ? atoi(getenv("GCN_TRACE_FRAME")) : -1;
     if ((int)g_frame_counter == trace_frame) {
         Batch& bb = batch();

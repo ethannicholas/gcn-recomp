@@ -94,7 +94,14 @@ struct EfbCopyCmd {
     bool clear_color, clear_alpha, clear_z;
     uint32_t clear_rgba;                   // 0xRRGGBBAA
     uint32_t clear_z_value;                // 24-bit
+    bool writeback;                        // write it to RAM too (set_copy_writeback in gx.h)
 };
+
+// Copies written back so far (EfbCopyCmd::writeback), counted by the renderer as each
+// lands in RAM; the front end waits on it. g_renderer_writes_back is set by a renderer that
+// will do them -- without one, none is asked for.
+extern std::atomic<uint32_t> g_copy_writebacks_done;
+extern std::atomic<bool> g_renderer_writes_back;
 
 struct Cmd {
     CmdType type;

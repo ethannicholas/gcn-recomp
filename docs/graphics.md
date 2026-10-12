@@ -288,6 +288,15 @@ rotating addresses. The front end then lists the copy's id with the decoded text
 go of (`Batch::dead_textures`), and the renderer deletes it a batch later; it no longer ages
 anything itself.
 
+**Copies a game's CPU reads.** A game that copies the frame out and then moves or reads
+the bytes with the CPU needs the copy in RAM, in its texture format, by its next
+draw-done. `gx::set_copy_writeback` takes a filter from the game; a copy it accepts is
+flagged, the front end hands the batch so far to the renderer and waits for it, and the
+renderer reads the copy back and encodes it (RGB565, RGB5A3 and RGBA8, whole tiles, edges
+repeated) at the destination (`copy_writeback` in `render_gl.cpp`). The guest's draw-done
+waits for the front end, so the CPU then finds the bytes there. Each one is a round trip
+through the transform and the renderer, which is why it is opt-in and per copy.
+
 ## Depth past the viewport's range
 
 GX clips depth before the viewport, at `-w <= z <= 0` in clip space, and clamps the depth
@@ -316,6 +325,16 @@ each triangle draw's last triangle as it goes (`zfreeze_plane` in `render_gl.cpp
 vertex shader's own placement, in the target's window coordinates, culled draws included)
 and a z freeze program writes `gl_FragDepth` from it (`u_zplane`). Before any plane in a
 frame, and in an eye, a z freeze draw keeps its own depth.
+
+## Normals a vertex does not carry, and emboss
+
+A vertex format without a normal, or with a normal but no binormal and tangent, takes the
+last ones loaded: the transform unit keeps them, as Dolphin has it. They were left
+uninitialised. An emboss texgen also takes the binormal and tangent through the normal
+matrix without normalising them -- a game scales them so that the light's direction along
+them is the bump's offset in texels -- where the front end normalised them. Between the two,
+a bump-mapped hull's second, shifted sample of its own texture landed a sizeable fraction
+of the texture away, and its panel lines crawled over it as bright streaks.
 
 ## Texture offsets for lines and points
 

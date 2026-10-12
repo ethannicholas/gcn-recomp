@@ -664,6 +664,7 @@ void render_init(int internal_scale) {
     glEnable(GL_CLIP_DISTANCE0 + 4);
     glEnable(GL_CLIP_DISTANCE0 + 5);
 #endif
+    g_renderer_writes_back = true;  // see set_copy_writeback in gx.h
     g_vs_hash = hash_str(vs_src.c_str());
     g_vs = compile(GL_VERTEX_SHADER, vs_src);
 #if GCN_HAVE_PROGRAM_BINARY
@@ -1658,6 +1659,53 @@ static bool is_grab_copy(const EfbCopyCmd& c) {
 // Presented frames so far; the number the frame dumps carry. Defined here because the
 // copy dump below keys on it.
 static uint32_t g_present_count;
+// A texture copy written to RAM (EfbCopyCmd::writeback), in GX's tiled layout: read back
+// from the copy's texture, which the copy fbo still holds, one sample from the middle of
+// each hardware pixel's block, and encoded as the format the game asked for. The hardware
+// writes whole tiles; rows and columns past the rect repeat its edge here. Counted done
+// whatever happens, so the front end, which waits on it, never waits on a format this does
+// not encode.
+static void copy_writeback(const EfbCopyCmd& c) {
+    const uint32_t fmt = c.format & 0xF, w = c.dst_w, h = c.dst_h, s = (uint32_t)g_scale;
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    const uint32_t bytes = fmt == 6 ? bw * bh * 64 : bw * bh * 32;
+    const bool known = fmt == 4 || fmt == 5 || fmt == 6;
+    if (!known || c.depth || (c.dest & 0x01FFFFFF) + bytes > RAM_SIZE) {
+        static bool warned;
+        if (!warned) { warned = true; fprintf(stderr, "[copy] write-back of format %X%s not done\n", c.format, c.depth ? " (depth)" : ""); }
+        g_copy_writebacks_done++;
+        return;
+    }
+    std::vector<uint8_t> px((size_t)w * s * h * s * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, (GLsizei)(w * s), (GLsizei)(h * s), GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    auto at = [&](uint32_t x, uint32_t y) {
+        x = std::min(x, w - 1);
+        y = std::min(y, h - 1);
+        return &px[(((size_t)y * s + s / 2) * w * s + (size_t)x * s + s / 2) * 4];
+    };
+    uint8_t* out = phys_ptr(c.dest);
+    for (uint32_t by = 0; by < bh; by++)
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            uint8_t* blk = out + ((size_t)by * bw + bx) * (fmt == 6 ? 64 : 32);
+            for (uint32_t i = 0; i < 16; i++) {
+                const uint8_t* p = at(bx * 4 + i % 4, by * 4 + i / 4);
+                uint16_t v;
+                if (fmt == 6) {  // RGBA8: AR pairs in the first half of the tile, GB in the second
+                    blk[2 * i] = p[3]; blk[2 * i + 1] = p[0];
+                    blk[32 + 2 * i] = p[1]; blk[32 + 2 * i + 1] = p[2];
+                    continue;
+                }
+                if (fmt == 4) v = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
+                else if (p[3] >= 0xE0) v = (uint16_t)(0x8000 | ((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3));
+                else v = (uint16_t)(((p[3] >> 5) << 12) | ((p[0] >> 4) << 8) | ((p[1] >> 4) << 4) | (p[2] >> 4));
+                blk[2 * i] = (uint8_t)(v >> 8);
+                blk[2 * i + 1] = (uint8_t)v;
+            }
+        }
+    g_copy_writebacks_done++;
+}
+
 static void do_efb_copy(const EfbCopyCmd& c) {
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
@@ -1706,6 +1754,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
         glUniform1i(g_copy_u_mode, (int)c.format | (c.depth ? 32 : 0));
         glBindVertexArray(g_copy_vao);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        if (c.writeback) copy_writeback(c);
         // GCN_COPYDUMP=<dir> with GCN_DRAWLOG=<frame>: every texture copy made in that
         // frame is written out as it was produced, twice -- its colour, and its alpha
         // as grey -- named by the frame, the copy's order in it and its texture id.

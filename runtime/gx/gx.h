@@ -96,6 +96,17 @@ struct StallTimer {
 // GCN_GX_TOKEN_LAG=0 or 1 overrides the game.
 void set_draw_sync_lag(bool on);
 
+// Texture copies a game's CPU reads. An EFB copy is made on the GPU and never reaches RAM,
+// which is all a game drawing with it needs; one that copies the frame out and then moves
+// or reads the bytes with the CPU -- to keep a still of the screen through a load, say --
+// moves whatever RAM held there before. A game names those copies with a filter, called
+// for every texture copy; each it accepts is written to RAM in its texture format, and
+// the front end waits for that before going on, so a draw-done after the copy finds the
+// bytes in place, as on the hardware. It costs a round trip to the renderer per copy, so
+// keep the filter narrow. Ignored without a renderer.
+using CopyWritebackFilter = bool (*)(uint32_t dest, uint32_t w, uint32_t h, uint32_t format, bool clear);
+void set_copy_writeback(CopyWritebackFilter filter);
+
 enum class SkimSync { Token, TokenInt, Finish, Frame };
 using SkimSyncFn = void (*)(SkimSync kind, uint32_t value, std::vector<uint8_t>& out);
 uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync);
