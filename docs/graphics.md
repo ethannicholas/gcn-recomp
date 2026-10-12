@@ -36,7 +36,11 @@ Four threads share a frame, besides the renderer's:
   it reaches the draw, as the hardware reads them.
 - **Two transform workers** (`XfDraw` in `gx/xf.cpp`) transform and light each submitted
   frame from per-draw snapshots of the XF state, copied a sixteen-word block at a time as
-  it changes. A draw's plan -- texgens, channels -- and the cached matrices and lights are
+  it changes. Batches reach the renderer through their queue in the order they were
+  made, including a batch with nothing to transform (a copy alone): handed to the renderer
+  directly, such a batch overtook the pass before it, still in the queue, and a game that
+  clears a strip of the EFB with a copy between its two half-frame passes had the strip
+  cleared a pass early -- a band of the last pass's pixels across the middle of the frame. A draw's plan -- texgens, channels -- and the cached matrices and lights are
   kept while the snapshot they came from is the same one, since a room's display lists are
   thousands of four-vertex draws under one set of registers.
 

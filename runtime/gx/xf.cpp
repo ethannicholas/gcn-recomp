@@ -144,9 +144,16 @@ static void flush_batch() {
     if (g_batch && !g_batch->cmds.empty()) {
         texture_take_dead(g_batch->dead_textures);
         // Transformed already (see xf_sync), or by the worker before the renderer sees it.
-        if (xf_sync() || !g_pending) {
+        // A batch with nothing to transform -- a copy alone, which a game that clears
+        // strips of the EFB with copies makes between its passes -- still goes through the
+        // worker's queue when it is in use: handed to the renderer directly, it overtook
+        // the pass before it, still being transformed, and cleared its strip a pass early.
+        if (xf_sync()) {
             pack_all(*g_batch);
             submit_batch(std::move(g_batch));
+        } else if (!g_pending) {
+            pack_all(*g_batch);
+            submit_for_transform(std::move(g_batch), nullptr);
         }
         else submit_for_transform(std::move(g_batch), std::move(g_pending));
     }
@@ -1263,6 +1270,13 @@ static void xf_worker() {
             std::unique_lock<std::mutex> lk(g_xf_mutex);
             g_xf_cv.wait(lk, [] { return !g_xf_jobs.empty(); });
             job = std::move(g_xf_jobs.front());
+        }
+        if (!job.pending) {  // nothing to transform; queued to keep its place (flush_batch)
+            submit_batch(std::move(job.batch));
+            std::lock_guard<std::mutex> lk(g_xf_mutex);
+            g_xf_jobs.pop_front();
+            g_xf_cv.notify_all();
+            continue;
         }
         const auto t0 = std::chrono::steady_clock::now();
         transform_pending(*job.pending, *job.batch);
