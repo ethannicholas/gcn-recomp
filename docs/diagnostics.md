@@ -361,6 +361,18 @@ vertical and longitudinal acceleration, four suspension travels, four wheel terr
 field order is not known, so it is not sent. A listener that decodes with that same format string
 is the way to test without moving a rig, given SRS holds 33001: send to another port.
 
+## The command stream
+
+When the GX parser derails -- a draw in a vertex format the game never set, or a partial
+command it waits on forever (`FIFO parser waiting on a ...-byte partial command`) -- the
+question is whether the bytes it was handed are the game's. `GCN_FEED_DUMP=<path>` writes
+every byte handed to the parser, in order, with a `<path>.idx` of `offset address length`
+per chunk, so the stream can be decoded offline and each offset mapped back to the FIFO
+address it came from. `GCN_FIFO_DUMP=<path>` writes the GP FIFO's memory, base to end, in
+the FIFO dump that the interrupt and fault handlers print. `GCN_RAM_DUMP=<path>` writes the
+guest RAM when `call_indirect` finds no function at its target, for seeing what the code
+there is and where it came from.
+
 ## Panics and faults
 
 A game's `OSPanic` should be listed in its `hle.txt`: the replacement prints the message and

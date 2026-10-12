@@ -59,6 +59,10 @@ endmacro()
 #   TABLES <dir>               hle.txt, names.txt, patches.txt, special_calls.txt, idle.txt
 #   FPS <n>                    the game's frame rate, for the benchmark's percentage
 #   [IMAGE_DIR <dir>]          where to look for the user's .iso/.ciso (default rom/)
+#   [DOL_FIXUP <script>]       a Python script run as `script <main.dol> <out.dol>` after the
+#                              DOL is extracted; the recompiler reads its output instead. For
+#                              a game whose executable is not laid out the way it runs: one
+#                              that carries a second image inside and maps it elsewhere.
 #   [SOURCES <files>...]       the game project's own runtime sources, compiled into every
 #                              target that links the game, the benchmark included, since a
 #                              patch in TABLES may call into them: hooks the runtime offers a
@@ -75,7 +79,7 @@ endmacro()
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE" "SOURCES" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;DOL_FIXUP" "SOURCES" ${ARGN})
   if(NOT G_LABEL)
     set(G_LABEL "${G_TITLE}")
   endif()
@@ -132,8 +136,18 @@ function(gcn_add_game)
     endif()
 
     file(GLOB RECOMP_TOOL_SOURCES ${GCN_RECOMP_DIR}/recomp/*.py ${G_TABLES}/*.txt)
+    set(RECOMP_DOL ${GAME_DOL})
+    if(G_DOL_FIXUP)
+      set(RECOMP_DOL ${CMAKE_BINARY_DIR}/main_recomp.dol)
+      execute_process(COMMAND ${Python3_EXECUTABLE} ${G_DOL_FIXUP} ${GAME_DOL} ${RECOMP_DOL}
+                      RESULT_VARIABLE FIXUP_RESULT)
+      if(NOT FIXUP_RESULT EQUAL 0)
+        message(FATAL_ERROR "${G_DOL_FIXUP} failed")
+      endif()
+      list(APPEND RECOMP_TOOL_SOURCES ${G_DOL_FIXUP})
+    endif()
     execute_process(COMMAND ${Python3_EXECUTABLE} ${GCN_RECOMP_DIR}/recomp/recomp.py
-                            ${GAME_DOL} ${G_SYMBOLS} ${RECOMP_GEN_DIR} ${G_TABLES}
+                            ${RECOMP_DOL} ${G_SYMBOLS} ${RECOMP_GEN_DIR} ${G_TABLES}
                     RESULT_VARIABLE RECOMP_RESULT)
     if(NOT RECOMP_RESULT EQUAL 0)
       message(FATAL_ERROR "recompilation failed")

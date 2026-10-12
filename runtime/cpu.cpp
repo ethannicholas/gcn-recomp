@@ -1,6 +1,7 @@
 // Memory, CPU helper routines, timing and event scheduling.
 #include "runtime.h"
 #include "platform.h"
+#include "mmu.h"
 #include "input_log.h"
 #include <algorithm>
 #include <atomic>
@@ -120,10 +121,19 @@ static void build_fn_table() {
     }
 }
 
+bool recomp_is_function(uint32_t addr) {
+    return addr >= g_recomp_code_base && addr < g_recomp_code_end && !(addr & 3) && g_fn_table[(addr - g_recomp_code_base) / 4] != nullptr;
+}
+
 extern "C" void call_indirect(CPU* c, uint32_t addr) {
     if (addr >= g_recomp_code_base && addr < g_recomp_code_end && !(addr & 3)) {
         RecompFn fn = g_fn_table[(addr - g_recomp_code_base) / 4];
         if (fn) { fn(c); return; }
+    }
+    // GCN_RAM_DUMP=<path>: the guest RAM at this failure, for finding out what the code at
+    // `addr` is and where it came from.
+    if (const char* path = getenv("GCN_RAM_DUMP")) {
+        if (FILE* f = fopen(path, "wb")) { fwrite(g_mem, 1, RAM_SIZE, f); fclose(f); }
     }
     fatal("call_indirect: no function at %08X (lr=%08X)", addr, c->lr);
 }
@@ -163,7 +173,7 @@ extern "C" void hle_set_fpscr(CPU* c, uint32_t v) {
     // rounding mode bits 30-31 (RN); only nearest is honoured for now
 }
 
-enum { SPR_DEC = 22, SPR_SRR0 = 26, SPR_SRR1 = 27, SPR_TBL_R = 268, SPR_TBU_R = 269,
+enum { SPR_DEC = 22, SPR_SDR1 = 25, SPR_SRR0 = 26, SPR_SRR1 = 27, SPR_TBL_R = 268, SPR_TBU_R = 269,
        SPR_TBL_W = 284, SPR_TBU_W = 285, SPR_HID2 = 920, SPR_WPAR = 921, SPR_DMAU = 922, SPR_DMAL = 923 };
 
 static int64_t g_tb_offset;
@@ -207,6 +217,7 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
         return;
     }
     case SPR_DEC: dec_write(c, v); return;
+    case SPR_SDR1: c->spr[spr] = v; mmu_set_sdr1(v); return;
     case SPR_WPAR:
         // Writing WPAR sets the gather address and empties the gather buffer. The SDK
         // writes it only after padding the pipe with zero bytes and waiting for the
@@ -222,8 +233,8 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
             uint32_t len = ((dmau & 0x1F) << 2) | ((v >> 2) & 3);
             if (len == 0) len = 128;
             uint32_t mem = dmau & ~0x1Fu, lc = v & ~0x1Fu;
-            if (v & 0x10) memcpy(HOST(lc), HOST(mem), len * 32);   // load: mem -> LC
-            else { memcpy(HOST(mem), HOST(lc), len * 32); debug_guest_check("after locked-cache DMA"); }  // store: LC -> mem
+            if (v & 0x10) memcpy(HOST_W(lc), HOST(mem), len * 32);   // load: mem -> LC
+            else { memcpy(HOST_W(mem), HOST(lc), len * 32); debug_guest_check("after locked-cache DMA"); }  // store: LC -> mem
             c->spr[spr] &= ~2u;
         }
         return;
@@ -232,8 +243,8 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
     }
 }
 
-extern "C" void hle_dcbz(CPU* c, uint32_t ea) { memset(HOST(ea & ~31u), 0, 32); }
-extern "C" void hle_dcbz_l(CPU* c, uint32_t ea) { memset(HOST(ea & ~31u), 0, 32); }
+extern "C" void hle_dcbz(CPU* c, uint32_t ea) { memset(HOST_W(ea & ~31u), 0, 32); }
+extern "C" void hle_dcbz_l(CPU* c, uint32_t ea) { memset(HOST_W(ea & ~31u), 0, 32); }
 extern "C" void hle_dcbi(CPU* c, uint32_t ea) {}
 
 extern "C" void hle_lswi(CPU* c, uint32_t ea, int rd, int n) {

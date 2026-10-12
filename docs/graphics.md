@@ -322,3 +322,15 @@ an eye's differ only by the eye's offset. `GCN_EYE_FGDEPTH=0` writes the eye's d
 `GCN_DRAWLOG=<frame>` prints each draw's band and view-space box, which is how a game's
 layers are found. In stereo the flat pass is trimmed (see above) and logs only what it
 draws; `GCN_EYE_FULLFLAT=1` makes it list the whole frame.
+
+
+## The FIFO's watermarks
+
+A game that holds the GP at a breakpoint for a frame while it writes the next keeps
+writing until the CP's overflow interrupt suspends the writing thread (the SDK's
+`GXCPInterruptHandler` and `__GXOverflowSuspend`), and its underflow interrupt, once the GP
+has drained below the low watermark, resumes it. `cp_watermarks` in `gx/fifo.cpp` sets the
+status bits whenever the write distance crosses the marks and raises the CP interrupt
+through the enable bits the SDK toggles. Without it the writer lapped the 64 KB FIFO: the
+lines the GP had not reached were overwritten before it got there, and what it then
+parsed was a later frame's vertices.

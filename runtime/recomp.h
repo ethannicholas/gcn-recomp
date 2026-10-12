@@ -106,7 +106,20 @@ double gcn_step_damp(uint32_t pc, double p, double x, double k, double b);
 
 /* ---- memory ---- */
 extern uint8_t* g_mem;             /* 1GB host reservation; guest addr & 0x3FFFFFFF */
-#define HOST(a) (g_mem + ((uint32_t)(a) & 0x3FFFFFFFu))
+/* The BATs cover 0x80000000 and 0xC0000000; 0x40000000-0x7FFFFFFF is reachable only
+   through a page table the game set up, and goes through runtime/mmu.cpp. HOST_W is for a
+   store: the page's Changed bit is what differs. */
+uint32_t vm_translate(uint32_t ea, int write);
+static inline uint32_t guest_off(uint32_t a) {
+    if (GCN_UNLIKELY((a & 0xC0000000u) == 0x40000000u)) return vm_translate(a, 0);
+    return a & 0x3FFFFFFFu;
+}
+static inline uint32_t guest_off_w(uint32_t a) {
+    if (GCN_UNLIKELY((a & 0xC0000000u) == 0x40000000u)) return vm_translate(a, 1);
+    return a & 0x3FFFFFFFu;
+}
+#define HOST(a) (g_mem + guest_off((uint32_t)(a)))
+#define HOST_W(a) (g_mem + guest_off_w((uint32_t)(a)))
 #define IS_MMIO(a) ((uint32_t)((a) - 0xC8000000u) < 0x08000000u)
 
 uint32_t mmio_read32(uint32_t a);
@@ -164,21 +177,21 @@ static inline int gp_store32(uint32_t a, uint32_t v) {
 
 static inline void ST32(uint32_t a, uint32_t v) {
     if (UNLIKELY(IS_MMIO(a))) { if (gp_store32(a, v)) return; mmio_write32(a, v); return; }
-    v = GCN_BSWAP32(v); memcpy(HOST(a), &v, 4);
+    v = GCN_BSWAP32(v); memcpy(HOST_W(a), &v, 4);
 }
 static inline void ST16(uint32_t a, uint32_t v) {
     if (UNLIKELY(IS_MMIO(a))) { mmio_write16(a, (uint16_t)v); return; }
-    uint16_t h = GCN_BSWAP16((uint16_t)v); memcpy(HOST(a), &h, 2);
+    uint16_t h = GCN_BSWAP16((uint16_t)v); memcpy(HOST_W(a), &h, 2);
 }
 static inline void ST8(uint32_t a, uint32_t v) {
     if (UNLIKELY(IS_MMIO(a))) { mmio_write8(a, (uint8_t)v); return; }
-    *HOST(a) = (uint8_t)v;
+    *HOST_W(a) = (uint8_t)v;
 }
 static inline void ST32BR(uint32_t a, uint32_t v) { ST32(a, GCN_BSWAP32(v)); }
 static inline void ST16BR(uint32_t a, uint32_t v) { ST16(a, GCN_BSWAP16((uint16_t)v)); }
 static inline void ST64(uint32_t a, uint64_t v) {
     if (UNLIKELY(IS_MMIO(a))) { mmio_write32(a, (uint32_t)(v >> 32)); mmio_write32(a + 4, (uint32_t)v); return; }
-    v = GCN_BSWAP64(v); memcpy(HOST(a), &v, 8);
+    v = GCN_BSWAP64(v); memcpy(HOST_W(a), &v, 8);
 }
 static inline double LDF32(uint32_t a) {
     uint32_t v = LD32(a); float f; memcpy(&f, &v, 4); return (double)f;
@@ -252,6 +265,11 @@ void hle_set_fpscr(CPU* c, uint32_t v);
 void hle_dcbz(CPU* c, uint32_t ea);
 void hle_dcbz_l(CPU* c, uint32_t ea);
 void hle_dcbi(CPU* c, uint32_t ea);
+/* Segment registers and the TLB, for a game that maps memory through the Gekko's page
+   tables; see runtime/mmu.cpp. */
+void hle_mtsr(CPU* c, uint32_t sr, uint32_t v);
+uint32_t hle_mfsr(CPU* c, uint32_t sr);
+void hle_tlbie(CPU* c, uint32_t ea);
 void hle_lswi(CPU* c, uint32_t ea, int rd, int n);
 void hle_stswi(CPU* c, uint32_t ea, int rs, int n);
 /* Paired-single quantised loads and stores. The GQR picks a format; the plain float one

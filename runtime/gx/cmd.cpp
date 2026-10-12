@@ -348,6 +348,12 @@ uint32_t process(const uint8_t* data, uint32_t len, bool partial_ok) {
                 int vat = cmd & 7;
                 uint16_t count = be16(p + 1);
                 uint32_t vsz = vertex_size(vat);
+                // A draw in a format the game never set is the parser off its stream: the
+                // bytes here are not a command. Said once; GCN_FEED_DUMP has the stream.
+                if (!g_state.cp[0x70 + vat]) {
+                    static bool warned;
+                    if (!warned) { warned = true; LOG(LOG_GX, "draw %02X of %u vertices with VAT%d never set at +%u of %u: the command stream is misparsed", cmd, count, vat, pos, len); }
+                }
                 need = 3 + vsz * count;
                 if (avail < need) goto partial;
                 DrawCall dc{(uint8_t)(cmd & 0xF8), (uint8_t)vat, count, p + 3, vsz};

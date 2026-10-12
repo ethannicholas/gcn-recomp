@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -311,6 +312,11 @@ static uint32_t cp_consume(const uint8_t* data, uint32_t len) {
 
 // Feed bytes to the command processor, handling commands split across chunks.
 static void cp_feed(const uint8_t* data, uint32_t len) {
+    // GCN_FEED_DUMP=<path>: every byte handed to the command parser, in order.
+    static FILE* dump = [] { const char* p = getenv("GCN_FEED_DUMP"); return p ? fopen(p, "wb") : nullptr; }();
+    static FILE* index = [] { const char* p = getenv("GCN_FEED_DUMP"); if (!p) return (FILE*)nullptr; std::string s = std::string(p) + ".idx"; return fopen(s.c_str(), "w"); }();
+    static uint64_t fed;
+    if (dump) { fwrite(data, 1, len, dump); fflush(dump); fprintf(index, "%llX %08X %u\n", (unsigned long long)fed, (uint32_t)(data - g_mem), len); fflush(index); fed += len; }
     if (g_pending.empty()) {
         uint32_t used = cp_consume(data, len);
         if (used < len) g_pending.assign(data + used, data + len);
@@ -331,7 +337,31 @@ static void cp_feed(const uint8_t* data, uint32_t len) {
 // FIFO lives in RAM; data written while reads are disabled is processed later).
 static void cp_update_irq() {
     bool bp_irq = (g_cp_sr & 0x10) && (g_cp_cr & CP_CR_BPINT);
-    pi_set_interrupt(INT_CP, bp_irq);
+    bool ovf_irq = (g_cp_sr & 1) && (g_cp_cr & CP_CR_OVFINT);
+    bool unf_irq = (g_cp_sr & 2) && (g_cp_cr & CP_CR_UNFINT);
+    pi_set_interrupt(INT_CP, bp_irq || ovf_irq || unf_irq);
+}
+
+// The FIFO's high and low watermarks. A game that holds the GP at a breakpoint for a
+// frame while it writes the next keeps writing until the FIFO's overflow interrupt
+// suspends the writing thread (the SDK's GXCPInterruptHandler), and the underflow
+// interrupt, once the GP has drained below the low mark, resumes it. Without them the
+// writer laps the reader: with a 64 KB FIFO and a frame or two of commands ahead, the
+// lines the GP had not reached were overwritten before it got there, and what it then
+// parsed was the next frame's vertices. The status bits follow the condition; the
+// enable bits in the control register are what the SDK toggles to take each once.
+static void cp_watermarks() {
+    if (!(g_cp_cr & CP_CR_LINK)) return;
+    uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
+    if (!end || end <= base) return;
+    uint32_t wptr = pi_fifo_wptr() & 0x03FFFFE0, r = g_cp_rptr & 0x03FFFFE0;
+    if (r < base || r >= end) r = base;
+    if (wptr < base || wptr >= end) return;
+    uint32_t d = wptr >= r ? wptr - r : (end - r) + (wptr - base);
+    g_cp_rwdist = d;
+    if (g_cp_hiwm && d > (g_cp_hiwm & 0x03FFFFE0)) g_cp_sr |= 1;
+    if (d < (g_cp_lowm & 0x03FFFFE0)) g_cp_sr |= 2;
+    cp_update_irq();
 }
 
 // Consume everything between the CP read pointer and the CPU write pointer (the GP
@@ -344,6 +374,13 @@ static void cp_drain() {
     if (!end || end <= base) return;
     uint32_t r = g_cp_rptr & 0x03FFFFE0;
     if (r < base || r >= end) r = base;
+    if (wptr < base || wptr >= end) {
+        // The CPU FIFO is somewhere else while the link bit is on: the GP would follow a
+        // write pointer that has nothing to do with its own FIFO.
+        static uint32_t warned;
+        if (warned++ < 8) LOG(LOG_GX, "CP linked but PI wptr %08X outside GP FIFO %08X-%08X (rptr %08X)", wptr, base, end, r);
+        return;
+    }
     bool bp_on = g_cp_cr & CP_CR_BPEN;
     uint32_t bp = g_cp_bp & 0x03FFFFE0;
     // The GP halts whenever its read pointer sits at an enabled breakpoint; moving or
@@ -362,6 +399,7 @@ static void cp_drain() {
     g_cp_rptr = r;
     g_cp_wptr = wptr;
     g_cp_rwdist = wptr >= r ? wptr - r : (end - r) + (wptr - base);
+    cp_watermarks();
 }
 
 static void gp_flush32() {
@@ -377,6 +415,7 @@ static void gp_flush32() {
         wptr = (wptr & 0x04000000) | addr;
     }
     cp_drain();
+    cp_watermarks();  // cp_drain returns early while the GP is stopped, and the writer is not
     memmove(g_gp_buf, g_gp_buf + 32, g_gp_len - 32);
     g_gp_len -= 32;
 }
@@ -413,7 +452,11 @@ void gp_reset() {
 // it waits for, or desyncs the command parser outright.
 void gp_flush_partial() {
     if (!g_gp_len) return;
-    LOG(LOG_GX, "gather buffer drained with %u bytes pending at wptr %08X", g_gp_len, pi_fifo_wptr());
+    if (g_log_enabled[LOG_GX]) {
+        char hex[3 * 32 + 1] = {};
+        for (uint32_t i = 0; i < g_gp_len && i < 32; i++) snprintf(hex + 3 * i, 4, "%02X ", g_gp_buf[i]);
+        LOG(LOG_GX, "gather buffer drained with %u bytes pending at wptr %08X: %s", g_gp_len, pi_fifo_wptr(), hex);
+    }
     uint32_t& wptr = pi_fifo_wptr();
     uint32_t addr = wptr & 0x03FFFFFF;
     memcpy(phys_ptr(addr), g_gp_buf, dma_fit("write-gather", addr, g_gp_len));
@@ -494,11 +537,11 @@ void cp_write16(uint32_t off, uint16_t v) {
         cp_update_irq();
         cp_drain();
         break;
-    case 0x04: g_cp_clear = v; g_cp_sr &= ~(v & 3); break;
+    case 0x04: g_cp_clear = v; g_cp_sr &= ~(v & 3); cp_watermarks(); break;
     case 0x20: set_lo(g_cp_base, v & ~0x1F); LOG(LOG_GX, "CP base lo %04X", v); break; case 0x22: set_hi(g_cp_base, v & 0x3FF); break;
     case 0x24: set_lo(g_cp_end, v & ~0x1F); break; case 0x26: set_hi(g_cp_end, v & 0x3FF); break;
-    case 0x28: set_lo(g_cp_hiwm, v); break; case 0x2A: set_hi(g_cp_hiwm, v); break;
-    case 0x2C: set_lo(g_cp_lowm, v); break; case 0x2E: set_hi(g_cp_lowm, v); break;
+    case 0x28: set_lo(g_cp_hiwm, v); break; case 0x2A: set_hi(g_cp_hiwm, v); cp_watermarks(); break;
+    case 0x2C: set_lo(g_cp_lowm, v); break; case 0x2E: set_hi(g_cp_lowm, v); cp_watermarks(); break;
     case 0x30: set_lo(g_cp_rwdist, v); break; case 0x32: set_hi(g_cp_rwdist, v); break;
     case 0x34: set_lo(g_cp_wptr, v); break; case 0x36: set_hi(g_cp_wptr, v); break;
     case 0x38: set_lo(g_cp_rptr, v); break; case 0x3A: set_hi(g_cp_rptr, v); break;
@@ -545,6 +588,15 @@ void debug_dump_fifo() {
             g_cp_cr, g_cp_sr, g_cp_base, g_cp_end, g_cp_wptr, g_cp_rptr, g_cp_rwdist, g_cp_bp, pi_fifo_base(), pi_fifo_end(), pi_fifo_wptr(),
             g_pending.size(), g_gp_len);
     fprintf(stderr, "  PE token=%04X ctrl=%04X\n", g_pe_token, g_pe_ctrl);
+    // GCN_FIFO_DUMP=<path>: the GP FIFO's memory, base to end, for decoding offline.
+    if (const char* path = getenv("GCN_FIFO_DUMP")) {
+        uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
+        if (FILE* f = fopen(path, "wb")) {
+            fwrite(phys_ptr(base), 1, end > base ? end - base : 0, f);
+            fclose(f);
+            fprintf(stderr, "  FIFO %08X-%08X written to %s\n", base, end, path);
+        }
+    }
     {
         uint32_t w = pi_fifo_wptr() & 0x03FFFFE0;
         fprintf(stderr, "  RAM FIFO before wptr:");

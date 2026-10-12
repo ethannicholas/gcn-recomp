@@ -481,15 +481,24 @@ def translate31(pc, i, d, a, b, rc):
         if 912 <= spr <= 919:
             return f'c->gqr[{spr - 912}] = {S};'
         return f'hle_mtspr(c, {spr}, {S});'
-    if xo in (595, 659):  # mfsr, mfsrin
-        return f'c->r[{d}] = 0;'
-    if xo in (210, 242):  # mtsr, mtsrin
-        return ';'
+    # The segment registers and the TLB: a game that maps memory through page tables
+    # (runtime/mmu.cpp) sets them up, so they are kept, and a tlbie drops the host's view
+    # of that page so the next access reads the page table again.
+    if xo == 595:  # mfsr
+        return f'c->r[{d}] = hle_mfsr(c, {(i >> 16) & 15});'
+    if xo == 659:  # mfsrin
+        return f'c->r[{d}] = hle_mfsr(c, c->r[{b}] >> 28);'
+    if xo == 210:  # mtsr
+        return f'hle_mtsr(c, {(i >> 16) & 15}, c->r[{d}]);'
+    if xo == 242:  # mtsrin
+        return f'hle_mtsr(c, c->r[{b}] >> 28, c->r[{d}]);'
+    if xo == 306:  # tlbie
+        return f'hle_tlbie(c, c->r[{b}]);'
     if xo == 1014:  # dcbz
         return f'hle_dcbz(c, {ea_x(a, b)});'
     if xo == 470:  # dcbi
         return f'hle_dcbi(c, {ea_x(a, b)});'
-    if xo in (54, 86, 246, 278, 982, 598, 854, 306, 566):  # dcbst dcbf dcbtst dcbt icbi sync eieio tlbie tlbsync
+    if xo in (54, 86, 246, 278, 982, 598, 854, 566):  # dcbst dcbf dcbtst dcbt icbi sync eieio tlbsync
         return ';'
     if xo == 4:  # tw
         return f'hle_trap(c, 0x{pc:08X}, 0x{i:08X});'

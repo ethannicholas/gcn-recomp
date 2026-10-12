@@ -19,3 +19,11 @@ blue ?storm
 waverace
 \bjet ?ski
 \bGWRE01\b
+
+# Star Wars Rogue Squadron II: Rogue Leader (rs2-recomp)
+rogue ?(squadron|leader)
+\brogue2\b
+\bfactor ?5\b
+\bGSWE64\b
+\bx-?wing\b
+\btie ?fighter\b
