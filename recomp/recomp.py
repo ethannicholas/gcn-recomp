@@ -125,9 +125,27 @@ class Func:
         self.hle = False
 
 
+def load_modules(path):
+    """<dol>.modules: `canon size entry name` per line, hex. Code the game loads at run time
+    from its data files, laid out by the game project's DOL fixup at canonical addresses;
+    the runtime binds each to where the game put it (runtime/modules.cpp)."""
+    out = []
+    if not os.path.exists(path):
+        return out
+    for line in open(path):
+        parts = line.split()
+        if len(parts) >= 4:
+            out.append((int(parts[0], 16), int(parts[1], 16), int(parts[2], 16), parts[3]))
+    return out
+
+
 def main():
     dol_path, sym_path, outdir, tables = sys.argv[1:5]
     dol = Dol(dol_path)
+    modules = load_modules(dol_path + '.modules')
+
+    def in_module(addr):
+        return any(c <= addr < c + sz for c, sz, _, _ in modules)
     syms = load_symbols(sym_path)
     names = load_kv(os.path.join(tables, 'names.txt'))
     hle = load_list(os.path.join(tables, 'hle.txt'))
@@ -355,9 +373,12 @@ def main():
                 if br.link:
                     body = f'{{ uint32_t t = c->ctr; c->lr = 0x{pc + 4:08X}u; call_indirect(c, t); }}'
                 else:
+                    # A module's own labels are at canonical addresses; the game's ctr holds
+                    # the address where it loaded the module.
+                    target = 'modules_canon(c->ctr)' if in_module(f.addr) else 'c->ctr'
                     if jt_sorted:
                         cases = ' '.join(f'case 0x{t:08X}u: goto L_{t:08X};' for t in jt_sorted)
-                        body = (f'switch (c->ctr) {{ {cases} default: call_indirect(c, c->ctr); RET(); }}')
+                        body = (f'switch ({target}) {{ {cases} default: call_indirect(c, c->ctr); RET(); }}')
                     else:
                         body = 'call_indirect(c, c->ctr); RET();'
                 if cond:
@@ -423,6 +444,19 @@ def main():
     code_end = max(a + sz for a, sz, _ in dol.text_sections())
     table.append(f'const uint32_t g_recomp_code_base = 0x{code_base:08X}u;')
     table.append(f'const uint32_t g_recomp_code_end = 0x{code_end:08X}u;')
+    # The modules' bytes, for the runtime to recognise a loaded one by.
+    for k, (canon, size, entry, name) in enumerate(modules):
+        raw = dol.read_bytes(canon, size)
+        table.append(f'static const uint8_t module_{k}[] = {{' + ','.join(str(b) for b in raw) + '};')
+    table.append('const RecompModule g_recomp_modules[] = {')
+    for k, (canon, size, entry, name) in enumerate(modules):
+        # Where the module's code ends: the end of its last function. What follows is data
+        # the loader relocates, which the runtime must not match against.
+        ends = [f.end for f in funcs if canon <= f.addr < canon + size]
+        code_end = (max(ends) - canon) if ends else entry
+        table.append(f'\t{{0x{canon:08X}u, 0x{size:X}u, 0x{entry:X}u, 0x{code_end:X}u, module_{k}, "{name}"}},')
+    table.append('\t{0, 0, 0, 0, 0, 0}};')
+    table.append(f'const uint32_t g_recomp_module_count = {len(modules)};')
     open(os.path.join(outdir, 'recomp_funcs.h'), 'w').write('\n'.join(header) + '\n')
     open(os.path.join(outdir, 'recomp_table.c'), 'w').write('\n'.join(table) + '\n')
     open(os.path.join(outdir, 'sources.cmake'), 'w').write(

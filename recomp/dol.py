@@ -61,6 +61,12 @@ class Dol:
                 return struct.unpack_from('>I', self.data, o + addr - a)[0]
         raise KeyError(hex(addr))
 
+    def read_bytes(self, addr, n):
+        for a, s, o, _ in self.sections:
+            if a <= addr and addr + n <= a + s:
+                return self.data[o + addr - a:o + addr - a + n]
+        raise KeyError(hex(addr))
+
     def in_text(self, addr):
         return any(t and a <= addr < a + s for a, s, _, t in self.sections)
 

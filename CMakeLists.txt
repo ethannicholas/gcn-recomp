@@ -59,10 +59,12 @@ endmacro()
 #   TABLES <dir>               hle.txt, names.txt, patches.txt, special_calls.txt, idle.txt
 #   FPS <n>                    the game's frame rate, for the benchmark's percentage
 #   [IMAGE_DIR <dir>]          where to look for the user's .iso/.ciso (default rom/)
-#   [DOL_FIXUP <script>]       a Python script run as `script <main.dol> <out.dol>` after the
-#                              DOL is extracted; the recompiler reads its output instead. For
-#                              a game whose executable is not laid out the way it runs: one
-#                              that carries a second image inside and maps it elsewhere.
+#   [DOL_FIXUP <script>]       a Python script run as `script <main.dol> <out.dol> <image>`
+#                              after the DOL is extracted; the recompiler reads its output
+#                              instead. For a game whose executable is not laid out the way
+#                              it runs: one that carries a second image inside and maps it
+#                              elsewhere, or whose data files carry code (the script may
+#                              also write `<out.dol>.modules`, see recomp/recomp.py).
 #   [SOURCES <files>...]       the game project's own runtime sources, compiled into every
 #                              target that links the game, the benchmark included, since a
 #                              patch in TABLES may call into them: hooks the runtime offers a
@@ -139,7 +141,7 @@ function(gcn_add_game)
     set(RECOMP_DOL ${GAME_DOL})
     if(G_DOL_FIXUP)
       set(RECOMP_DOL ${CMAKE_BINARY_DIR}/main_recomp.dol)
-      execute_process(COMMAND ${Python3_EXECUTABLE} ${G_DOL_FIXUP} ${GAME_DOL} ${RECOMP_DOL}
+      execute_process(COMMAND ${Python3_EXECUTABLE} ${G_DOL_FIXUP} ${GAME_DOL} ${RECOMP_DOL} ${GAME_ISO}
                       RESULT_VARIABLE FIXUP_RESULT)
       if(NOT FIXUP_RESULT EQUAL 0)
         message(FATAL_ERROR "${G_DOL_FIXUP} failed")

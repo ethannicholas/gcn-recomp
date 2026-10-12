@@ -32,6 +32,7 @@ static std::vector<uint8_t> g_pending;  // unconsumed partial command bytes
 enum { CP_CR_READ = 1, CP_CR_BPEN = 2, CP_CR_OVFINT = 4, CP_CR_UNFINT = 8, CP_CR_LINK = 16, CP_CR_BPINT = 32 };
 enum { PE_TOKEN_EN = 1, PE_FINISH_EN = 2, PE_TOKEN_INT = 4, PE_FINISH_INT = 8 };
 
+static uint32_t g_pe_finish_raised, g_pe_finish_coalesced, g_pe_finish_acked;
 static void pe_update_irq() {
     pi_set_interrupt(INT_PE_TOKEN, (g_pe_ctrl & PE_TOKEN_INT) && (g_pe_ctrl & PE_TOKEN_EN));
     pi_set_interrupt(INT_PE_FINISH, (g_pe_ctrl & PE_FINISH_INT) && (g_pe_ctrl & PE_FINISH_EN));
@@ -44,6 +45,8 @@ void pe_signal_token(uint16_t token, bool interrupt) {
     if (interrupt) { g_pe_ctrl |= PE_TOKEN_INT; pe_update_irq(); }
 }
 void pe_signal_finish() {
+    g_pe_finish_raised++;
+    if (g_pe_ctrl & PE_FINISH_INT) g_pe_finish_coalesced++;
     g_pe_ctrl |= PE_FINISH_INT;
     pe_update_irq();
 }
@@ -367,18 +370,28 @@ static void cp_watermarks() {
 // Consume everything between the CP read pointer and the CPU write pointer (the GP
 // FIFO lives in RAM; data written while reads are disabled is processed later).
 // Honors the GP breakpoint, which games use to hold the GPU back.
+// The CP's write pointer follows the PI's while the link bit is on, and keeps its last
+// value when a game clears the link to move the CPU elsewhere: the GP still reads up to
+// it. A game that unlinks, lets the GP finish the old FIFO, and only then points the CP
+// at a new one relies on that; draining only while linked lost the old FIFO's last
+// frame, with the draw-done the game's frame wait was sleeping for.
+static void cp_sync_wptr() {
+    if (g_cp_cr & CP_CR_LINK) g_cp_wptr = pi_fifo_wptr();
+}
+
 static void cp_drain() {
-    if (!(g_cp_cr & CP_CR_READ) || !(g_cp_cr & CP_CR_LINK)) return;
+    cp_sync_wptr();
+    if (!(g_cp_cr & CP_CR_READ)) return;
     uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
-    uint32_t wptr = pi_fifo_wptr() & 0x03FFFFE0;
+    uint32_t wptr = g_cp_wptr & 0x03FFFFE0;
     if (!end || end <= base) return;
     uint32_t r = g_cp_rptr & 0x03FFFFE0;
     if (r < base || r >= end) r = base;
     if (wptr < base || wptr >= end) {
-        // The CPU FIFO is somewhere else while the link bit is on: the GP would follow a
-        // write pointer that has nothing to do with its own FIFO.
+        // The write pointer is in another FIFO: the GP would follow a pointer that has
+        // nothing to do with its own.
         static uint32_t warned;
-        if (warned++ < 8) LOG(LOG_GX, "CP linked but PI wptr %08X outside GP FIFO %08X-%08X (rptr %08X)", wptr, base, end, r);
+        if (warned++ < 8) LOG(LOG_GX, "CP wptr %08X outside GP FIFO %08X-%08X (rptr %08X)", wptr, base, end, r);
         return;
     }
     bool bp_on = g_cp_cr & CP_CR_BPEN;
@@ -397,7 +410,6 @@ static void cp_drain() {
     if (hit) g_cp_sr |= 0x10; else g_cp_sr &= ~0x10;
     cp_update_irq();
     g_cp_rptr = r;
-    g_cp_wptr = wptr;
     g_cp_rwdist = wptr >= r ? wptr - r : (end - r) + (wptr - base);
     cp_watermarks();
 }
@@ -512,7 +524,21 @@ static void set_hi(uint32_t& r, uint16_t v) { r = (r & 0xFFFFu) | ((uint32_t)v <
 
 uint16_t cp_read16(uint32_t off) {
     switch (off & 0xFF) {
-    case 0x00: return 0x0C | (g_cp_sr & 0x13);  // GP read idle + command idle
+    case 0x00: {
+        // The idle bits as the hardware reports them (after Dolphin's SetCpStatusRegister):
+        // not idle while data waits behind a breakpoint. A game that moves its FIFO
+        // spins on these until the old one has drained, and the retrace handler that
+        // moves the breakpoint runs meanwhile; reported idle regardless, it moved on at
+        // once and the frame behind the breakpoint, with the draw-done its frame count
+        // waited for, was never run.
+        uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
+        uint32_t r = g_cp_rptr & 0x03FFFFE0, w = g_cp_wptr & 0x03FFFFE0;
+        uint32_t d = (end > base && r >= base && r < end && w >= base && w < end) ? (w >= r ? w - r : (end - r) + (w - base)) : 0;
+        bool at_bp = (g_cp_cr & CP_CR_BPEN) && r == (g_cp_bp & 0x03FFFFE0);
+        bool read_idle = d == 0 || r == w;
+        bool cmd_idle = d == 0 || at_bp || !(g_cp_cr & CP_CR_READ);
+        return (uint16_t)((g_cp_sr & 0x13) | (read_idle ? 4 : 0) | (cmd_idle ? 8 : 0));
+    }
     case 0x02: return g_cp_cr;
     case 0x04: return g_cp_clear;
     case 0x20: return lo(g_cp_base); case 0x22: return hi(g_cp_base);
@@ -532,21 +558,22 @@ void cp_write16(uint32_t off, uint16_t v) {
     case 0x00: g_cp_sr = v; break;
     case 0x02:
         if ((v ^ g_cp_cr) & ~1u) LOG(LOG_GX, "CP_CR %04X -> %04X", g_cp_cr, v);
+        cp_sync_wptr();  // with the old link state: an unlink keeps the pointer where the PI left it
         g_cp_cr = v;
         if (!(v & CP_CR_BPEN)) g_cp_sr &= ~0x10;
         cp_update_irq();
         cp_drain();
         break;
     case 0x04: g_cp_clear = v; g_cp_sr &= ~(v & 3); cp_watermarks(); break;
-    case 0x20: set_lo(g_cp_base, v & ~0x1F); LOG(LOG_GX, "CP base lo %04X", v); break; case 0x22: set_hi(g_cp_base, v & 0x3FF); break;
+    case 0x20: set_lo(g_cp_base, v & ~0x1F); break; case 0x22: set_hi(g_cp_base, v & 0x3FF); LOG(LOG_GX, "CP base %08X", g_cp_base); break;
     case 0x24: set_lo(g_cp_end, v & ~0x1F); break; case 0x26: set_hi(g_cp_end, v & 0x3FF); break;
     case 0x28: set_lo(g_cp_hiwm, v); break; case 0x2A: set_hi(g_cp_hiwm, v); cp_watermarks(); break;
     case 0x2C: set_lo(g_cp_lowm, v); break; case 0x2E: set_hi(g_cp_lowm, v); cp_watermarks(); break;
     case 0x30: set_lo(g_cp_rwdist, v); break; case 0x32: set_hi(g_cp_rwdist, v); break;
-    case 0x34: set_lo(g_cp_wptr, v); break; case 0x36: set_hi(g_cp_wptr, v); break;
-    case 0x38: set_lo(g_cp_rptr, v); break; case 0x3A: set_hi(g_cp_rptr, v); break;
+    case 0x34: set_lo(g_cp_wptr, v); break; case 0x36: set_hi(g_cp_wptr, v); LOG(LOG_GX, "CP wptr %08X", g_cp_wptr); break;
+    case 0x38: set_lo(g_cp_rptr, v); break; case 0x3A: set_hi(g_cp_rptr, v); LOG(LOG_GX, "CP rptr %08X", g_cp_rptr); break;
     case 0x3C: set_lo(g_cp_bp, v); cp_drain(); break;
-    case 0x3E: set_hi(g_cp_bp, v); cp_drain(); break;
+    case 0x3E: set_hi(g_cp_bp, v); LOG(LOG_GX, "CP bp %08X (rptr %08X)", g_cp_bp, g_cp_rptr); cp_drain(); break;
     }
 }
 
@@ -571,6 +598,7 @@ uint16_t pe_read16(uint32_t off) {
 void pe_write16(uint32_t off, uint16_t v) {
     switch (off & 0xFF) {
     case 0x0A:
+        if ((v & PE_FINISH_INT) && (g_pe_ctrl & PE_FINISH_INT)) g_pe_finish_acked++;
         g_pe_ctrl = (uint16_t)((g_pe_ctrl & (PE_TOKEN_INT | PE_FINISH_INT)) & ~(v & (PE_TOKEN_INT | PE_FINISH_INT))) |
                     (v & (PE_TOKEN_EN | PE_FINISH_EN));
         pe_update_irq();
@@ -587,7 +615,8 @@ void debug_dump_fifo() {
     fprintf(stderr, "FIFO: CP cr=%04X sr=%04X base=%08X end=%08X wptr=%08X rptr=%08X rwdist=%08X bp=%08X | PI base=%08X end=%08X wptr=%08X | pending=%zu gp=%u\n",
             g_cp_cr, g_cp_sr, g_cp_base, g_cp_end, g_cp_wptr, g_cp_rptr, g_cp_rwdist, g_cp_bp, pi_fifo_base(), pi_fifo_end(), pi_fifo_wptr(),
             g_pending.size(), g_gp_len);
-    fprintf(stderr, "  PE token=%04X ctrl=%04X\n", g_pe_token, g_pe_ctrl);
+    fprintf(stderr, "  PE token=%04X ctrl=%04X finish raised=%u acked=%u coalesced=%u\n", g_pe_token, g_pe_ctrl, g_pe_finish_raised, g_pe_finish_acked, g_pe_finish_coalesced);
+    fprintf(stderr, "  front end: queued %zu bytes in %zu batches, busy=%d sleeping=%d, guest waiting=%d\n", (size_t)g_fe_bytes, g_fe_queue.size(), (int)g_fe_busy, (int)g_fe_sleeping, (int)g_guest_waiting);
     // GCN_FIFO_DUMP=<path>: the GP FIFO's memory, base to end, for decoding offline.
     if (const char* path = getenv("GCN_FIFO_DUMP")) {
         uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;

@@ -252,6 +252,12 @@ extern const RecompFunc g_recomp_funcs[];
 extern const uint32_t g_recomp_func_count;
 /* The DOL's code sections: every function the table can hold lies in [base, end). */
 extern const uint32_t g_recomp_code_base, g_recomp_code_end;
+/* Code the game loads from its data files at run time, recompiled at canonical addresses
+   and bound to where the game put it on first call; see runtime/modules.cpp. */
+typedef struct { uint32_t canon, size, entry, code_end; const uint8_t* bytes; const char* name; } RecompModule;
+extern const RecompModule g_recomp_modules[];
+extern const uint32_t g_recomp_module_count;
+uint32_t modules_canon(uint32_t a);
 
 void call_indirect(CPU* c, uint32_t addr);
 void unimpl(CPU* c, uint32_t pc, uint32_t inst);

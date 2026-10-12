@@ -99,6 +99,12 @@ static void eye_dump(uint32_t n) {
 #define GCN_STR(x) GCN_STR_(x)
 
 static void on_interrupt() {
+    // GCN_RAM_DUMP=<path>: the guest RAM at the interrupt, for reading the game's state offline.
+    if (const char* path = getenv("GCN_RAM_DUMP")) {
+        FILE* f = fopen(path, "wb");
+        if (!f) perror("GCN_RAM_DUMP");
+        else { fwrite(g_mem, 1, RAM_SIZE, f); fclose(f); fprintf(stderr, "RAM written to %s\n", path); }
+    }
     plat_watchdog(2, 2);  // never hang in here (stdio locks may be held by other threads)
     input_log_end();
     debug_dump_threads();

@@ -2,6 +2,7 @@
 #include "runtime.h"
 #include "platform.h"
 #include "mmu.h"
+#include "modules.h"
 #include "input_log.h"
 #include <algorithm>
 #include <atomic>
@@ -88,9 +89,16 @@ void mem_init() {
 // ---------------------------------------------------------------------------
 // Indirect calls
 // ---------------------------------------------------------------------------
-// One slot per instruction word of the DOL's code sections, filled from the generated
-// table at startup; the bounds come from the recompiler, not from here.
-static std::vector<RecompFn> g_fn_table;
+// One slot per instruction word, in 1 MB buckets allocated where there is code: the
+// recompiled code may sit in several far-apart ranges (a second image a game maps
+// elsewhere, modules at canonical addresses), and one flat table across them would be
+// most of a gigabyte.
+static RecompFn* g_fn_buckets[4096];
+
+static RecompFn fn_lookup(uint32_t addr) {
+    RecompFn* b = g_fn_buckets[addr >> 20];
+    return b ? b[(addr & 0xFFFFF) >> 2] : nullptr;
+}
 
 const char* func_name(uint32_t addr) {
     for (uint32_t i = 0; i < g_recomp_func_count; i++)
@@ -114,21 +122,27 @@ const char* func_containing(uint32_t addr, uint32_t* start) {
 }
 
 static void build_fn_table() {
-    g_fn_table.assign((g_recomp_code_end - g_recomp_code_base) / 4, nullptr);
     for (uint32_t i = 0; i < g_recomp_func_count; i++) {
         uint32_t a = g_recomp_funcs[i].addr;
-        if (a >= g_recomp_code_base && a < g_recomp_code_end) g_fn_table[(a - g_recomp_code_base) / 4] = g_recomp_funcs[i].fn;
+        RecompFn*& b = g_fn_buckets[a >> 20];
+        if (!b) b = (RecompFn*)calloc(0x40000, sizeof(RecompFn));
+        b[(a & 0xFFFFF) >> 2] = g_recomp_funcs[i].fn;
     }
+    modules_init();
 }
 
 bool recomp_is_function(uint32_t addr) {
-    return addr >= g_recomp_code_base && addr < g_recomp_code_end && !(addr & 3) && g_fn_table[(addr - g_recomp_code_base) / 4] != nullptr;
+    return !(addr & 3) && fn_lookup(addr) != nullptr;
 }
 
 extern "C" void call_indirect(CPU* c, uint32_t addr) {
-    if (addr >= g_recomp_code_base && addr < g_recomp_code_end && !(addr & 3)) {
-        RecompFn fn = g_fn_table[(addr - g_recomp_code_base) / 4];
+    if (!(addr & 3)) {
+        RecompFn fn = fn_lookup(addr);
         if (fn) { fn(c); return; }
+        // In a module the game loaded: at its canonical address, once bound.
+        uint32_t canon = modules_canon(addr);
+        if (canon == addr && modules_bind(addr)) canon = modules_canon(addr);
+        if (canon != addr && (fn = fn_lookup(canon))) { fn(c); return; }
     }
     // GCN_RAM_DUMP=<path>: the guest RAM at this failure, for finding out what the code at
     // `addr` is and where it came from.
