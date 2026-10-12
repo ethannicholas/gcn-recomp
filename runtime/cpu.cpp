@@ -187,6 +187,7 @@ extern "C" void hle_rfi(CPU* c, uint32_t pc) {
 extern "C" void hle_mtmsr(CPU* c, uint32_t v) { c->msr = v; }
 extern "C" void hle_set_fpscr(CPU* c, uint32_t v) {
     c->fpscr = v;
+    c->fprf_pending = 0;  // an explicit write supersedes the last result's class
     // rounding mode bits 30-31 (RN); only nearest is honoured for now
 }
 

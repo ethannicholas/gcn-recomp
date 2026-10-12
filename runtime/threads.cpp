@@ -29,6 +29,9 @@ struct Binding {
     BindKind kind = BIND_NONE;
     jmp_buf jb;
     CPU snapshot;
+    // What the save wrote into the context's SRR0 and r1. A context that no longer holds
+    // them was re-initialised since (see binding_stale).
+    uint32_t srr0 = 0, sp = 0;
 };
 
 struct HostThread {
@@ -39,6 +42,7 @@ struct HostThread {
     bool run = false;
     Binding* resume = nullptr;   // set by whoever wakes us
     uint32_t start_ctx = 0;      // for fresh threads
+    bool retired = false;        // its guest thread is gone: exit when woken
 };
 
 static thread_local HostThread* t_self;
@@ -80,6 +84,7 @@ static void context_to_cpu(CPU* c, uint32_t ctx) {
         memcpy(&c->ps1[i], &p, 8);
     }
     c->fpscr = mem_r32(ctx + CTX_FPSCR);
+    c->fprf_pending = 0;
     c->msr = mem_r32(ctx + CTX_SRR1);
     for (int i = 0; i < 8; i++) c->gqr[i] = mem_r32(ctx + CTX_GQR + 4 * i);
 }
@@ -117,8 +122,8 @@ static void wake(HostThread* h, Binding* b) {
 // binding we should resume at (or nullptr for a fresh start).
 static Binding* wait_for_baton(HostThread* self) {
     std::unique_lock<std::mutex> lk(self->m);
-    self->cv.wait(lk, [&] { return self->run || g_quit.load(); });
-    if (g_quit) { lk.unlock(); plat_thread_exit(); }
+    self->cv.wait(lk, [&] { return self->run || g_quit.load() || self->retired; });
+    if (g_quit || self->retired) { lk.unlock(); plat_thread_exit(); }
     return self->resume;
 }
 
@@ -142,6 +147,33 @@ static Binding* wait_for_baton(HostThread* self) {
     Binding* mine = wait_for_baton(self);
     if (!mine) fatal("thread %d woken without resume point", self->id);
     resume_binding(self, mine);
+}
+
+// A binding is a resume point for the context it was made for. The SDK saves a thread's
+// context even as the thread exits (OSExitThread clears the context, then reschedules, and
+// SelectThread saves the current thread's context before choosing the next), so a game
+// that creates a new thread on an exited thread's OSThread -- OSCreateThread
+// re-initialises the context with the new entry point and stack -- loads a context whose
+// binding is the dead thread inside OSExitThread. Resuming that ran the old thread on
+// past its exit and returned to whatever the new thread's stack held. The save's SRR0
+// and r1 are in the context until something rewrites it, so a context that no longer
+// holds them is a fresh one.
+static void binding_stamp(Binding* b, uint32_t ctx) {
+    b->srr0 = mem_r32(ctx + CTX_SRR0);
+    b->sp = mem_r32(ctx + CTX_GPR + 4);
+}
+static bool binding_stale(const Binding* b, uint32_t ctx) {
+    return mem_r32(ctx + CTX_SRR0) != b->srr0 || mem_r32(ctx + CTX_GPR + 4) != b->sp;
+}
+
+// The host thread of a guest thread that is gone: drop every resume point on it and let
+// it exit, which frees its stack.
+static void retire(HostThread* h) {
+    for (auto& kv : g_bindings)
+        if (kv.second.h == h) kv.second.kind = BIND_NONE;
+    std::lock_guard<std::mutex> lk(h->m);
+    h->retired = true;
+    h->cv.notify_one();
 }
 
 static void* host_thread_main(void* arg) {
@@ -175,6 +207,7 @@ extern "C" void hle_OSSaveContext(CPU* c) {
     b.h = t_self;
     b.kind = BIND_SAVED;
     b.snapshot = *c;
+    binding_stamp(&b, ctx);
     LOG(LOG_THREAD, "save ctx %08X on host %d", ctx, t_self->id);
 }
 
@@ -184,6 +217,14 @@ extern "C" void hle_OSLoadContext(CPU* c) {
     // Clear the exception flag like the real OSLoadContext does.
     mem_w16(ctx + CTX_STATE, mem_r16(ctx + CTX_STATE) & ~OS_CONTEXT_STATE_EXC);
     auto it = g_bindings.find(ctx);
+    if (it != g_bindings.end() && it->second.kind != BIND_NONE && binding_stale(&it->second, ctx)) {
+        // The context was re-initialised since it was saved: a new thread on an old
+        // thread's OSThread. The old one's host thread can never run again.
+        HostThread* old = it->second.h;
+        LOG(LOG_THREAD, "ctx %08X re-initialised since its save: host %d retired", ctx, old->id);
+        if (old != self) retire(old);
+        it->second.kind = BIND_NONE;
+    }
     if (it != g_bindings.end() && it->second.kind != BIND_NONE) {
         Binding* b = &it->second;
         LOG(LOG_THREAD, "load ctx %08X (host %d -> %d)", ctx, self->id, b->h->id);
@@ -233,6 +274,7 @@ static void irq_deliver(CPU* c, uint32_t exc) {
     b->kind = BIND_EXC;
     b->snapshot = *c;
     cpu_to_context(c, ctx, 0);
+    binding_stamp(b, ctx);
     mem_w16(ctx + CTX_STATE, mem_r16(ctx + CTX_STATE) | OS_CONTEXT_STATE_EXC);
     if (GCN_SETJMP(b->jb) != 0) return;  // resumed by OSLoadContext(ctx)
     c->spr[26] = 0;          // SRR0

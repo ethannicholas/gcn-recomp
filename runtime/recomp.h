@@ -23,6 +23,11 @@ typedef struct CPU {
     uint8_t cr[8];     /* each field: LT=8 GT=4 EQ=2 SO=1 */
     uint8_t xer_ca, xer_so, xer_ov, xer_bc;
     uint32_t lr, ctr, msr, fpscr;
+    /* FPSCR[FPRF], the class of the last arithmetic result, kept lazily: an op that sets it
+       records its result here, and FPSCR_READ works out the bits when something reads the
+       FPSCR. pending: 0 none, 1 a double result, 2 a single one. */
+    double fprf_v;
+    uint8_t fprf_pending;
     uint32_t gqr[8];
     uint32_t spr[1024];
     void* host;        /* owning HostThread */
@@ -245,6 +250,28 @@ static inline int32_t FCTIW(double d) {
     if (d >= 2147483647.0) return INT32_MAX;
     if (d <= -2147483648.0) return INT32_MIN;
     return (int32_t)nearbyint(d);
+}
+
+/* FPSCR[FPRF] (bits 15-19: C FL FG FE FU) for a result, as the 750 sets it: a code that
+   tells NaN, infinities, normals, denormals and zeros of each sign apart. A single-
+   precision result is denormal by the single format's range. Code that classifies a value
+   by rounding it and reading the FPSCR back (frsp; mcrfs) depends on it. */
+static inline uint32_t FPRF_OF(double v, int single) {
+    if (v != v) return 0x11;
+    const int neg = signbit(v) != 0;
+    if (isinf(v)) return neg ? 0x09 : 0x05;
+    if (v == 0.0) return neg ? 0x12 : 0x02;
+    const double a = fabs(v);
+    const int denorm = single ? a < 1.17549435e-38 : a < 2.2250738585072014e-308;
+    if (denorm) return neg ? 0x18 : 0x14;
+    return neg ? 0x08 : 0x04;
+}
+static inline uint32_t FPSCR_READ(CPU* c) {
+    if (c->fprf_pending) {
+        c->fpscr = (c->fpscr & ~0x1F000u) | (FPRF_OF(c->fprf_v, c->fprf_pending == 2) << 12);
+        c->fprf_pending = 0;
+    }
+    return c->fpscr;
 }
 
 /* ---- runtime services called from generated code ---- */

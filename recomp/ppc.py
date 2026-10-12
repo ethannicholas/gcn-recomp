@@ -533,6 +533,12 @@ def cr1(rc):
     return ' c->cr[1] = (uint8_t)(c->fpscr >> 28);' if rc else ''
 
 
+# An arithmetic result sets FPSCR[FPRF]; it is recorded here and classified only when the
+# FPSCR is read (FPSCR_READ in runtime/recomp.h).
+FPRF_S = ' c->fprf_v = v; c->fprf_pending = 2;'
+FPRF_D = ' c->fprf_v = v; c->fprf_pending = 1;'
+
+
 def translate59(pc, i, d, a, b, cc, rc):
     xo = (i >> 1) & 0x1F
     ops = {
@@ -547,7 +553,7 @@ def translate59(pc, i, d, a, b, cc, rc):
         31: f'-fma({F(a)}, {F(cc)}, {F(b)})',
     }
     if xo in ops:
-        return f'{{ double v = (double)(float)({ops[xo]}); {F(d)} = v; {P1(d)} = v; }}' + cr1(rc)
+        return f'{{ double v = (double)(float)({ops[xo]}); {F(d)} = v; {P1(d)} = v;{FPRF_S} }}' + cr1(rc)
     raise Unimpl(f'op59 xo {xo}')
 
 
@@ -566,15 +572,15 @@ def translate63(pc, i, d, a, b, cc, rc):
         31: f'-fma({F(a)}, {F(cc)}, {F(b)})',
     }
     if xo5 in ops5:
-        return f'{F(d)} = {ops5[xo5]};' + cr1(rc)
+        return f'{{ double v = {ops5[xo5]}; {F(d)} = v;{FPRF_D} }}' + cr1(rc)
     if xo5 == 23:  # fsel
         return f'{F(d)} = ({F(a)} >= 0.0) ? {F(cc)} : {F(b)};' + cr1(rc)
     if xo5 == 22:  # fsqrt (not on gekko, but harmless)
-        return f'{F(d)} = sqrt({F(b)});' + cr1(rc)
+        return f'{{ double v = sqrt({F(b)}); {F(d)} = v;{FPRF_D} }}' + cr1(rc)
     if xo in (0, 32):  # fcmpu, fcmpo
         return f'c->cr[{d >> 2}] = FCMP({F(a)}, {F(b)});'
     if xo == 12:  # frsp
-        return f'{{ double v = (double)(float){F(b)}; {F(d)} = v; {P1(d)} = v; }}' + cr1(rc)
+        return f'{{ double v = (double)(float){F(b)}; {F(d)} = v; {P1(d)} = v;{FPRF_S} }}' + cr1(rc)
     if xo == 14:  # fctiw
         return f'c->f[{d}].u = 0xFFF8000000000000ull | (uint32_t)FCTIW({F(b)});' + cr1(rc)
     if xo == 15:  # fctiwz
@@ -588,25 +594,25 @@ def translate63(pc, i, d, a, b, cc, rc):
     if xo == 136:
         return f'c->f[{d}].u = c->f[{b}].u | 0x8000000000000000ull;' + cr1(rc)
     if xo == 583:  # mffs
-        return f'c->f[{d}].u = 0xFFF8000000000000ull | c->fpscr;' + cr1(rc)
+        return f'c->f[{d}].u = 0xFFF8000000000000ull | FPSCR_READ(c);' + cr1(rc)
     if xo == 711:  # mtfsf
         fm = (i >> 17) & 0xFF
         m = 0
         for k in range(8):
             if fm & (0x80 >> k):
                 m |= 0xF0000000 >> (4 * k)
-        return f'hle_set_fpscr(c, (c->fpscr & 0x{(~m) & 0xFFFFFFFF:X}u) | ((uint32_t)c->f[{b}].u & 0x{m:X}u));' + cr1(rc)
+        return f'hle_set_fpscr(c, (FPSCR_READ(c) & 0x{(~m) & 0xFFFFFFFF:X}u) | ((uint32_t)c->f[{b}].u & 0x{m:X}u));' + cr1(rc)
     if xo == 134:  # mtfsfi
         crf = d >> 2
         imm = (i >> 12) & 0xF
         sh = 28 - 4 * crf
-        return f'hle_set_fpscr(c, (c->fpscr & ~(0xFu << {sh})) | ({imm}u << {sh}));' + cr1(rc)
+        return f'hle_set_fpscr(c, (FPSCR_READ(c) & ~(0xFu << {sh})) | ({imm}u << {sh}));' + cr1(rc)
     if xo == 38:  # mtfsb1
-        return f'hle_set_fpscr(c, c->fpscr | (0x80000000u >> {d}));' + cr1(rc)
+        return f'hle_set_fpscr(c, FPSCR_READ(c) | (0x80000000u >> {d}));' + cr1(rc)
     if xo == 70:  # mtfsb0
-        return f'hle_set_fpscr(c, c->fpscr & ~(0x80000000u >> {d}));' + cr1(rc)
+        return f'hle_set_fpscr(c, FPSCR_READ(c) & ~(0x80000000u >> {d}));' + cr1(rc)
     if xo == 64:  # mcrfs
-        return f'c->cr[{d >> 2}] = (c->fpscr >> {28 - 4 * (a >> 2)}) & 0xF;'
+        return f'c->cr[{d >> 2}] = (FPSCR_READ(c) >> {28 - 4 * (a >> 2)}) & 0xF;'
     raise Unimpl(f'op63 xo {xo}')
 
 
@@ -619,9 +625,11 @@ def translate4(pc, i, d, a, b, cc, rc):
     C0, C1 = F(cc), P1(cc)
 
     def pair(e0, e1, rnd=True):
+        fprf = ''
         if rnd:
             e0, e1 = f'(double)(float)({e0})', f'(double)(float)({e1})'
-        return f'{{ double v0 = {e0}, v1 = {e1}; {F(d)} = v0; {P1(d)} = v1; }}' + cr1(rc)
+            fprf = ' c->fprf_v = v0; c->fprf_pending = 2;'
+        return f'{{ double v0 = {e0}, v1 = {e1}; {F(d)} = v0; {P1(d)} = v1;{fprf} }}' + cr1(rc)
 
     if xo6 in (6, 7, 38, 39):  # psq_lx psq_stx psq_lux psq_stux
         w = (i >> 10) & 1
