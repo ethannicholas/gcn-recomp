@@ -44,6 +44,7 @@ through `vr::GameHooks` (`runtime/vr_game.h`) in its `SOURCES`.
 TITLE is the game's name, used in messages. LABEL, optional, is what the window and the
 headset app are called, so the app can carry a name of the project's own rather than the
 game's trademark.
+
 The game project provides:
 
 - `analysis/symbols.txt` — the DOL's function layout in decomp-toolkit's format, either
