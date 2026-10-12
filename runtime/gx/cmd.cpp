@@ -136,9 +136,9 @@ static void load_xf(uint32_t addr, uint32_t n, const uint8_t* data) {
             if (r == v) continue;
             r = v;
             xf_reg_written(reg);
-            // The ones the pixel state is built from: colour channel count, viewport,
-            // projection, texgen count. The rest feed the vertex transform only.
-            if (reg == 0x09 || (reg >= 0x1A && reg <= 0x26) || reg == 0x3F) g_state.pixel_dirty = true;
+            // The ones the pixel state is built from: clip mode, colour channel count,
+            // viewport, projection, texgen count. The rest feed the vertex transform only.
+            if (reg == 0x05 || reg == 0x09 || (reg >= 0x1A && reg <= 0x26) || reg == 0x3F) g_state.pixel_dirty = true;
         }
     }
 }

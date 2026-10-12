@@ -838,6 +838,7 @@ static uint32_t snapshot_state(bool view_space) {
     for (int i = 0; i < 6; i++) st.viewport[i] = xfr_f(0x1A + i);
     st.num_texgens = g_state.xf_regs[0x3F] & 15;
     st.num_colors = g_state.xf_regs[0x09] & 3;
+    st.clip_disable = g_state.xf_regs[0x05] & 1;
     // Textures referenced by TEV stages and indirect stages.
     uint32_t genmode = g_state.bp[0x00];
     uint32_t nstages = ((genmode >> 10) & 15) + 1;
@@ -963,6 +964,37 @@ static void layout_packed(Batch& b) {
     b.packed.resize(bytes);
 }
 
+// GX's texture offsets for lines and points (GXEnableTexOffsets with GXSetLineWidth's or
+// GXSetPointSize's offset): the rasteriser widens a line into a quad and runs a texture
+// coordinate's s from its value to value + 1/n across the width (SU_LPSIZE bits 16-18 for
+// lines and 19-21 for points give n as 16, 8, 4, 2 or 1; s and t both, for a point),
+// per coordinate enabled in its SU_SSIZE register (bit 18 lines, 19 points). A game draws
+// antialiased lines this way, from a texture whose alpha is a profile across u that is
+// clear at both edges. GL draws a line one pixel wide with no coordinate across it, so
+// each line samples the middle of its range instead -- with s at the edge, as it was, every
+// such line drew fully transparent.
+static void line_point_tex_offset(const Batch& b, uint32_t cmd, uint8_t* dst, uint32_t stride, uint32_t n) {
+    const Cmd& c = b.cmds[cmd];
+    if (c.prim != 1 && c.prim != 2) return;
+    const PixelState& st = b.states[c.state];
+    static const float kOffset[8] = {0.0f, 1.0f / 16, 1.0f / 8, 1.0f / 4, 1.0f / 2, 1.0f, 1.0f, 1.0f};
+    const uint32_t lp = st.bp[0x22];
+    const float off = kOffset[c.prim == 1 ? (lp >> 16) & 7 : (lp >> 19) & 7] * 0.5f;
+    if (off == 0.0f) return;
+    const uint32_t ntex = draw_ntex(st), bit = c.prim == 1 ? 18 : 19;
+    for (uint32_t t = 0; t < ntex; t++) {
+        if (!((st.bp[0x30 + 2 * t] >> bit) & 1)) continue;
+        uint8_t* p = dst + kPackedHead + 12 * t;
+        for (uint32_t i = 0; i < n; i++, p += stride) {
+            float tc[3];
+            memcpy(tc, p, sizeof(tc));
+            tc[0] += off * tc[2];
+            if (c.prim == 2) tc[1] += off * tc[2];
+            memcpy(p, tc, sizeof(tc));
+        }
+    }
+}
+
 // For a batch whose vertices were transformed as they arrived (xf_sync): packs them all.
 static void pack_all(Batch& b) {
     layout_packed(b);
@@ -971,7 +1003,9 @@ static void pack_all(Batch& b) {
         const Cmd& c = b.cmds[i];
         uint32_t stride;
         uint8_t* dst = packed_dest(b, (uint32_t)i, c.vfirst, stride);
+        uint8_t* const first = dst;
         for (uint32_t v = c.vfirst; v < c.vfirst + c.vcount; v++, dst += stride) memcpy(dst, &b.verts[v], stride);
+        line_point_tex_offset(b, (uint32_t)i, first, stride, c.vcount);
     }
 }
 
@@ -1101,10 +1135,12 @@ static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
         for (uint32_t i = 0; i < d.count; i++) transform_vertex(in[i], out[i], d.has_nrm);
         return;
     }
+    uint8_t* const first = dst;
     for (uint32_t i = 0; i < d.count; i++, dst += stride) {
         transform_vertex(in[i], out[i], d.has_nrm);
         memcpy(dst, &out[i], stride);
     }
+    line_point_tex_offset(b, d.cmd, first, stride, d.count);
 }
 
 static void transform_range(const Pending& pd, size_t lo, size_t hi, Batch& b) {
@@ -1582,10 +1618,15 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
     // Logged after the fields are filled in; it used to print cc.clear before it was
     // assigned, so every copy appeared not to clear.
     static const bool copylog = getenv("GCN_COPYLOG") != nullptr;
-    if (copylog)
+    if (copylog) {
+        // How many draw commands the batch holds since its last copy: what this copy can show.
+        uint32_t draws = 0;
+        const Batch& cb = batch();
+        for (size_t i = cb.cmds.size(); i-- > 0 && cb.cmds[i].type == CmdType::Draw;) draws++;
         fprintf(stderr, "[copy] f%u xfb=%d dest=%08X dst=%ux%u src=%ux%u@%u,%u fmt=%X clear=%d "
-                "half=%d pe=%06X pixfmt=%u depth=%d\n", g_frame_counter, cc.to_xfb, dest_addr, cc.dst_w, cc.dst_h,
-                cc.src_w, cc.src_h, cc.src_x, cc.src_y, cc.format, cc.clear, (int)half, v, bp[0x43] & 7, (int)cc.depth);
+                "half=%d pe=%06X pixfmt=%u depth=%d draws=%u seq=%u\n", g_frame_counter, cc.to_xfb, dest_addr, cc.dst_w, cc.dst_h,
+                cc.src_w, cc.src_h, cc.src_x, cc.src_y, cc.format, cc.clear, (int)half, v, bp[0x43] & 7, (int)cc.depth, draws, (uint32_t)g_draw_seq);
+    }
     if (!cc.to_xfb) cc.tex_id = texture_register_efb_copy(dest_addr, cc.dst_w, cc.dst_h, cc.format);
     // In the GCN_MTXLOG dump, so the draws it lists can be read against the pass
     // boundaries: which were drawn into an off-screen target and which into the scene.

@@ -242,8 +242,8 @@ the renderer never binds. A texture could go from the renderer while the front e
 held it, and every draw from then on sampled nothing: HUD text drawn as black rectangles,
 a little more of it as a session went on. Now only the front end decides
 (`Batch::dead_textures`): what it evicts, and the variants it drops when the game rewrites
-a texture, the renderer deletes a batch later. The renderer ages only EFB copies' textures,
-which it makes itself.
+a texture, the renderer deletes a batch later. EFB copies' textures go the same way (see
+"A copy lives as long as its memory" below).
 
 **A copy keeps its id.** A copy's texture id is kept per (address, size, format), not per
 address: a game that copies several targets of different sizes through one scratch buffer
@@ -275,6 +275,58 @@ rounding `z * 16777215 + 0.5` lands on 16777216 in single precision, whose top b
 so a cleared depth buffer copied as Z8 read as the nearest depth. A game that renders its
 shadow casters into a cleared region from above, copies the depth as Z8 and then darkens
 its ground wherever the copy is below 1.0 shadowed the whole ground.
+
+**A copy lives as long as its memory.** A copy is never written to RAM, so one the texture
+cache lets go of cannot be had again: the address decodes as whatever RAM holds there. The
+cache used to drop copies idle for 240 frames, and the renderer aged their GL textures on
+its own clock besides. A game can render a set of textures once -- the sixty frames of a
+spinning menu emblem, made while the menu loads -- and show them long after, and they were
+all gone before the first was drawn. Now an idle copy goes only when the RAM at its
+destination has changed (the game has put something else there) or when more than 512 are
+held, oldest first, which still bounds a game that copies dozens of sprites a frame to
+rotating addresses. The front end then lists the copy's id with the decoded textures it lets
+go of (`Batch::dead_textures`), and the renderer deletes it a batch later; it no longer ages
+anything itself.
+
+## Depth past the viewport's range
+
+GX clips depth before the viewport, at `-w <= z <= 0` in clip space, and clamps the depth
+the viewport then makes of what is left to the buffer's 24 bits. A viewport may map depth
+well past that range: a far of 10 instead of 1 squeezes the scene into the front tenth of
+the buffer and leaves everything farther at the maximum. GL clips after the viewport, at
+its own `[-1, 1]`, so it threw away everything past that tenth -- a whole menu backdrop
+drawn that way was missing. On desktop GL the renderer now enables `GL_DEPTH_CLAMP`, which
+turns off GL's near and far clipping and clamps depth instead, and the vertex shader clips
+where GX does through `gl_ClipDistance[4]` and `[5]` (`z + w` and `-z` before the viewport).
+Every program writes those two -- the copy and background shaders write 1 -- since an
+enabled clip distance a shader leaves unwritten is undefined. The eye paths write GL's own
+planes there, which keeps their clipping as it was. GL ES has no depth clamp in core and
+keeps GL's clipping. `GXSetClipMode(GX_CLIP_DISABLE)` (XF 0x1005) is recorded in the pixel
+state and shown in the draw log as `noclip`, but not yet honoured.
+
+## Z freeze
+
+With gen mode bit 19 set (`GXSetCoPlanar`) a triangle's depth is not its own: GX evaluates
+the plane of the last triangle it set up without z freeze, at each pixel. A game sets that
+plane with a triangle it culls: one placed at the far end of the frustum, then a sky box
+drawn with z freeze, keeps the sky behind planets, distant craft and far terrain whatever
+the sky's own geometry. Ignored, the sky wrote its own depth, a hundred units out, and
+everything farther failed the depth test behind it. The flat pass now takes the plane of
+each triangle draw's last triangle as it goes (`zfreeze_plane` in `render_gl.cpp`: the
+vertex shader's own placement, in the target's window coordinates, culled draws included)
+and a z freeze program writes `gl_FragDepth` from it (`u_zplane`). Before any plane in a
+frame, and in an eye, a z freeze draw keeps its own depth.
+
+## Texture offsets for lines and points
+
+`GXEnableTexOffsets` with the offset `GXSetLineWidth` or `GXSetPointSize` gives (SU_LPSIZE
+bits 16-18 and 19-21, per coordinate in SU_SSIZE bits 18 and 19) makes the rasteriser run a
+coordinate's s from its value to value + 1/n across a line's width, and s and t across a
+point. A game draws antialiased lines this way, from a texture whose alpha is a profile
+across u, clear at both edges. GL draws a line one pixel wide with nothing across it, so the
+front end moves each such coordinate to the middle of its range when it packs the vertices
+(`line_point_tex_offset` in `xf.cpp`). Left at the edge, every line was fully transparent.
+Lines are still one GL pixel wide at any width the game asks for.
 
 ## Depth bands in an eye
 
@@ -339,3 +391,11 @@ status bits whenever the write distance crosses the marks and raises the CP inte
 through the enable bits the SDK toggles. Without it the writer lapped the 64 KB FIFO: the
 lines the GP had not reached were overwritten before it got there, and what it then
 parsed was a later frame's vertices.
+
+A FIFO's end register names its last line, not the address past it: the SDK sets it to
+`base + size - 4`, and the hardware wraps after the line at the end is written (the CPU's
+write pointer) or read (the GP's), as Dolphin has it. Wrapping a line early lost the last
+line of a buffer filled to the brim -- which a display list sized by a dry run is: the write
+pointer came back to the base with its wrap bit set, `GXEndDisplayList` took that for an
+overflow and returned a size of zero, and every call of the list drew nothing.
+`cp_end_excl` in `gx/fifo.cpp` is the exclusive end the arithmetic uses.

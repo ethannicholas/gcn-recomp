@@ -386,9 +386,18 @@ static void cp_update_irq() {
 // lines the GP had not reached were overwritten before it got there, and what it then
 // parsed was the next frame's vertices. The status bits follow the condition; the
 // enable bits in the control register are what the SDK toggles to take each once.
+// A FIFO's end register names its last line, not the address past it: the SDK sets it to
+// base + size - 4, and the hardware wraps only after the line at the end is written (CPU
+// side) or read (GP side), as Dolphin has it. Wrapping a line early lost the last line of
+// a buffer filled to the brim, which is what a display list sized by a dry run is: the
+// write pointer came back to the base with its wrap bit set, GXEndDisplayList took that
+// for an overflow and returned a size of zero, and every call of the list drew nothing.
+// The exclusive end, for the arithmetic below; 0 while the register is unset.
+static inline uint32_t cp_end_excl() { return g_cp_end ? (g_cp_end & 0x03FFFFE0) + 32 : 0; }
+
 static void cp_watermarks() {
     if (!(g_cp_cr & CP_CR_LINK)) return;
-    uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
+    uint32_t base = g_cp_base & 0x03FFFFE0, end = cp_end_excl();
     if (!end || end <= base) return;
     uint32_t wptr = pi_fifo_wptr() & 0x03FFFFE0, r = g_cp_rptr & 0x03FFFFE0;
     if (r < base || r >= end) r = base;
@@ -422,7 +431,7 @@ static void cp_follow_pi() {
 
 static void cp_drain() {
     if (!(g_cp_cr & CP_CR_READ)) return;
-    uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
+    uint32_t base = g_cp_base & 0x03FFFFE0, end = cp_end_excl();
     uint32_t wptr = g_cp_wptr & 0x03FFFFE0;
     if (!end || end <= base) return;
     uint32_t r = g_cp_rptr & 0x03FFFFE0;
@@ -459,7 +468,7 @@ static void gp_flush32() {
     uint32_t addr = wptr & 0x03FFFFFF;
     memcpy(phys_ptr(addr), g_gp_buf, dma_fit("write-gather", addr, 32));
     addr += 32;
-    if (addr >= pi_fifo_end()) {
+    if (addr > pi_fifo_end()) {  // the end is the last line; see cp_end_excl
         addr = pi_fifo_base();
         wptr = (wptr ^ 0x04000000) & 0x04000000;  // toggle wrap bit
         wptr |= addr;
@@ -573,7 +582,7 @@ uint16_t cp_read16(uint32_t off) {
         // moves the breakpoint runs meanwhile; reported idle regardless, it moved on at
         // once and the frame behind the breakpoint, with the draw-done its frame count
         // waited for, was never run.
-        uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
+        uint32_t base = g_cp_base & 0x03FFFFE0, end = cp_end_excl();
         uint32_t r = g_cp_rptr & 0x03FFFFE0, w = g_cp_wptr & 0x03FFFFE0;
         uint32_t d = (end > base && r >= base && r < end && w >= base && w < end) ? (w >= r ? w - r : (end - r) + (w - base)) : 0;
         bool at_bp = (g_cp_cr & CP_CR_BPEN) && r == (g_cp_bp & 0x03FFFFE0);
@@ -668,7 +677,7 @@ void debug_dump_fifo() {
     fprintf(stderr, "  front end: queued %zu bytes in %zu batches, busy=%d sleeping=%d, guest waiting=%d\n", (size_t)g_fe_bytes, g_fe_queue.size(), (int)g_fe_busy, (int)g_fe_sleeping, (int)g_guest_waiting);
     // GCN_FIFO_DUMP=<path>: the GP FIFO's memory, base to end, for decoding offline.
     if (const char* path = getenv("GCN_FIFO_DUMP")) {
-        uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
+        uint32_t base = g_cp_base & 0x03FFFFE0, end = cp_end_excl();
         if (FILE* f = fopen(path, "wb")) {
             fwrite(phys_ptr(base), 1, end > base ? end - base : 0, f);
             fclose(f);

@@ -1,5 +1,6 @@
 // GX texture decoding (all formats -> RGBA8), TLUT (palette) memory, and the
 // guest-side texture cache.
+#include <algorithm>
 #include "../runtime.h"
 #include "gx.h"
 #include "render.h"
@@ -482,16 +483,41 @@ void texture_evict() {
             ++it;
         }
     }
-    // EFB copies too. Most are a fixed set of targets redrawn every frame, but the spray
-    // copies out around fifty 32x32 and 64x64 sprites a frame to addresses that rotate,
-    // so at speed this map grows without bound and takes a GL texture with each entry.
+    // EFB copies. A copy is never written to RAM, so one dropped while the game still
+    // means to use it cannot be had again: the address decodes as whatever RAM holds there.
+    // A game can render a set of textures once -- sixty frames of a spinning emblem, made
+    // while a menu loads -- and show them long after, and dropping copies idle for a few
+    // seconds lost the lot before the first was drawn. So an idle copy goes only when the
+    // RAM at its destination has changed (the game has put something else there), or when
+    // there are more than kMaxCopies, oldest first: a game can also copy out dozens of
+    // sprites a frame to addresses that rotate, and that map would otherwise grow without
+    // bound, with a GL texture per entry.
+    static constexpr size_t kMaxCopies = 512;
     for (auto it = g_efb_copies.begin(); it != g_efb_copies.end();) {
-        if (g_frame_counter - it->second.last_frame > kIdleFrames) it = g_efb_copies.erase(it);
-        else ++it;
+        const EfbCopyEntry& c = it->second;
+        if (g_frame_counter - c.last_frame > kIdleFrames && efb_copy_fingerprint(it->first, c.w, c.h) != c.ram)
+            it = g_efb_copies.erase(it);
+        else
+            ++it;
     }
+    if (g_efb_copies.size() > kMaxCopies) {
+        std::vector<std::pair<uint32_t, uint32_t>> by_age;  // (last frame, address)
+        for (auto& kv : g_efb_copies) by_age.push_back({kv.second.last_frame, kv.first});
+        std::sort(by_age.begin(), by_age.end());
+        for (size_t i = 0; i < by_age.size() - kMaxCopies; i++) g_efb_copies.erase(by_age[i].second);
+    }
+    // A copy's id outlives its entry for a while (see g_efb_copy_ids), but not an entry
+    // that still names it. When it goes, its GL texture goes with it: the front end alone
+    // decides when a copy is dead, as for decoded textures.
     for (auto it = g_efb_copy_ids.begin(); it != g_efb_copy_ids.end();) {
-        if (g_frame_counter - it->second.last_frame > kIdleFrames) it = g_efb_copy_ids.erase(it);
-        else ++it;
+        auto live = g_efb_copies.find(it->first.addr);
+        const bool held = live != g_efb_copies.end() && live->second.tex == it->second.tex;
+        if (!held && g_frame_counter - it->second.last_frame > kIdleFrames) {
+            g_dead.push_back(it->second.tex->id);
+            it = g_efb_copy_ids.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

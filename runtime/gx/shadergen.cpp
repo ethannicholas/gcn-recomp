@@ -164,6 +164,7 @@ void main() {
     // leaves the game's 60-degree frustum. GCN_EYE_FOGZ=0 takes the game's depth instead,
     // which fogs exactly as the flat view does whatever the head is doing.
     static const bool eye_fog_z = !(getenv("GCN_EYE_FOGZ") && atoi(getenv("GCN_EYE_FOGZ")) == 0);
+    s += "    vec2 gx_clip = vec2(1.0);\n";
     s += eye_fog_z ? "    float fz = (u_vr == 1 || u_vr == 3 || u_vr == 4) ? (u_view * vec4(a_pos, 1.0)).z : a_pos.z;\n"
                    : "    float fz = a_pos.z;\n";
     s += R"(    float gz = u_zproj.x * fz + u_zproj.y;
@@ -211,8 +212,21 @@ void main() {
         // GX's viewport transform points Y down and the EFB blit flips the image back,
         // so the flat path negates Y here to cancel it.
         gl_Position = vec4(p.x, -p.y, p.z, p.w);
+        // GX clips depth before the viewport, at -w <= z <= 0, and clamps the depth the
+        // viewport makes of what is left to the buffer's range. A viewport may reach past
+        // that range (a far of 10 instead of 1 squeezes the scene's depth into the front
+        // tenth and leaves everything farther at the buffer's maximum): GL, clipping after
+        // the viewport, threw away all of the scene beyond that tenth. So the renderer
+        // clamps depth (GL_DEPTH_CLAMP, which also turns off GL's own near and far
+        // clipping) and clips here where GX does.
+        gx_clip = vec2(clip.z + clip.w, -clip.z);
     }
 #ifdef GCN_CLIP
+    // Where the renderer clamps depth, GL no longer clips at near and far, so every other
+    // path clips at GL's own planes.
+    if (u_vr != 0) gx_clip = vec2(gl_Position.z + gl_Position.w, gl_Position.w - gl_Position.z);
+    gl_ClipDistance[4] = gx_clip.x;
+    gl_ClipDistance[5] = gx_clip.y;
     // Ignored unless enabled, which only the morph does.
     vec4 cd = (u_vr == 3) ? u_crop * vec4(a_pos, 1.0) : vec4(1.0);
     gl_ClipDistance[0] = cd.x;
@@ -276,6 +290,8 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     s += "uniform vec4 u_fog;\n";       // A, C, bmag, bshift
     s += "uniform vec3 u_fogcolor;\n";
     if (k.ztex) s += "uniform int u_zbias;\n";  // bp[0xF4]
+    const bool zfreeze = (k.genmode >> 19) & 1;
+    if (zfreeze) s += "uniform vec4 u_zplane;\n";  // see the z freeze below
     s += "layout(location = 0) out vec4 o_color;\n";
     s += "uniform vec2 u_indcoordscale[4];\n";
     s += "vec2 u_indscalef(int i) { return u_indcoordscale[i]; }\n";
@@ -572,11 +588,24 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     // frame and nothing drawn after it passed the depth test. The texel layouts are the
     // ones the texture decoder gives the Z formats' memory: Z8 in alpha, Z16 as alpha
     // (high byte) and red, Z24X8 as red, green, blue.
+    // Z freeze (GXSetCoPlanar, gen mode bit 19): the triangle's depth is not its own but
+    // the plane of the last triangle drawn without it, evaluated at this pixel. A game
+    // sets the plane with a triangle it culls -- a sky drawn after one placed at the far
+    // end of the frustum keeps out of the way of everything beyond its own geometry, the
+    // planets and the far terrain. u_zplane is that plane in this target's window
+    // coordinates (depth = x * gl_FragCoord.x + y * gl_FragCoord.y + z); w is 0 where the
+    // renderer has none, and the draw keeps its own depth.
+    const char* fragz = "gl_FragCoord.z";
+    if (zfreeze) {
+        s += "  float zfrag = u_zplane.w != 0.0 ? clamp(u_zplane.x * gl_FragCoord.x + u_zplane.y * gl_FragCoord.y + u_zplane.z, 0.0, 1.0) : gl_FragCoord.z;\n";
+        if (!k.ztex) s += "  gl_FragDepth = zfrag;\n";
+        fragz = "zfrag";
+    }
     if (k.ztex) {
         static const char* kZTexel[4] = {"tex.a", "tex.a << 8 | tex.r", "tex.r << 16 | tex.g << 8 | tex.b",
                                          "tex.r << 16 | tex.g << 8 | tex.b"};
         W("  int ztexel = (%s) + u_zbias;\n", kZTexel[k.ztex & 3]);
-        if (((k.ztex >> 2) & 3) == 1) s += "  ztexel += int(gl_FragCoord.z * 16777215.0);\n";
+        if (((k.ztex >> 2) & 3) == 1) W("  ztexel += int(%s * 16777215.0);\n", fragz);
         s += "  gl_FragDepth = float(ztexel & 0xFFFFFF) / 16777215.0;\n";
     }
     s += "  o_color = vec4(outc) / 255.0;\n";

@@ -246,6 +246,18 @@ use, which every lookup prolonged.
   through later draws that painted over it.
 - `GCN_COPYDUMP=<dir>` with `GCN_DRAWLOG` writes every texture copy made in that frame
   as it was produced, twice: its colour, and its alpha as grey (`copy_<frame>_<n>_tex<id>`).
+  `GCN_COPYDUMP_SIZE=WxH` writes every copy of that size instead, in whatever frame: a
+  render to texture done once, at a moment that differs from run to run, is caught
+  without knowing the frame.
+- `GCN_DRAWLOG_COPY=WxH` logs, like `GCN_DRAWLOG`, every batch holding a copy of that
+  size, and `GCN_PIXEL` probes it too. Both forms of the log list the copies between the
+  draws (`[copy] after draw n`, with the copy's texture id and format), give each draw's
+  whole projection (the last two figures are the z scale and offset), mark a draw made
+  with clipping off `noclip`, and print the q of the first texture coordinate.
+- `GCN_COPYLOG=1` also says how many draw commands the batch holds since its last copy
+  and the front end's running draw count (`draws=`, `seq=`): a copy with nothing drawn
+  before it, or a count that does not move between copies, means the draws never
+  reached the parser.
 - The draw log's verbose form (`GCN_DRAWLOG_VERBOSE=1`) also prints the pixel format and
   each bound map's mode register (wrap, filters, LOD bias).
 - `GCN_LIGHTLOG=<min verts>` prints, once per distinct lighting setup (channel controls,

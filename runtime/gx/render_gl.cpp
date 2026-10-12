@@ -76,7 +76,7 @@ struct UniformShadow {
 struct Program {
     GLuint prog;
     GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_konst, u_texsize, u_indmtx, u_indscale,
-        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias;
+        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
     mutable UniformShadow shadow;
 };
@@ -221,7 +221,6 @@ static std::unordered_map<uint32_t, GlTex> g_textures;
 // them continuously, and without this both the GL objects and the decoded copies grow
 // without bound until the device runs out of memory and crawls.
 static uint32_t g_render_frame;
-static constexpr uint32_t kTexIdleFrames = 240;  // ~8 s at 30 fps
 static std::unordered_map<uint32_t, GLuint> g_samplers;
 static int g_win_w, g_win_h;
 bool g_cull_swap = false;
@@ -405,6 +404,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_indcoordscale = glGetUniformLocation(p, "u_indcoordscale");
     pr.u_texsnap = glGetUniformLocation(p, "u_texsnap");
     pr.u_zbias = glGetUniformLocation(p, "u_zbias");
+    pr.u_zplane = glGetUniformLocation(p, "u_zplane");
     glUseProgram(p);
     GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     glUniform1iv(pr.u_tex, 8, units);
@@ -572,13 +572,19 @@ static const Program& get_program(const ShaderKey& k) {
     return pr;
 }
 
-static const char* kCopyVS = GCN_GLSL_VERSION R"(
+// Without a version line: glsl_header_with_clip() goes in front. Clip distances 4 and 5
+// are enabled for every program on desktop GL (see render_init), so this writes them.
+static const char* kCopyVS = R"(
 out vec2 v_uv;
 uniform vec4 u_rect;  // source rect in normalized EFB coords (x0,y0,x1,y1), y down
 void main() {
     vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1);
     v_uv = mix(u_rect.xy, u_rect.zw, p);
     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+#ifdef GCN_CLIP
+    gl_ClipDistance[4] = 1.0;
+    gl_ClipDistance[5] = 1.0;
+#endif
 }
 )";
 
@@ -650,6 +656,13 @@ void render_init(int internal_scale) {
     }
 #else
     g_clip_ok = true;
+    // GX clips depth in clip space and clamps what the viewport makes of it, so a viewport
+    // may map depth well past the buffer's range; the vertex shader clips at GX's planes
+    // through clip distances 4 and 5, which every program here writes. ES has no depth
+    // clamp in core, and keeps GL's clipping at the viewport's depth.
+    glEnable(GL_DEPTH_CLAMP);
+    glEnable(GL_CLIP_DISTANCE0 + 4);
+    glEnable(GL_CLIP_DISTANCE0 + 5);
 #endif
     g_vs_hash = hash_str(vs_src.c_str());
     g_vs = compile(GL_VERTEX_SHADER, vs_src);
@@ -713,7 +726,7 @@ void render_init(int internal_scale) {
     g_ebo = g_ebos[0];
     glBindVertexArray(g_vao);
 
-    GLuint cvs = compile(GL_VERTEX_SHADER, kCopyVS);
+    GLuint cvs = compile(GL_VERTEX_SHADER, glsl_header_with_clip() + kCopyVS);
     g_copy_prog = link(cvs, compile(GL_FRAGMENT_SHADER, kCopyFS));
     g_copy_u_src = glGetUniformLocation(g_copy_prog, "u_src");
     g_copy_u_depth = glGetUniformLocation(g_copy_prog, "u_depth");
@@ -739,6 +752,8 @@ void main() {
     gl_ClipDistance[1] = cd.y;
     gl_ClipDistance[2] = cd.z;
     gl_ClipDistance[3] = cd.w;
+    gl_ClipDistance[4] = 1.0;
+    gl_ClipDistance[5] = 1.0;
 #endif
 }
 )";
@@ -1089,6 +1104,48 @@ static void apply_stats_flush(const char* pass, uint32_t frame) {
     memset(&g_astat, 0, sizeof(g_astat));
 }
 
+// The z freeze plane (see the pixel shader): the depth plane of the last triangle drawn
+// without z freeze, in the EFB target's window coordinates, w = 1 once there is one. Set
+// by the flat pass as it goes; an eye keeps its draws' own depth (w = 0).
+static float g_zplane[4];
+
+// The plane of a draw's last triangle, as the flat path's vertex shader places it: the
+// GX projection, then the viewport (less the scissor offset), Y flipped for the EFB blit.
+static bool zfreeze_plane(const Batch& b, const Cmd& c, float out[4]) {
+    if (c.prim != 0 || c.count < 3) return false;
+    const PixelState& st = b.states[c.state];
+    const float* p = st.proj;
+    const float* vp = st.viewport;
+    const bool perspective = (int)p[6] == 0;
+    int xoff, yoff;
+    scissor_offset(st.bp, xoff, yoff);
+    const float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
+    const float vpb[2] = {2.0f * vp[5] / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f};
+    double X[3], Y[3], Z[3];
+    for (int i = 0; i < 3; i++) {
+        const float* v = b.verts[b.indices[c.first + c.count - 3 + i]].pos;
+        float cx, cy, cz, cw;
+        if (perspective) { cx = p[0] * v[0] + p[1] * v[2]; cy = p[2] * v[1] + p[3] * v[2]; cw = -v[2]; }
+        else { cx = p[0] * v[0] + p[1]; cy = p[2] * v[1] + p[3]; cw = 1.0f; }
+        cz = p[4] * v[2] + p[5];
+        if (cw <= 0.0f) return false;
+        const float px = vpa[0] * cw + vpa[1] * cx, py = vpa[2] * cw + vpa[3] * cy, pz = vpb[0] * cw + vpb[1] * cz;
+        X[i] = (px / cw + 1.0) * 0.5 * EFB_W * g_scale;
+        Y[i] = (-py / cw + 1.0) * 0.5 * EFB_H * g_scale;
+        Z[i] = (pz / cw + 1.0) * 0.5;
+    }
+    const double ux = X[1] - X[0], uy = Y[1] - Y[0], uz = Z[1] - Z[0];
+    const double wx = X[2] - X[0], wy = Y[2] - Y[0], wz = Z[2] - Z[0];
+    const double det = ux * wy - uy * wx;
+    if (fabs(det) < 1e-9) return false;
+    const double a = (uz * wy - uy * wz) / det, bb = (ux * wz - uz * wx) / det;
+    out[0] = (float)a;
+    out[1] = (float)bb;
+    out[2] = (float)(Z[0] - a * X[0] - bb * Y[0]);
+    out[3] = 1.0f;
+    return true;
+}
+
 static void apply_state(const PixelState& st, int prim) {
     int xoff, yoff;
     scissor_offset(st.bp, xoff, yoff);
@@ -1312,6 +1369,7 @@ static void apply_state(const PixelState& st, int prim) {
     }
     // Only a shader with a Z texture has the bias, and few draws do: set every time.
     if (pr.u_zbias >= 0) glUniform1i(pr.u_zbias, (GLint)(bp[0xF4] & 0xFFFFFF));
+    if (pr.u_zplane >= 0) glUniform4fv(pr.u_zplane, 1, g_zplane);
     // Indirect matrices
     if (!held_words(bp + 0x06, u.ind, 9)) {
         g_astat.ind++;
@@ -1655,7 +1713,16 @@ static void do_efb_copy(const EfbCopyCmd& c) {
             static const char* copydump = getenv("GCN_COPYDUMP");
             static const uint32_t copydump_frame = getenv("GCN_DRAWLOG") ? (uint32_t)atoi(getenv("GCN_DRAWLOG")) : 0;
             static uint32_t copydump_n = 0;
-            if (copydump && copydump_frame && g_present_count + 1 == copydump_frame) {
+            // GCN_COPYDUMP_SIZE=WxH dumps every copy of that size, in whatever frame: a copy
+            // made once, at a moment that differs from run to run, is caught without a frame.
+            static uint32_t size_w = 0, size_h = 0;
+            static const bool size_parsed = [] {
+                if (const char* e = getenv("GCN_COPYDUMP_SIZE")) sscanf(e, "%ux%u", &size_w, &size_h);
+                return true;
+            }();
+            (void)size_parsed;
+            const bool by_size = size_w && c.dst_w == size_w && c.dst_h == size_h;
+            if (copydump && (by_size || (copydump_frame && g_present_count + 1 == copydump_frame))) {
                 const int w = c.dst_w * g_scale, h = c.dst_h * g_scale;
                 std::vector<uint8_t> px((size_t)w * h * 4), out((size_t)w * h * 4);
                 glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -2347,6 +2414,7 @@ static void flat_pass_trim(const Batch& b, const std::vector<uint8_t>& skip, std
 // which is what makes stereo affordable here. Pass do_copies for the first eye only;
 // the second reuses what it produced.
 bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
+    memset(g_zplane, 0, sizeof(g_zplane));  // an eye keeps z freeze draws' own depth
     // The scene samples textures the game produces by copying them back out of the EFB:
     // the water reflection, the sprite sheet the spray uses. An eye pass never draws into
     // the EFB, so on its own it would copy out an empty one -- which once left a model
@@ -2593,35 +2661,24 @@ static void touch_textures(const PixelState& st) {
     }
 }
 
-// Release GL textures the game has stopped using.
-//
-// EFB copies are included. A copy to an address it already holds reuses its texture, so
-// the fixed targets never come through here, but the spray copies to rotating addresses
-// and would otherwise strand a texture per sprite per frame. They are given a longer
-// idle period than the guest-side cache so that an address is always forgotten there
-// first: a draw can then never reach an id whose texture has already gone.
-// Decoded textures go when the front end says (Batch::dead_textures), a batch late, so that
-// nothing still drawing from one loses it: the ids `b` names are deleted at the next batch.
-// The renderer ages only the EFB copies' textures, which it makes itself.
+// Release GL textures the game has stopped using: decoded textures and EFB copies alike go
+// when the front end says (Batch::dead_textures), a batch late, so that nothing still
+// drawing from one loses it: the ids `b` names are deleted at the next batch. Copies were
+// once aged here too, on the renderer's own clock, a little longer than the front end's;
+// the front end now keeps a copy for as long as the RAM at its destination is unchanged
+// (texture_evict), which no clock here can know.
 static std::vector<uint32_t> g_dead_pending;
 static void evict_textures(const Batch& b) {
+    // EFB copies included: the front end lists a copy's id when it lets the copy go, and a
+    // copy aged here on the renderer's own clock could go while the game still used it.
     for (uint32_t id : g_dead_pending) {
         auto it = g_textures.find(id);
-        if (it != g_textures.end() && !it->second.efb) {
+        if (it != g_textures.end()) {
             glDeleteTextures(1, &it->second.tex);
             g_textures.erase(it);
         }
     }
     g_dead_pending = b.dead_textures;
-    if ((g_render_frame & 63) != 0) return;
-    for (auto it = g_textures.begin(); it != g_textures.end();) {
-        if (it->second.efb && g_render_frame - it->second.last_used > 4 * kTexIdleFrames) {
-            glDeleteTextures(1, &it->second.tex);
-            it = g_textures.erase(it);
-        } else {
-            ++it;
-        }
-    }
 }
 
 // Runs a batch into the EFB the way the hardware would. With do_present false the final
@@ -2670,6 +2727,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
     uint32_t cur_state = UINT32_MAX;
     gl_state_invalidate();
     view_invalidate();   // the flat view, after an eye
+    memset(g_zplane, 0, sizeof(g_zplane));  // none yet this frame
     int cur_prim = -1;
     // GCN_NO_COMP drops draws that sample a copy of the whole frame, in the flat path too.
     // The duplicate racer on the water is visible without any of the VR code, so this is
@@ -2678,6 +2736,23 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
     static const bool only_comp = getenv("GCN_ONLY_COMP") != nullptr;
     static const bool complog = getenv("GCN_COMPLOG") != nullptr;
     int draw_index = 0;
+    // GCN_DRAWLOG_COPY=WxH logs, like GCN_DRAWLOG, every batch holding a copy of that size:
+    // a render to texture done once, at a frame that differs from run to run, is logged
+    // without knowing the frame.
+    static uint32_t dlc_w = 0, dlc_h = 0;
+    static const bool dlc_parsed = [] {
+        if (const char* e = getenv("GCN_DRAWLOG_COPY")) sscanf(e, "%ux%u", &dlc_w, &dlc_h);
+        return true;
+    }();
+    (void)dlc_parsed;
+    bool log_batch = false;
+    if (dlc_w)
+        for (auto& c : b.cmds)
+            if (c.type == CmdType::EfbCopy && !c.copy.to_xfb && c.copy.dst_w == dlc_w && c.copy.dst_h == dlc_h) log_batch = true;
+    if (log_batch) fprintf(stderr, "[drawlog] batch with a %ux%u copy, presented frame %u\n", dlc_w, dlc_h, g_present_count + 1);
+    static const uint32_t drawlog_frame = getenv("GCN_DRAWLOG") ? (uint32_t)atoi(getenv("GCN_DRAWLOG")) : 0;
+    // Copies are listed between the draws in either form of the log.
+    const bool log_copies = log_batch || (drawlog_frame && g_present_count + 1 == drawlog_frame);
     for (size_t ci = 0; ci < b.cmds.size(); ci++) {
         Cmd& c = b.cmds[ci];
         switch (c.type) {
@@ -2710,7 +2785,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     skip_hi = dash ? atoi(dash + 1) : skip_lo;
                 }
             }
-            if (drawlog && g_present_count + 1 == drawlog) {
+            if (log_batch || (drawlog && g_present_count + 1 == drawlog)) {
                 const PixelState& st = b.states[c.state];
                 // The projection type and the view-space depth are what decide a draw's
                 // fate in an eye: a perspective batch is re-projected as world geometry,
@@ -2775,10 +2850,10 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                 // The projection's scales and offsets (XF 0x1020..0x1023) go with the box: a
                 // box is inside or outside a frustum only against the projection it was
                 // drawn with, and a frame may use several.
-                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c,%.4f,%.4f,%.4f,%.4f z=%.2f..%.2f x=%.2f..%.2f y=%.2f..%.2f band=%.5f..%.5f origin=%u slivers=%u%s",
+                fprintf(stderr, "[draw] %d verts=%u st=%u texgens=%u proj=%c,%.4f,%.4f,%.4f,%.4f,%.6g,%.6g z=%.2f..%.2f x=%.2f..%.2f y=%.2f..%.2f band=%.5f..%.5f%s origin=%u slivers=%u%s",
                         draw_index, c.count, c.state, st.num_texgens,
-                        (int)st.proj[6] == 0 ? 'p' : 'o', st.proj[0], st.proj[1], st.proj[2], st.proj[3],
-                        zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi,
+                        (int)st.proj[6] == 0 ? 'p' : 'o', st.proj[0], st.proj[1], st.proj[2], st.proj[3], st.proj[4], st.proj[5],
+                        zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi, st.clip_disable ? " noclip" : "",
                         at_origin, slivers, sliver_text.c_str());
                 if (slivers) fprintf(stderr, "\n       ");
                 // Each texture by id and, for a decoded one, by its content hash, which is
@@ -2815,9 +2890,9 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     for (uint32_t v = 0; v < c.count && v < 24; v++) {
                         const uint32_t ix = b.indices[c.first + v];
                         const GpuVertex& gv = b.verts[ix];
-                        fprintf(stderr, "\n        i%u=%u pos=%.1f,%.1f,%.1f col0=%02X%02X%02X%02X col1=%02X%02X%02X%02X uv0=%.3f,%.3f", v, ix,
+                        fprintf(stderr, "\n        i%u=%u pos=%.1f,%.1f,%.1f col0=%02X%02X%02X%02X col1=%02X%02X%02X%02X uv0=%.3f,%.3f,%.3f", v, ix,
                                 gv.pos[0], gv.pos[1], gv.pos[2], gv.col[0][0], gv.col[0][1], gv.col[0][2], gv.col[0][3],
-                                gv.col[1][0], gv.col[1][1], gv.col[1][2], gv.col[1][3], gv.tex[0][0], gv.tex[0][1]);
+                                gv.col[1][0], gv.col[1][1], gv.col[1][2], gv.col[1][3], gv.tex[0][0], gv.tex[0][1], gv.tex[0][2]);
                     }
                     fprintf(stderr, "\n");
                 }
@@ -2853,11 +2928,17 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                 }
             }
             if (comp && no_comp) break;
+            // A triangle drawn without z freeze is the plane the next z freeze draws take,
+            // culled or not: a game draws one it culls to set the plane.
+            const bool zfreeze = (b.states[c.state].bp[0x00] >> 19) & 1;
+            if (!zfreeze) zfreeze_plane(b, c, g_zplane);
             if (c.state != cur_state || c.prim != cur_prim) {
                 apply_state(b.states[c.state], c.prim);
                 cur_state = c.state;
                 cur_prim = c.prim;
                 n_apply++;
+            } else if (zfreeze && g_applied.pr && g_applied.pr->u_zplane >= 0) {
+                glUniform4fv(g_applied.pr->u_zplane, 1, g_zplane);
             }
             draw_cmd(b, c);
             // GCN_PIXEL=x,y[;x,y...] (EFB pixels) with GCN_DRAWLOG=<frame>: after every draw
@@ -2881,7 +2962,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     return v;
                 }();
                 static std::vector<uint32_t> last(probes.size(), 0xFFFFFFFFu), last_z(probes.size(), 0xFFFFFFFFu);
-                if (!probes.empty() && drawlog && g_present_count + 1 == drawlog) {
+                if (!probes.empty() && (log_batch || (drawlog && g_present_count + 1 == drawlog))) {
                     glFinish();
                     for (size_t pi = 0; pi < probes.size(); pi++) {
                         uint8_t px[4] = {0, 0, 0, 0};
@@ -2905,6 +2986,9 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             // Timed on its own: a copy mid-frame ends the EFB's render pass on a tiled GPU
             // and the driver's share of that lands here, on the CPU.
             const auto t_copy = g_frametime ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            if (log_copies)
+                fprintf(stderr, "[copy] after draw %d: %ux%u from %u,%u to %08X tex %u fmt %X%s\n", draw_index - 1, c.copy.dst_w, c.copy.dst_h,
+                        c.copy.src_x, c.copy.src_y, c.copy.dest, c.copy.tex_id, c.copy.format, c.copy.to_xfb ? " (display)" : "");
             do_efb_copy(c.copy);
             if (g_frametime) ms_copy += ms_since(t_copy);
             glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);

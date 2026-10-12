@@ -55,6 +55,9 @@ struct PixelState {
     // re-projected into an eye as world geometry, the rig becomes a solid object
     // standing in the water between the viewer and the racer.
     uint8_t view_space;
+    // XF 0x1005 bit 0: GXSetClipMode(GX_CLIP_DISABLE). Nothing is clipped at the near and
+    // far planes; depth beyond them is clamped to the buffer's range.
+    uint8_t clip_disable;
 };
 
 // A game's own say over what an eye draws, on top of the eye hook: called once per pixel
