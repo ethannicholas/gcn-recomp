@@ -229,6 +229,7 @@ int main(int argc, char** argv) {
         else if (!strncmp(argv[i], "--input-log=", 12)) input_log_dir = argv[i] + 12;
         else if (!strncmp(argv[i], "--replay=", 9)) replay_dir = argv[i] + 9;
         else if (!strcmp(argv[i], "--sample")) debug_sampler_start();
+        else if (!strcmp(argv[i], "--no-music")) { void audio_mute_music(bool); audio_mute_music(true); }
         else if (!strcmp(argv[i], "--headless")) headless = true;
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
         else if (!strcmp(argv[i], "--fast")) fast = true;

@@ -54,6 +54,10 @@ void audio_push_dma(const int16_t* samples_be, uint32_t frames) {
 
 // ---- DTK (DVD streaming ADPCM) ----
 DtkState g_dtk;
+// --no-music: the stream still runs, decodes and ends as it would, so the game sees
+// what it expects of it; only its samples are left out of the mix.
+static bool g_music_muted;
+void audio_mute_music(bool muted) { g_music_muted = muted; }
 std::mutex g_dtk_mutex;
 
 static int16_t adp_decode(int32_t bits, int32_t q, int32_t& h1, int32_t& h2) {
@@ -153,6 +157,7 @@ void audio_render(int16_t* out, int frames) {
         std::lock_guard<std::mutex> lk(g_dtk_mutex);
         const double step = (double)ai_stream_rate() / OUT_RATE;
         int32_t vl = (int32_t)ai_volume_left(), vr = (int32_t)ai_volume_right();
+        if (g_music_muted) vl = vr = 0;
         static double counter_frac;
         counter_frac += frames * step;
         uint32_t elapsed = (uint32_t)counter_frac;
