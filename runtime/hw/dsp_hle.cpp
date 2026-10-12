@@ -1,7 +1,9 @@
-// High-level emulation of the DSP: boot ROM handshake and the AX audio ucode protocol.
+// High-level emulation of the DSP: boot ROM handshake, and which ucode the game booted:
+// AX (ax.cpp), JAudio (jaudio.cpp) or the memory card unlock ucode.
 #include "../runtime.h"
 #include "dsp_hle.h"
 #include "ax.h"
+#include "jaudio.h"
 
 enum : uint32_t {
     DSP_INIT = 0xDCD10000, DSP_RESUME = 0xDCD10001, DSP_YIELD = 0xDCD10002,
@@ -10,8 +12,9 @@ enum : uint32_t {
     MAIL_CONTINUE = 0xCDD10003, MAIL_CMDLIST = 0xBABE0000,
 };
 
-enum class UCode { ROM, AX, Card };
+enum class UCode { ROM, AX, JAudio, Card };
 static uint32_t g_ax_iram_len, g_ax_init_vector;
+static uint32_t g_jaudio_init_vector = ~0u;
 static UCode g_ucode;
 
 // ROM boot state
@@ -45,10 +48,17 @@ static void boot_ucode() {
         g_boot_iram_len, g_boot_dram_len, g_boot_start, ucode_hash(g_boot_iram_mm, g_boot_iram_len));
     g_upload_in_progress = false;
     g_next_is_cmdlist = false;
-    // The first ucode the game boots is AX; anything else of a different size is the
-    // memory card unlock ucode.
-    if (!g_ax_iram_len) { g_ax_iram_len = g_boot_iram_len; g_ax_init_vector = g_boot_start; }
-    if (g_boot_iram_len == g_ax_iram_len) {
+    if (jaudio_is_ucode(ucode_hash(g_boot_iram_mm, g_boot_iram_len))) {
+        // Booted again at another vector, it is resuming after another ucode had the DSP.
+        if (g_jaudio_init_vector == ~0u) g_jaudio_init_vector = g_boot_start;
+        g_ucode = UCode::JAudio;
+        jaudio_boot(g_boot_start != g_jaudio_init_vector);
+        return;
+    }
+    // Otherwise the first ucode the game boots is AX; anything else of a different size, or
+    // anything at all in a game that runs JAudio, is the memory card unlock ucode.
+    if (!g_ax_iram_len && g_jaudio_init_vector == ~0u) { g_ax_iram_len = g_boot_iram_len; g_ax_init_vector = g_boot_start; }
+    if (g_ax_iram_len && g_boot_iram_len == g_ax_iram_len) {
         bool resume = g_boot_start != g_ax_init_vector;
         g_ucode = UCode::AX;
         if (!resume) ax_init();
@@ -109,6 +119,14 @@ void dsp_hle_mail(uint32_t mail) {
     switch (g_ucode) {
     case UCode::ROM: rom_mail(mail); break;
     case UCode::AX: ax_mail(mail); break;
+    case UCode::JAudio:
+        if (g_upload_in_progress) { rom_mail(mail); break; }
+        switch (jaudio_mail(mail)) {
+        case JAudioNext::Stay: break;
+        case JAudioNext::NewUcode: g_upload_in_progress = true; break;
+        case JAudioNext::Reset: dsp_hle_reset(); break;
+        }
+        break;
     case UCode::Card:
         // Card unlock: the real ucode computes a response; the card emulation doesn't
         // check it, so just report completion and fall back to the boot ROM.

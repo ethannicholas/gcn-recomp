@@ -195,6 +195,23 @@ enum { SPR_DEC = 22, SPR_SDR1 = 25, SPR_SRR0 = 26, SPR_SRR1 = 27, SPR_TBL_R = 26
        SPR_TBL_W = 284, SPR_TBU_W = 285, SPR_HID2 = 920, SPR_WPAR = 921, SPR_DMAU = 922, SPR_DMAL = 923 };
 
 static int64_t g_tb_offset;
+
+// Registers that configure the processor itself rather than describe what a thread is doing:
+// the HIDs, the gather pipe's and the locked cache's, the BATs and SDR1, the L2 and the
+// performance monitor. There is one of each on the console, shared by every thread, and the
+// OS does not save them with a context. Each guest thread has a CPU of its own here, so
+// these are kept apart from it: a decoder that enabled the locked cache on one thread and
+// checked HID2 for it on another found it disabled.
+static uint32_t g_hw_spr[1024];
+static bool is_hw_spr(uint32_t spr) {
+    return spr == 25 || (spr >= 528 && spr <= 543) || (spr >= 920 && spr <= 923) || (spr >= 936 && spr <= 958) ||
+           spr == 1008 || spr == 1009 || (spr >= 1013 && spr <= 1019);
+}
+static uint32_t& spr_ref(CPU* c, uint32_t spr) {
+    spr &= 1023;
+    return is_hw_spr(spr) ? g_hw_spr[spr] : c->spr[spr];
+}
+
 void dec_write(CPU* c, uint32_t v);
 uint32_t dec_read(CPU* c);
 
@@ -206,7 +223,7 @@ extern "C" uint32_t hle_mfspr(CPU* c, uint32_t spr) {
         // Bit 0 reports a non-empty gather buffer; the SDK spins on it before it moves
         // the FIFO. It always reads as empty here: full lines go out as they fill, and
         // what is left is padding the SDK's next WPAR write discards (gp_reset).
-        return c->spr[spr] & ~1u;
+        return spr_ref(c, spr) & ~1u;
     case SPR_TBL_R: return (uint32_t)(now_ticks() + g_tb_offset);
     case SPR_TBU_R: return (uint32_t)((now_ticks() + g_tb_offset) >> 32);
     case SPR_DEC: return dec_read(c);
@@ -215,8 +232,8 @@ extern "C" uint32_t hle_mfspr(CPU* c, uint32_t spr) {
     // are LSQE, WPE, PSE and LCE, and the game reads them: the THP video decoder checks
     // LCE (0x10000000) before it will decode a frame, and returns an error if it is clear,
     // which is what blanked the title and menu videos.
-    case SPR_HID2: return c->spr[spr] & ~0x0F000000u;
-    default: return c->spr[spr & 1023];
+    case SPR_HID2: return spr_ref(c, spr) & ~0x0F000000u;
+    default: return spr_ref(c, spr);
     }
 }
 
@@ -235,29 +252,29 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
         return;
     }
     case SPR_DEC: dec_write(c, v); return;
-    case SPR_SDR1: c->spr[spr] = v; mmu_set_sdr1(v); return;
+    case SPR_SDR1: spr_ref(c, spr) = v; mmu_set_sdr1(v); return;
     case SPR_WPAR:
         // Writing WPAR sets the gather address and empties the gather buffer. The SDK
         // writes it only after padding the pipe with zero bytes and waiting for the
         // buffer-not-empty bit to clear, on both sides of a redirect; what is left in the
         // buffer then is padding that must not reach memory. See gp_reset.
         gp_reset();
-        c->spr[spr] = v;
+        spr_ref(c, spr) = v;
         return;
     case SPR_DMAL: {
-        c->spr[spr] = v;
+        spr_ref(c, spr) = v;
         if (v & 2) {  // trigger locked-cache DMA
-            uint32_t dmau = c->spr[SPR_DMAU];
+            uint32_t dmau = spr_ref(c, SPR_DMAU);
             uint32_t len = ((dmau & 0x1F) << 2) | ((v >> 2) & 3);
             if (len == 0) len = 128;
             uint32_t mem = dmau & ~0x1Fu, lc = v & ~0x1Fu;
             if (v & 0x10) memcpy(HOST_W(lc), HOST(mem), len * 32);   // load: mem -> LC
             else { memcpy(HOST_W(mem), HOST(lc), len * 32); debug_guest_check("after locked-cache DMA"); }  // store: LC -> mem
-            c->spr[spr] &= ~2u;
+            spr_ref(c, spr) &= ~2u;
         }
         return;
     }
-    default: c->spr[spr & 1023] = v; return;
+    default: spr_ref(c, spr) = v; return;
     }
 }
 

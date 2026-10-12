@@ -36,3 +36,9 @@ f-?zero
 \bmute city\b
 \bcaptain falcon\b
 NANDEYANEN
+
+# Mario Kart: Double Dash!! (mariokartdd-recomp)
+mario ?kart
+double ?dash
+\bmkdd\b
+\bGM4E01\b

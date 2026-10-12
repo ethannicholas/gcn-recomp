@@ -15,9 +15,16 @@ static uint16_t g_aid_ctrl;  // bit 15 enable, 14..0 length in 32-byte blocks
 static uint32_t g_aid_cur_addr, g_aid_blocks_left;
 static bool g_aid_running;
 
-// DSP -> CPU mail queue
+// DSP -> CPU mail queue. A mail that interrupts the CPU does so when it reaches the head
+// of the queue, as the real mailbox, which holds one mail, would: a ucode that sends two
+// interrupting mails back to back gets two interrupts, not one that the handler's
+// acknowledgement of the first swallows.
+struct Mail {
+    uint32_t value;
+    bool interrupt;
+};
 static std::mutex g_mail_mutex;
-static std::deque<uint32_t> g_mail_out;
+static std::deque<Mail> g_mail_out;
 
 enum : uint16_t {
     CR_RES = 1 << 0, CR_PIINT = 1 << 1, CR_HALT = 1 << 2, CR_AID = 1 << 3, CR_AID_MASK = 1 << 4,
@@ -38,12 +45,14 @@ void dsp_raise(uint16_t bit) {
 }
 
 void dsp_send_mail(uint32_t mail, bool interrupt) {
+    bool head;
     {
         std::lock_guard<std::mutex> lk(g_mail_mutex);
-        g_mail_out.push_back(mail);
+        head = g_mail_out.empty();
+        g_mail_out.push_back({mail, interrupt});
     }
     LOG(LOG_DSP, "DSP->CPU mail %08X%s", mail, interrupt ? " (int)" : "");
-    if (interrupt) dsp_raise(CR_DSP);
+    if (interrupt && head) dsp_raise(CR_DSP);
 }
 
 void dsp_mail_clear() {
@@ -54,13 +63,19 @@ void dsp_mail_clear() {
 static uint16_t mail_out_hi() {
     std::lock_guard<std::mutex> lk(g_mail_mutex);
     if (g_mail_out.empty()) return 0;
-    return (uint16_t)(g_mail_out.front() >> 16) | 0x8000;
+    return (uint16_t)(g_mail_out.front().value >> 16) | 0x8000;
 }
 static uint16_t mail_out_lo() {
-    std::lock_guard<std::mutex> lk(g_mail_mutex);
-    if (g_mail_out.empty()) return 0;
-    uint16_t v = (uint16_t)g_mail_out.front();
-    g_mail_out.pop_front();
+    bool next_interrupts;
+    uint16_t v;
+    {
+        std::lock_guard<std::mutex> lk(g_mail_mutex);
+        if (g_mail_out.empty()) return 0;
+        v = (uint16_t)g_mail_out.front().value;
+        g_mail_out.pop_front();
+        next_interrupts = !g_mail_out.empty() && g_mail_out.front().interrupt;
+    }
+    if (next_interrupts) dsp_raise(CR_DSP);
     return v;
 }
 
