@@ -82,6 +82,7 @@ void send_srs(const Motion& m) {
     put_f32(p, 192, m.sway);           // lateral acceleration
     put_f32(p, 196, m.heave);          // vertical acceleration
     put_f32(p, 200, m.surge);          // longitudinal acceleration
+    for (int w = 0; w < 4; w++) put_f32(p, 204 + 4 * w, m.suspension[w]);   // FL, FR, RL, RR
     sendto(g_sock, (const char*)p, (int)kSrsSize, 0, (const sockaddr*)&g_dest, sizeof(g_dest));
 }
 
@@ -161,12 +162,19 @@ void set_default(const char* k, float value) { g_defaults[k] = value; }
 //    a heading that swings is the one jerk on a start line that is not yet explained. (A
 //    game that sends its own yaw can raise it with set_default.)
 //
-// Between the gains and the limits, a road texture (5): band-limited noise on heave, pitch and
-// roll, as strong as the game's `roughness` and the speed make it, eased in and out with the
-// rest of the motion. A platform that sat dead still on a straight felt like no road at all.
-// `texture_heave`, `texture_pitch` and `texture_roll` are its RMS at roughness 1 and
-// `texture_speed_kmh` or faster (m/s^2 and degrees), `texture_hz` its bandwidth, and
-// `texture_gain` scales the lot.
+// Between the gains and the limits, a road texture (5), eased in and out with the rest of the
+// motion and scaled by `texture_gain`. A platform that sat dead still on a straight felt like
+// no road at all; one that hummed with band-limited noise felt like noise, all one note.
+// - From the suspension, when the game has it: each wheel's compression less its own
+//   running mean (over `suspension_hp_s`), so the springs' movement and not their load. Heave
+//   is their mean times `suspension_heave` (m/s^2 a metre); pitch the front pair against the
+//   rear over `wheelbase_m`, roll the left against the right over `track_m`, as angles times
+//   `suspension_pitch` and `suspension_roll`. A bump comes through as the wheels met it.
+// - Made up, from `roughness`, for a game without: bumps, at `texture_bumps` a second at
+//   `texture_speed_kmh` and over, each of a random size and split between heave, pitch and
+//   roll, ringing in a damped spring at `texture_hz`; under them a finer grain of noise
+//   (`texture_grain` of the bumps' size). `texture_heave`, `texture_pitch` and `texture_roll`
+//   size it at roughness 1, in m/s^2 and degrees.
 namespace {
 
 enum Ch { kSpeed, kPitch, kRoll, kYaw, kSurge, kSway, kHeave, kSlide, kChannels };
@@ -245,23 +253,72 @@ void publish(const Motion& in) {
     want[kSway] *= key("sway_gain", 1.0f);
     want[kHeave] *= key("heave_gain", 1.0f);
 
-    // Road texture (5): white noise through a one-pole low-pass, normalised to unit RMS.
+    // Road texture (5).
     {
-        static float tex[3];
         static uint32_t seed = 0x2545F491u;
         auto noise = [] {
             seed = seed * 1664525u + 1013904223u;
             return (float)(seed >> 8) * (2.0f / 16777216.0f) - 1.0f;   // uniform in [-1, 1)
         };
-        const float a = 1.0f - expf(-dt * 6.2831853f * key("texture_hz", 8.0f));
-        const float norm = a > 0.0f ? 1.0f / sqrtf(a / (2.0f - a) / 3.0f) : 0.0f;
-        for (float& t : tex) t += (noise() - t) * a;
+        constexpr float kDegrees = 57.2957795f;
+        const float gain = level * key("texture_gain", 1.0f);
+        float tex[3] = {0.0f, 0.0f, 0.0f};   // heave m/s^2, pitch and roll degrees
+
+        // From the suspension.
+        static float sus_mean[4];
+        static bool have_sus = false;
+        if (in.active && in.has_suspension) {
+            if (!have_sus || in.discontinuity)
+                for (int w = 0; w < 4; w++) sus_mean[w] = in.suspension[w];
+            have_sus = true;
+            const float hp = key("suspension_hp_s", 0.25f);
+            const float a = hp > 0.0f ? 1.0f - expf(-dt / hp) : 1.0f;
+            float dev[4];
+            for (int w = 0; w < 4; w++) {
+                sus_mean[w] += (in.suspension[w] - sus_mean[w]) * a;
+                dev[w] = in.suspension[w] - sus_mean[w];
+            }
+            const float front = (dev[0] + dev[1]) * 0.5f, rear = (dev[2] + dev[3]) * 0.5f;
+            const float left = (dev[0] + dev[2]) * 0.5f, right = (dev[1] + dev[3]) * 0.5f;
+            tex[0] += (front + rear) * 0.5f * key("suspension_heave", 40.0f);
+            // A front wheel pushed up lifts the nose; a left one lowers the right side.
+            tex[1] += atan2f(front - rear, key("wheelbase_m", 1.0f)) * kDegrees * key("suspension_pitch", 0.6f);
+            tex[2] += atan2f(left - right, key("track_m", 1.2f)) * kDegrees * key("suspension_roll", 0.6f);
+        } else {
+            have_sus = false;
+        }
+
+        // Made up, from the roughness: bumps ringing in a damped spring, over a grain.
+        static float ring[3], ring_v[3], grain[3];
         const float rough = in.active ? fminf(1.0f, fmaxf(0.0f, in.roughness)) : 0.0f;
         const float at_speed = fminf(1.0f, fabsf(held[kSpeed]) / fmaxf(1.0f, key("texture_speed_kmh", 60.0f)));
-        const float amp = rough * at_speed * level * key("texture_gain", 1.0f) * norm;
-        want[kHeave] += tex[0] * amp * key("texture_heave", 1.5f);
-        want[kPitch] += tex[1] * amp * key("texture_pitch", 0.3f);
-        want[kRoll] += tex[2] * amp * key("texture_roll", 0.5f);
+        const float size[3] = {key("texture_heave", 1.5f), key("texture_pitch", 0.3f), key("texture_roll", 0.5f)};
+        if (rough > 0.0f && at_speed > 0.0f) {
+            // A bump: a kick to the spring's velocity, its size exponential about 1, split
+            // at random between the channels.
+            if ((noise() * 0.5f + 0.5f) < key("texture_bumps", 4.0f) * at_speed * dt) {
+                const float big = -logf(fmaxf(1e-4f, noise() * 0.5f + 0.5f));
+                for (int c = 0; c < 3; c++) ring_v[c] += big * noise() * 2.0f;
+            }
+        }
+        // The spring: x'' = -w^2 x - 2 zeta w x', stepped semi-implicitly; normalised so a
+        // kick of 1 peaks at about 1.
+        const float w = 6.2831853f * key("texture_hz", 6.0f);
+        const float zeta = 0.3f;
+        for (int c = 0; c < 3; c++) {
+            ring_v[c] += (-w * w * ring[c] - 2.0f * zeta * w * ring_v[c]) * dt;
+            ring[c] += ring_v[c] * dt;
+            if (!(rough > 0.0f)) ring[c] = ring_v[c] = 0.0f;
+        }
+        const float a = 1.0f - expf(-dt * 6.2831853f * 12.0f);
+        for (float& g : grain) g += (noise() - g) * a;
+        const float amp = rough * at_speed;
+        const float grain_size = key("texture_grain", 0.25f) / sqrtf(a / (2.0f - a) / 3.0f);   // unit RMS
+        for (int c = 0; c < 3; c++) tex[c] += amp * size[c] * (ring[c] * w + grain[c] * grain_size);
+
+        want[kHeave] += tex[0] * gain;
+        want[kPitch] += tex[1] * gain;
+        want[kRoll] += tex[2] * gain;
     }
 
     const float max_angle = key("max_angle", 25.0f), angle_rate = key("angle_rate", 120.0f);
@@ -283,6 +340,7 @@ void publish(const Motion& in) {
         m.rpm = in.rpm;
         m.max_rpm = in.max_rpm;
         m.gear = in.gear;
+        for (int w = 0; w < 4; w++) m.suspension[w] = in.suspension[w];
     }
     send_srs(m);
 

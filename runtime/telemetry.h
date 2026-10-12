@@ -40,9 +40,16 @@ struct Motion {
     float max_rpm = 0;
     int gear = 1;
     // How rough the ground under the vehicle is, 0 for none to 1 for the roughest: the module
-    // adds a road texture to heave, pitch and roll that grows with this and with speed (see
-    // publish() in telemetry.cpp). 0 adds nothing.
+    // makes up a road texture for heave, pitch and roll that grows with this and with speed
+    // (see publish() in telemetry.cpp). 0 adds nothing. For a vehicle without suspension to
+    // read; one with it is better served by `suspension`.
     float roughness = 0;
+    // Each wheel's suspension compression in metres, front left, front right, rear left, rear
+    // right, when the game has it (has_suspension): sent in the packet, and its movement --
+    // the bumps the wheels ride over, a front pair then a rear pair, a landing -- is the road
+    // texture, on heave, pitch and roll.
+    bool has_suspension = false;
+    float suspension[4] = {};
 };
 
 // "host:port", "" or null for the default. Reads telemetry.txt. Returns false if the

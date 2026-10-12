@@ -424,9 +424,13 @@ game sends arrives as noise.
 Three things are the game's to choose. `yaw_heading` false sends `yaw` as the platform's own
 angle rather than a heading to wash out, for a game that yaws the platform only for what a
 driver feels through the seat (a slide, a spin) and not for every turn, which on a platform
-that cannot turn all the way round is jarring. `roughness` (0 to 1) adds a road texture,
-band-limited noise on heave, pitch and roll growing with speed, without which a platform sits
-dead still on a straight. `rpm`, `max_rpm` and `gear` go to the packet for a shaker's engine
+that cannot turn all the way round is jarring. `suspension` (each wheel's compression, with
+`has_suspension`) is the road texture: the springs' movement about their running mean, on
+heave, pitch (front against rear) and roll (left against right), so the bumps come through
+as the wheels met them; it goes into the packet's suspension fields too. A game without
+suspension to read gives `roughness` (0 to 1) instead, and gets bumps of random size ringing
+in a damped spring over a finer grain, growing with speed. Without either a platform sits
+dead still on a straight; with filtered noise alone it felt like noise, all one note. `rpm`, `max_rpm` and `gear` go to the packet for a shaker's engine
 effect. `telemetry::set_default` gives a key a game's own default, which `telemetry.txt` still
 overrides: a vehicle's gains, or a faster `yaw_rate` for a spin.
 
