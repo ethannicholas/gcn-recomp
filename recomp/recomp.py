@@ -306,7 +306,7 @@ def main():
         f.rel_hook = None
         if rels and not f.hle and len(f.entries) == 1:
             if f.name in ('OSLink', 'OSLinkFixed'):
-                f.rel_hook = f'uint32_t m = c->r[3]; orig_{f.name}(c); if (c->r[3]) rels_linked(m);'
+                f.rel_hook = f'uint32_t m = c->r[3]; rels_linking(m); orig_{f.name}(c); if (c->r[3]) rels_linked(m);'
             elif f.name == 'OSUnlink':
                 f.rel_hook = f'rels_unlinked(c->r[3]); orig_{f.name}(c);'
 

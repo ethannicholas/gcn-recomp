@@ -274,6 +274,7 @@ extern uint32_t g_rel_base[];  /* [module * REL_MAX_SECTIONS + section]: where i
 #define REL_HI(m, s, a) ((uint16_t)(REL_V(m, s, a) >> 16))
 #define REL_HA(m, s, a) ((uint16_t)((REL_V(m, s, a) + 0x8000u) >> 16))
 uint32_t rels_canon(uint32_t a);
+void rels_linking(uint32_t module_info);
 void rels_linked(uint32_t module_info);
 void rels_unlinked(uint32_t module_info);
 

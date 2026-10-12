@@ -16,8 +16,14 @@
 //
 // The generated code calls rels_linked after every successful OSLink/OSLinkFixed and
 // rels_unlinked before every OSUnlink, so both stay exactly as the game's module list.
+#include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 
+#include "platform.h"
 #include "recomp.h"
 #include "runtime.h"
 
@@ -43,7 +49,79 @@ void forget(uint32_t info) {
         if (g_live[i].info == info) g_live[i].size = 0;
 }
 
+// The module's file as it is before the link: header, section table, sections, import
+// table and relocations, whichever ends last. Relocation lists end at R_DOLPHIN_END.
+uint32_t unlinked_size(uint32_t info) {
+    const uint32_t nsec = LD32(info + 0x0C), table = LD32(info + 0x10);
+    const uint32_t imp_off = LD32(info + 0x28), imp_size = LD32(info + 0x2C);
+    uint32_t end = std::max(table + nsec * 8, imp_off + imp_size);
+    for (uint32_t i = 0; i < nsec; i++) {
+        const uint32_t off = LD32(info + table + i * 8) & ~1u, size = LD32(info + table + i * 8 + 4);
+        if (off) end = std::max(end, off + size);
+    }
+    for (uint32_t k = 0; k < imp_size / 8; k++) {
+        uint32_t p = LD32(info + imp_off + k * 8 + 4);
+        for (uint32_t guard = 0; guard < 0x1000000; guard++, p += 8)
+            if (LD8(info + p + 2) == 203) { p += 8; break; }  // R_DOLPHIN_END
+        end = std::max(end, p);
+    }
+    return end;
+}
+
+// The module's name, from the string table the game gave OSSetStringTable (the OS keeps it
+// at 0x800030D0): its last path component without the extension, as the build names the
+// module's files.
+std::string module_name(uint32_t info) {
+    const uint32_t strings = LD32(0x800030D0), off = LD32(info + 0x14), len = LD32(info + 0x18);
+    char buf[64];
+    snprintf(buf, sizeof buf, "module%u", LD32(info));
+    if (!strings || !len || len > 256) return buf;
+    std::string path;
+    for (uint32_t i = 0; i < len; i++) {
+        char ch = (char)LD8(strings + off + i);
+        if (!ch) break;
+        path += ch;
+    }
+    size_t slash = path.find_last_of("\\/");
+    if (slash != std::string::npos) path = path.substr(slash + 1);
+    size_t dot = path.find_last_of('.');
+    if (dot != std::string::npos) path = path.substr(0, dot);
+    return path.empty() ? std::string(buf) : path;
+}
+
 }  // namespace
+
+// Before a link: a module that was not recompiled is one the game assembled in memory.
+// GCN_REL_DUMP=<dir> writes it there as <name>.rel, exactly as OSLink is about to see it,
+// for the build to recompile (gcn_add_game's REL_RUNTIME); GCN_REL_DUMP_WANT=a,b ends the
+// run once those are written.
+void rels_linking(uint32_t info) {
+    if (module_index(LD32(info)) >= 0) return;
+    const char* dir = getenv("GCN_REL_DUMP");
+    if (!dir) return;
+    const std::string name = module_name(info);
+    const uint32_t size = unlinked_size(info);
+    const std::string path = std::string(dir) + "/" + name + ".rel";
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) fatal("GCN_REL_DUMP: cannot write %s", path.c_str());
+    for (uint32_t i = 0; i < size; i++) fputc(LD8(info + i), f);
+    fclose(f);
+    fprintf(stderr, "[rels] %s (module %u, %u bytes) written to %s\n", name.c_str(), LD32(info), size, path.c_str());
+    static std::string done;
+    done += "," + name + ",";
+    if (const char* want = getenv("GCN_REL_DUMP_WANT")) {
+        std::string w = want;
+        size_t p = 0;
+        bool all = true;
+        while (p <= w.size()) {
+            size_t q = w.find(',', p);
+            if (q == std::string::npos) q = w.size();
+            if (q > p && done.find("," + w.substr(p, q - p) + ",") == std::string::npos) all = false;
+            p = q + 1;
+        }
+        if (all) { fflush(stderr); plat_exit_now(0); }
+    }
+}
 
 void rels_linked(uint32_t info) {
     const uint32_t id = LD32(info);

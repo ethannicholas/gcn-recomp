@@ -47,6 +47,39 @@ macro(_gcn_fetch_openxr_loader)
   endif()
 endmacro()
 
+# Build the game once without the modules it assembles at run time (GCN_BOOTSTRAP), run
+# that headless with GCN_REL_DUMP until the game links each of `missing`, and keep what it
+# linked in ${REL_RUNTIME_DIR}. The game's own code produces them, from the user's disc.
+macro(_gcn_bootstrap_rels missing)
+  set(_boot ${CMAKE_BINARY_DIR}/bootstrap)
+  message(STATUS "Bootstrapping ${missing}: building and running the game without them")
+  set(_boot_args -S ${CMAKE_SOURCE_DIR} -B ${_boot} -G ${CMAKE_GENERATOR} -DGCN_BOOTSTRAP=ON
+                 -DCMAKE_BUILD_TYPE=Release "-DGAME_ISO=${GAME_ISO}"
+                 -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
+  if(CMAKE_OSX_SYSROOT)
+    list(APPEND _boot_args -DCMAKE_OSX_SYSROOT=${CMAKE_OSX_SYSROOT})
+  endif()
+  execute_process(COMMAND ${CMAKE_COMMAND} ${_boot_args} RESULT_VARIABLE _r OUTPUT_QUIET)
+  if(NOT _r EQUAL 0)
+    message(FATAL_ERROR "bootstrap: configuring ${_boot} failed")
+  endif()
+  execute_process(COMMAND ${CMAKE_COMMAND} --build ${_boot} --target ${G_NAME}_bench
+                  RESULT_VARIABLE _r OUTPUT_QUIET)
+  if(NOT _r EQUAL 0)
+    message(FATAL_ERROR "bootstrap: building ${_boot} failed")
+  endif()
+  file(MAKE_DIRECTORY ${REL_RUNTIME_DIR})
+  string(REPLACE ";" "," _want "${missing}")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E env GCN_REL_DUMP=${REL_RUNTIME_DIR} GCN_REL_DUMP_WANT=${_want}
+                          ${_boot}/${G_NAME}_bench --seconds=600 "${GAME_ISO}"
+                  TIMEOUT 600 RESULT_VARIABLE _r OUTPUT_QUIET ERROR_VARIABLE _err)
+  foreach(m ${missing})
+    if(NOT EXISTS ${REL_RUNTIME_DIR}/${m}.rel)
+      message(FATAL_ERROR "bootstrap: the game did not link ${m} (exit ${_r}):\n${_err}")
+    endif()
+  endforeach()
+endmacro()
+
 # gcn_add_game(
 #   NAME <target>              executable name; the benchmark is <target>_bench
 #   TITLE <string>             the game's name, for messages ("put your <title> .iso in rom/")
@@ -68,9 +101,11 @@ endmacro()
 #   [RELS <disc paths>...]     relocatable modules the game loads with OSLink, from the disc;
 #                              each is compiled at a canonical address and runs wherever
 #                              the game links it (docs/rels.md)
-#   [REL_UNPACK <script>]      a Python script run as `script <image> <dir>` that writes
-#                              further modules into <dir> as .rel files: modules the disc
-#                              does not hold as plain files
+#   [REL_RUNTIME <names>...]   modules the game does not keep on the disc as plain files but
+#                              builds in memory before linking them (e.g. "game.main"). The
+#                              first configure builds the game without them, runs it
+#                              headless until the game itself hands each to OSLink, and
+#                              keeps them in <build>/rels-runtime/ (docs/rels.md)
 #   [REL_SYMBOLS <dir>]        dtk's symbols for each module, <dir>/<module>.txt, with the
 #                              splits file beside it as <module>.splits.txt
 #   [SOURCES <files>...]       the game project's own runtime sources, compiled into every
@@ -89,7 +124,7 @@ endmacro()
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;DOL_FIXUP;REL_UNPACK;REL_SYMBOLS" "SOURCES;RELS" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;DOL_FIXUP;REL_SYMBOLS" "SOURCES;RELS;REL_RUNTIME" ${ARGN})
   if(NOT G_LABEL)
     set(G_LABEL "${G_TITLE}")
   endif()
@@ -156,7 +191,7 @@ function(gcn_add_game)
       endif()
       list(APPEND RECOMP_TOOL_SOURCES ${G_DOL_FIXUP})
     endif()
-    if(G_RELS OR G_REL_UNPACK)
+    if(G_RELS)
       set(REL_DIR ${CMAKE_BINARY_DIR}/rels)
       file(REMOVE_RECURSE ${REL_DIR})
       execute_process(COMMAND ${Python3_EXECUTABLE} ${GCN_RECOMP_DIR}/recomp/rel.py extract
@@ -165,15 +200,24 @@ function(gcn_add_game)
       if(NOT REL_RESULT EQUAL 0)
         message(FATAL_ERROR "could not extract the modules from ${GAME_ISO}")
       endif()
-      if(G_REL_UNPACK)
-        execute_process(COMMAND ${Python3_EXECUTABLE} ${G_REL_UNPACK} "${GAME_ISO}" ${REL_DIR}
-                        RESULT_VARIABLE REL_RESULT)
-        if(NOT REL_RESULT EQUAL 0)
-          message(FATAL_ERROR "${G_REL_UNPACK} failed")
-        endif()
-        list(APPEND RECOMP_TOOL_SOURCES ${G_REL_UNPACK})
-      endif()
       file(GLOB _rel_files ${REL_DIR}/*.rel)
+      # Modules the game assembles in memory: taken from the game itself, by a first build
+      # without them (GCN_BOOTSTRAP) that runs until it links each one.
+      set(REL_RUNTIME_DIR ${CMAKE_BINARY_DIR}/rels-runtime)
+      if(G_REL_RUNTIME AND NOT GCN_BOOTSTRAP)
+        set(_missing "")
+        foreach(m ${G_REL_RUNTIME})
+          if(NOT EXISTS ${REL_RUNTIME_DIR}/${m}.rel)
+            list(APPEND _missing ${m})
+          endif()
+        endforeach()
+        if(_missing)
+          _gcn_bootstrap_rels("${_missing}")
+        endif()
+        foreach(m ${G_REL_RUNTIME})
+          list(APPEND _rel_files ${REL_RUNTIME_DIR}/${m}.rel)
+        endforeach()
+      endif()
       list(SORT _rel_files)
       set(_rel_in ${RECOMP_DOL})
       set(RECOMP_DOL ${CMAKE_BINARY_DIR}/main_rels.dol)

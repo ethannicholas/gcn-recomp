@@ -6,9 +6,8 @@ from one run to the next. `gcn_add_game(RELS ...)` recompiles them.
 
 ## Build time
 
-`recomp/rel.py` extracts the listed modules from the disc into `build/rels/` (a game's
-`REL_UNPACK` script adds any the disc does not hold as plain files), then links every
-module at a canonical address: code from 0x81800000, just above RAM and within a relative
+`recomp/rel.py` extracts the listed modules from the disc into `build/rels/`, then links
+every module at a canonical address: code from 0x81800000, just above RAM and within a relative
 branch of the DOL; data from 0x82000000; bss from 0x83000000. The linked modules are
 appended to the DOL the recompiler reads (`build/main_rels.dol`), with three files beside
 it:
@@ -28,8 +27,29 @@ branch needs nothing, since the canonical link resolved it and it is a C call. A
 function's jump tables are keyed on `rels_canon(c->ctr)`.
 
 For dtk, list the modules under `modules:` in the game's `config.yml`, each with a `name`
-(dtk otherwise names a module by its file name up to the first dot, and two `fze.x.rel`
-files collide).
+(dtk otherwise names a module by its file name up to the first dot, and two
+`game.a.rel` and `game.b.rel` files collide).
+
+## Modules the game assembles itself
+
+A game may not keep a module on the disc as a plain file: it may build it in memory --
+read from somewhere else, unpacked, put together -- and only then hand it to `OSLink`.
+`REL_RUNTIME <names>` lists those, by the name the game's module string table gives them.
+The recompiler needs them at build time, and the only faithful source is the game itself,
+so the first configure bootstraps:
+
+1. it configures and builds `<build>/bootstrap` with `GCN_BOOTSTRAP=ON`, which leaves the
+   runtime modules out (and with them any module that imports from one: `rel.py` drops
+   it), building only the headless benchmark;
+2. it runs that with `GCN_REL_DUMP=<build>/rels-runtime` and `GCN_REL_DUMP_WANT=<names>`.
+   Before every link the generated code calls `rels_linking`, which writes any module that
+   was not recompiled to that directory as `<name>.rel`, exactly as `OSLink` is about to
+   see it, and ends the run once all the wanted ones are written;
+3. the main build then compiles them with the rest.
+
+`<build>/rels-runtime` is kept between configures, so this happens once per build
+directory. The game's own code, run on the user's disc, is what produces the modules; the
+build contains nothing that knows how.
 
 ## Run time
 

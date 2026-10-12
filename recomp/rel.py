@@ -131,6 +131,19 @@ SYM_RE = re.compile(r'^(\S+) = (\.?\w+):0x([0-9A-Fa-f]+); // (.*)$')
 
 def link(in_dol, out_dol, symdir, paths):
     rels = [Rel(os.path.basename(p), open(p, 'rb').read()) for p in paths]
+    # A module that imports from one not given cannot be linked; leave it out, and any
+    # that depend on it. This is the bootstrap build's case (docs/rels.md): it lacks the
+    # modules the game assembles at run time, and needs only those that assemble them.
+    while True:
+        have = {r.id for r in rels}
+        keep = [r for r in rels if all(m == 0 or m in have for m, _ in r.imports)]
+        if len(keep) == len(rels):
+            break
+        for r in rels:
+            if r not in keep:
+                missing = sorted(m for m, _ in r.imports if m and m not in have)
+                print(f'note: {r.name} left out: it imports from module(s) {missing}', file=sys.stderr)
+        rels = keep
     ids = {}
     for r in rels:
         if r.id in ids:
@@ -164,9 +177,6 @@ def link(in_dol, out_dol, symdir, paths):
     index = {r.id: k for k, r in enumerate(rels)}
     for r in rels:
         for mod, entries in r.imports:
-            if mod != 0 and mod not in ids:
-                print(f'warning: {r.name} imports from module {mod}, which is not listed', file=sys.stderr)
-                continue
             for typ, sec, off, tsec, addend in entries:
                 buf = r.image[sec]
                 if buf is None:

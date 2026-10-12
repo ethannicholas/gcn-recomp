@@ -35,5 +35,4 @@ f-?zero
 \bamusement vision\b
 \bmute city\b
 \bcaptain falcon\b
-enemy_line
 NANDEYANEN
