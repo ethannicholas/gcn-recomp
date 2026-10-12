@@ -129,6 +129,7 @@ static float g_world_xform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
 // First person (render_set_first_person): while on, the game's eye hook is asked per frame
 // where the eye stands, and g_eye_overridden says it answered for the frame being drawn.
 static EyeHook g_eye_hook = nullptr;
+static WorldPitchHook g_pitch_hook = nullptr;
 // Which placement apply_state gave the last state in an eye, for the eye's draw log.
 static const char* g_eye_layer_name = "-";
 static EyeFilter g_eye_filter = nullptr;
@@ -1920,6 +1921,7 @@ void render_set_depth_layers(float background_from, float foreground_to, float f
 }
 
 void render_set_eye_hook(EyeHook hook) { g_eye_hook = hook; }
+void render_set_world_pitch_hook(WorldPitchHook hook) { g_pitch_hook = hook; }
 static FrameHook g_frame_hook = nullptr;
 void render_set_frame_hook(FrameHook hook) { g_frame_hook = hook; }
 static void mark_offscreen_passes(const Batch& b, std::vector<uint8_t>& skip);
@@ -1975,8 +1977,9 @@ void render_set_vr_eye(const float proj[16], const float view[16], const float h
 }
 
 // Where the eye stands and what it leaves out, for the batch about to be drawn: the chase
-// camera with its pitch taken out, unless first person is on and the game's eye hook has
-// somewhere better to put it (render_set_eye_hook). `skip` marks the off-screen passes, as
+// camera with its pitch taken out (as the game's pitch hook says, if it has one), unless
+// first person is on and the game's eye hook has somewhere better to put it
+// (render_set_eye_hook). `skip` marks the off-screen passes, as
 // mark_offscreen_passes leaves it.
 static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_hide.clear();
@@ -1989,6 +1992,7 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         g_hide.swap(o.hide);
         g_eye_overridden = true;
     } else {
+        if (g_pitch_hook) g_pitch_hook(b, &g_world_pitch);
         world_pitch_matrix(g_world_xform);
     }
     // The game's draw filter, on top of whatever the eye hook hid. A draw's facts are

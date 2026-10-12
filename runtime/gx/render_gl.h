@@ -66,6 +66,13 @@ void render_set_vr_morph(float t, const float panel[16]);
 // the room instead of sloping. Applies to world geometry only: the HUD frame is placed in
 // the headset's own space and stays where it is put. 0 renders what the game draws.
 void render_set_world_pitch(float pitch_rad);
+// For a game whose chase camera's pitch is not fixed: asked once per batch, on the render
+// thread, as the eyes are prepared (unless the game's own eye has taken over), for the
+// pitch to take out of that frame, in radians. Returning false keeps the last pitch set.
+// Reading the camera on the guest thread and handing it over is the game's business; the
+// hook is only where it reaches the renderer, on the renderer's own thread.
+using WorldPitchHook = bool (*)(const Batch& b, float* pitch_rad);
+void render_set_world_pitch_hook(WorldPitchHook hook);
 
 // A game's depth layers in stereo, for a game that confines layers to bands of the depth
 // buffer through the viewport's z range. A perspective draw confined to depths from
