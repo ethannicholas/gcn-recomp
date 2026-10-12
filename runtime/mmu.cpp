@@ -3,9 +3,10 @@
 // A GameCube game reaches memory through the BATs the IPL sets up -- 0x80000000 and
 // 0xC0000000 onto the 24 MB of RAM -- and that is what HOST() in recomp.h does: mask the
 // guest address onto one host reservation. Some games also program the MMU proper: a page
-// table (SDR1), segment registers, and a window in the 0x40000000-0x7FFFFFFF range, which
-// no BAT covers, whose pages they map onto physical pages themselves, page in from the DVD
-// or ARAM on a DSI, and evict again. An access in that range takes the slow path here:
+// table (SDR1), segment registers, and a window below 0x80000000, which no BAT covers,
+// whose pages they map onto physical pages themselves, page in from the DVD or ARAM on a
+// DSI, and evict again. An access from 0x02000000 to 0x7FFFFFFF takes the slow path here
+// (below that is physical RAM, which the runtime addresses directly):
 //
 //   * A software TLB, one entry per guest page of the window, direct-mapped and tagged by
 //     page number. A hit is a few instructions. A miss reads the game's page table with the

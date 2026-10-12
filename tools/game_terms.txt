@@ -27,3 +27,13 @@ rogue ?(squadron|leader)
 \bGSWE64\b
 \bx-?wing\b
 \btie ?fighter\b
+
+# F-Zero GX (fzerogx-recomp)
+f-?zero
+\bfze\b
+\bGFZE01\b
+\bamusement vision\b
+\bmute city\b
+\bcaptain falcon\b
+enemy_line
+NANDEYANEN

@@ -143,6 +143,9 @@ extern "C" void call_indirect(CPU* c, uint32_t addr) {
         uint32_t canon = modules_canon(addr);
         if (canon == addr && modules_bind(addr)) canon = modules_canon(addr);
         if (canon != addr && (fn = fn_lookup(canon))) { fn(c); return; }
+        // In a relocatable module, where the game linked it.
+        canon = rels_canon(addr);
+        if (canon != addr && (fn = fn_lookup(canon))) { fn(c); return; }
     }
     // GCN_RAM_DUMP=<path>: the guest RAM at this failure, for finding out what the code at
     // `addr` is and where it came from.

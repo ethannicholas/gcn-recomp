@@ -65,6 +65,14 @@ endmacro()
 #                              it runs: one that carries a second image inside and maps it
 #                              elsewhere, or whose data files carry code (the script may
 #                              also write `<out.dol>.modules`, see recomp/recomp.py).
+#   [RELS <disc paths>...]     relocatable modules the game loads with OSLink, from the disc;
+#                              each is compiled at a canonical address and runs wherever
+#                              the game links it (docs/rels.md)
+#   [REL_UNPACK <script>]      a Python script run as `script <image> <dir>` that writes
+#                              further modules into <dir> as .rel files: modules the disc
+#                              does not hold as plain files
+#   [REL_SYMBOLS <dir>]        dtk's symbols for each module, <dir>/<module>.txt, with the
+#                              splits file beside it as <module>.splits.txt
 #   [SOURCES <files>...]       the game project's own runtime sources, compiled into every
 #                              target that links the game, the benchmark included, since a
 #                              patch in TABLES may call into them: hooks the runtime offers a
@@ -81,7 +89,7 @@ endmacro()
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;DOL_FIXUP" "SOURCES" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;DOL_FIXUP;REL_UNPACK;REL_SYMBOLS" "SOURCES;RELS" ${ARGN})
   if(NOT G_LABEL)
     set(G_LABEL "${G_TITLE}")
   endif()
@@ -147,6 +155,38 @@ function(gcn_add_game)
         message(FATAL_ERROR "${G_DOL_FIXUP} failed")
       endif()
       list(APPEND RECOMP_TOOL_SOURCES ${G_DOL_FIXUP})
+    endif()
+    if(G_RELS OR G_REL_UNPACK)
+      set(REL_DIR ${CMAKE_BINARY_DIR}/rels)
+      file(REMOVE_RECURSE ${REL_DIR})
+      execute_process(COMMAND ${Python3_EXECUTABLE} ${GCN_RECOMP_DIR}/recomp/rel.py extract
+                              "${GAME_ISO}" ${REL_DIR} ${G_RELS}
+                      RESULT_VARIABLE REL_RESULT)
+      if(NOT REL_RESULT EQUAL 0)
+        message(FATAL_ERROR "could not extract the modules from ${GAME_ISO}")
+      endif()
+      if(G_REL_UNPACK)
+        execute_process(COMMAND ${Python3_EXECUTABLE} ${G_REL_UNPACK} "${GAME_ISO}" ${REL_DIR}
+                        RESULT_VARIABLE REL_RESULT)
+        if(NOT REL_RESULT EQUAL 0)
+          message(FATAL_ERROR "${G_REL_UNPACK} failed")
+        endif()
+        list(APPEND RECOMP_TOOL_SOURCES ${G_REL_UNPACK})
+      endif()
+      file(GLOB _rel_files ${REL_DIR}/*.rel)
+      list(SORT _rel_files)
+      set(_rel_in ${RECOMP_DOL})
+      set(RECOMP_DOL ${CMAKE_BINARY_DIR}/main_rels.dol)
+      execute_process(COMMAND ${Python3_EXECUTABLE} ${GCN_RECOMP_DIR}/recomp/rel.py link
+                              ${_rel_in} ${RECOMP_DOL} "${G_REL_SYMBOLS}" ${_rel_files}
+                      RESULT_VARIABLE REL_RESULT)
+      if(NOT REL_RESULT EQUAL 0)
+        message(FATAL_ERROR "could not link the modules")
+      endif()
+      if(G_REL_SYMBOLS)
+        file(GLOB _rel_syms ${G_REL_SYMBOLS}/*.txt)
+        list(APPEND RECOMP_TOOL_SOURCES ${_rel_syms})
+      endif()
     endif()
     execute_process(COMMAND ${Python3_EXECUTABLE} ${GCN_RECOMP_DIR}/recomp/recomp.py
                             ${RECOMP_DOL} ${G_SYMBOLS} ${RECOMP_GEN_DIR} ${G_TABLES}

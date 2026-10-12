@@ -245,6 +245,9 @@ use, which every lookup prolonged.
   `GCN_PNMLOG=a-b` lists the position matrices used over a window of frames.
 - `GCN_WATCH=a,b,c` (with `GCN_MTXLOG` set) prints those guest addresses every frame;
   `GCN_PEEK=a,b` prints them in the crash dump.
+- `GCN_TOKLOG=1` prints every PE token as it is signalled, and every draw-done (finish)
+  as it is raised and acknowledged, with a note when one is raised while the last is
+  still pending.
 - `GCN_COPYLOG=1` logs EFB copies; `GCN_GXSTATS=1` prints per-frame GX counts.
 - `--sample` reports once a second which guest functions each guest thread is in, by
   walking the guest's own stack; names come from the game's `symbols.txt`.

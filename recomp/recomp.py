@@ -139,14 +139,71 @@ def load_modules(path):
     return out
 
 
+def load_rels(dol_path):
+    """<dol>.rels and <dol>.relocs, from recomp/rel.py: the relocatable modules linked at
+    canonical addresses, and the instructions whose immediate holds a relocated address.
+    Returns ([(id, name, [(section, canon, size, exec)])], {addr: (kind, module, section, addend)})."""
+    rels, relocs = [], {}
+    if os.path.exists(dol_path + '.rels'):
+        for line in open(dol_path + '.rels'):
+            parts = line.split()
+            if parts and parts[0] == 'module':
+                rels.append((int(parts[2]), parts[3], []))
+            elif parts and parts[0] == 'section':
+                rels[-1][2].append((int(parts[1]), int(parts[2], 16), int(parts[3], 16), parts[4] == '1'))
+        for line in open(dol_path + '.relocs'):
+            a, kind, m, sec, addend = line.split()
+            relocs[int(a, 16)] = (kind, int(m), int(sec), int(addend, 16))
+    return rels, relocs
+
+
+# A relocated instruction is translated with this in its immediate field, and the
+# translation's spelling of it replaced with the expression for the run-time value.
+RELOC_MAGIC = 0x1234
+
+
+def translate_reloc(pc, i, reloc):
+    kind, m, sec, addend = reloc
+    i = (i & 0xFFFF0000) | RELOC_MAGIC
+    code = ppc.translate(pc, i)
+    if is_store(i):
+        code += f' WATCH_STORE(0x{pc:08X}u, {store_ea(i)});'
+    if is_load(i):
+        code = f'WATCH_LOAD(0x{pc:08X}u, {load_ea(i)}); ' + code
+    args = f'{m}, {sec}, 0x{addend:X}u'
+    signed = f'(uint32_t)(int32_t)(int16_t)REL_LO({args})'
+    op = i >> 26
+    if kind in ('HA', 'HI'):
+        forms = {f'0x{RELOC_MAGIC << 16:X}u': f'((uint32_t)REL_{kind}({args}) << 16)'}
+    elif op in (24, 25, 26, 27, 28, 29, 10):  # ori oris xori xoris andi. andis. cmpli: unsigned
+        forms = {f'0x{RELOC_MAGIC:X}u': f'(uint32_t)REL_LO({args})'}
+    else:
+        forms = {f'(uint32_t){RELOC_MAGIC}': signed, f'0x{RELOC_MAGIC:X}u': signed,
+                 f'{RELOC_MAGIC} ': f'(int16_t)REL_LO({args}) '}
+    n = 0
+    for k, v in forms.items():
+        n += code.count(k)
+        code = code.replace(k, v)
+    if not n:
+        sys.exit(f'error: {pc:08X}: no immediate to relocate in {code}')
+    return code
+
+
 def main():
     dol_path, sym_path, outdir, tables = sys.argv[1:5]
     dol = Dol(dol_path)
     modules = load_modules(dol_path + '.modules')
+    rels, relocs = load_rels(dol_path)
+    rel_text = [(c, sz) for _, _, secs in rels for _, c, sz, exe in secs if exe]
 
     def in_module(addr):
         return any(c <= addr < c + sz for c, sz, _, _ in modules)
+
+    def in_rel(addr):
+        return any(c <= addr < c + sz for c, sz in rel_text)
     syms = load_symbols(sym_path)
+    if os.path.exists(dol_path + '.syms'):
+        syms += load_symbols(dol_path + '.syms')
     names = load_kv(os.path.join(tables, 'names.txt'))
     hle = load_list(os.path.join(tables, 'hle.txt'))
 
@@ -244,6 +301,14 @@ def main():
     for f in funcs:
         if f.name in hle:
             f.hle = True
+        # The SDK's module linker, when there are modules: the runtime is told where each
+        # section went (runtime/rels.cpp) after a link and before an unlink.
+        f.rel_hook = None
+        if rels and not f.hle and len(f.entries) == 1:
+            if f.name in ('OSLink', 'OSLinkFixed'):
+                f.rel_hook = f'uint32_t m = c->r[3]; orig_{f.name}(c); if (c->r[3]) rels_linked(m);'
+            elif f.name == 'OSUnlink':
+                f.rel_hook = f'rels_unlinked(c->r[3]); orig_{f.name}(c);'
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -311,6 +376,9 @@ def main():
                 continue
             br = ppc.decode_branch(pc, i)
             last_uncond = False
+            if br is None and pc in relocs:
+                out.append(f'\t/* {pc:08X} {i:08X} RELOC */ {translate_reloc(pc, i, relocs[pc])}')
+                continue
             if br is None:
                 try:
                     code = ppc.translate(pc, i)
@@ -375,7 +443,8 @@ def main():
                 else:
                     # A module's own labels are at canonical addresses; the game's ctr holds
                     # the address where it loaded the module.
-                    target = 'modules_canon(c->ctr)' if in_module(f.addr) else 'c->ctr'
+                    target = ('modules_canon(c->ctr)' if in_module(f.addr) else
+                              'rels_canon(c->ctr)' if in_rel(f.addr) else 'c->ctr')
                     if jt_sorted:
                         cases = ' '.join(f'case 0x{t:08X}u: goto L_{t:08X};' for t in jt_sorted)
                         body = (f'switch ({target}) {{ {cases} default: call_indirect(c, c->ctr); RET(); }}')
@@ -404,6 +473,9 @@ def main():
         for f in chunk:
             multi = len(f.entries) > 1
             body_name = cname(f.addr)
+            if f.rel_hook:
+                body_name = f'orig_{f.name}'
+                header.append(f'void {body_name}(CPU* c);')
             if f.hle:
                 body_name = f'orig_{f.name}'
                 header.append(f'void {body_name}(CPU* c); /* original body of {f.name} */')
@@ -428,6 +500,8 @@ def main():
                     out.append(f'void {n}(CPU* c) {{ body_{f.addr:08X}(c, 0x{e:08X}u); }}')
             if f.hle:
                 out.append(f'void {cname(f.addr)}(CPU* c) {{ hle_{f.name}(c); }}')
+            if f.rel_hook:
+                out.append(f'void {cname(f.addr)}(CPU* c) {{ {f.rel_hook} }}')
             out.append('')
             for e in f.entries:
                 header.append(f'void {cname(e)}(CPU* c);' + (f' /* {f.name} */' if e == f.addr else ''))
@@ -457,6 +531,13 @@ def main():
         table.append(f'\t{{0x{canon:08X}u, 0x{size:X}u, 0x{entry:X}u, 0x{code_end:X}u, module_{k}, "{name}"}},')
     table.append('\t{0, 0, 0, 0, 0, 0}};')
     table.append(f'const uint32_t g_recomp_module_count = {len(modules)};')
+    # The relocatable modules: their canonical sections, for runtime/rels.cpp.
+    table.append('const RecompRel g_recomp_rels[] = {')
+    for mid, name, secs in rels:
+        table.append(f'\t{{{mid}u, "{name}", {len(secs)}u, {{' +
+                     ', '.join(f'{{{s}u, 0x{c:08X}u, 0x{sz:X}u, {int(e)}u}}' for s, c, sz, e in secs) + '}},')
+    table.append('\t{0, 0, 0, {{0, 0, 0, 0}}}};')
+    table.append(f'const uint32_t g_recomp_rel_count = {len(rels)};')
     open(os.path.join(outdir, 'recomp_funcs.h'), 'w').write('\n'.join(header) + '\n')
     open(os.path.join(outdir, 'recomp_table.c'), 'w').write('\n'.join(table) + '\n')
     open(os.path.join(outdir, 'sources.cmake'), 'w').write(

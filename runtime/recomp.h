@@ -106,16 +106,18 @@ double gcn_step_damp(uint32_t pc, double p, double x, double k, double b);
 
 /* ---- memory ---- */
 extern uint8_t* g_mem;             /* 1GB host reservation; guest addr & 0x3FFFFFFF */
-/* The BATs cover 0x80000000 and 0xC0000000; 0x40000000-0x7FFFFFFF is reachable only
-   through a page table the game set up, and goes through runtime/mmu.cpp. HOST_W is for a
-   store: the page's Changed bit is what differs. */
+/* The BATs cover 0x80000000 and 0xC0000000; 0x02000000-0x7FFFFFFF is reachable only
+   through a page table the game set up, and goes through runtime/mmu.cpp. Below that is
+   physical RAM, which the runtime's own DMA and the page table walk address directly.
+   HOST_W is for a store: the page's Changed bit is what differs. */
 uint32_t vm_translate(uint32_t ea, int write);
+#define GCN_VM_LO 0x02000000u
 static inline uint32_t guest_off(uint32_t a) {
-    if (GCN_UNLIKELY((a & 0xC0000000u) == 0x40000000u)) return vm_translate(a, 0);
+    if (GCN_UNLIKELY(a - GCN_VM_LO < 0x80000000u - GCN_VM_LO)) return vm_translate(a, 0);
     return a & 0x3FFFFFFFu;
 }
 static inline uint32_t guest_off_w(uint32_t a) {
-    if (GCN_UNLIKELY((a & 0xC0000000u) == 0x40000000u)) return vm_translate(a, 1);
+    if (GCN_UNLIKELY(a - GCN_VM_LO < 0x80000000u - GCN_VM_LO)) return vm_translate(a, 1);
     return a & 0x3FFFFFFFu;
 }
 #define HOST(a) (g_mem + guest_off((uint32_t)(a)))
@@ -258,6 +260,22 @@ typedef struct { uint32_t canon, size, entry, code_end; const uint8_t* bytes; co
 extern const RecompModule g_recomp_modules[];
 extern const uint32_t g_recomp_module_count;
 uint32_t modules_canon(uint32_t a);
+/* Relocatable modules (OSLink), recompiled at canonical addresses and run wherever the
+   game links them; see runtime/rels.cpp. A relocated immediate is computed from the base
+   OSLink gave its target section, as the linker would have written it. */
+#define REL_MAX_SECTIONS 32
+typedef struct { uint32_t index, canon, size, exec; } RecompRelSection;
+typedef struct { uint32_t id; const char* name; uint32_t count; RecompRelSection sections[REL_MAX_SECTIONS]; } RecompRel;
+extern const RecompRel g_recomp_rels[];
+extern const uint32_t g_recomp_rel_count;
+extern uint32_t g_rel_base[];  /* [module * REL_MAX_SECTIONS + section]: where it is now */
+#define REL_V(m, s, a) (g_rel_base[(m) * REL_MAX_SECTIONS + (s)] + (uint32_t)(a))
+#define REL_LO(m, s, a) ((uint16_t)REL_V(m, s, a))
+#define REL_HI(m, s, a) ((uint16_t)(REL_V(m, s, a) >> 16))
+#define REL_HA(m, s, a) ((uint16_t)((REL_V(m, s, a) + 0x8000u) >> 16))
+uint32_t rels_canon(uint32_t a);
+void rels_linked(uint32_t module_info);
+void rels_unlinked(uint32_t module_info);
 
 void call_indirect(CPU* c, uint32_t addr);
 void unimpl(CPU* c, uint32_t pc, uint32_t inst);

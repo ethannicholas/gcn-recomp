@@ -33,19 +33,20 @@ enum { CP_CR_READ = 1, CP_CR_BPEN = 2, CP_CR_OVFINT = 4, CP_CR_UNFINT = 8, CP_CR
 enum { PE_TOKEN_EN = 1, PE_FINISH_EN = 2, PE_TOKEN_INT = 4, PE_FINISH_INT = 8 };
 
 static uint32_t g_pe_finish_raised, g_pe_finish_coalesced, g_pe_finish_acked;
+static bool toklog() { static const bool on = getenv("GCN_TOKLOG") != nullptr; return on; }
 static void pe_update_irq() {
     pi_set_interrupt(INT_PE_TOKEN, (g_pe_ctrl & PE_TOKEN_INT) && (g_pe_ctrl & PE_TOKEN_EN));
     pi_set_interrupt(INT_PE_FINISH, (g_pe_ctrl & PE_FINISH_INT) && (g_pe_ctrl & PE_FINISH_EN));
 }
 
 void pe_signal_token(uint16_t token, bool interrupt) {
-    static const bool toklog = getenv("GCN_TOKLOG") != nullptr;
-    if (toklog) fprintf(stderr, "[tok] %04X%s\n", token, interrupt ? " int" : "");
+    if (toklog()) fprintf(stderr, "[tok] %04X%s\n", token, interrupt ? " int" : "");
     g_pe_token = token;
     if (interrupt) { g_pe_ctrl |= PE_TOKEN_INT; pe_update_irq(); }
 }
 void pe_signal_finish() {
     g_pe_finish_raised++;
+    if (toklog()) fprintf(stderr, "[fin] raised (%u)%s\n", g_pe_finish_raised, (g_pe_ctrl & PE_FINISH_INT) ? ", coalesced" : "");
     if (g_pe_ctrl & PE_FINISH_INT) g_pe_finish_coalesced++;
     g_pe_ctrl |= PE_FINISH_INT;
     pe_update_irq();
@@ -370,17 +371,24 @@ static void cp_watermarks() {
 // Consume everything between the CP read pointer and the CPU write pointer (the GP
 // FIFO lives in RAM; data written while reads are disabled is processed later).
 // Honors the GP breakpoint, which games use to hold the GPU back.
-// The CP's write pointer follows the PI's while the link bit is on, and keeps its last
-// value when a game clears the link to move the CPU elsewhere: the GP still reads up to
-// it. A game that unlinks, lets the GP finish the old FIFO, and only then points the CP
-// at a new one relies on that; draining only while linked lost the old FIFO's last
-// frame, with the draw-done the game's frame wait was sleeping for.
-static void cp_sync_wptr() {
+// The CP's write pointer follows the PI's while the link bit is on: each burst the
+// write-gather pipe puts in the FIFO moves both (as in Dolphin's GatherPipeBursted). It
+// keeps its last value when a game clears the link to move the CPU elsewhere: the GP
+// still reads up to it. A game that unlinks, lets the GP finish the old FIFO, and only
+// then points the CP at a new one relies on that; draining only while linked lost the old
+// FIFO's last frame, with the draw-done the game's frame wait was sleeping for.
+//
+// Only a burst moves it, not a register write. It was once copied from the PI's whenever
+// the GP drained and at every CP_CR write, and a game that keeps two FIFOs -- the CPU
+// filling one while the GP reads the other -- broke on it: GXSetGPFifo writes the new
+// FIFO's write pointer while the link bit is still on from before and then clears the
+// link, and the copy at that CP_CR write put the CPU's pointer, in the other FIFO, in
+// place of the one just written. The GP stopped, and the game's draw-done never came.
+static void cp_follow_pi() {
     if (g_cp_cr & CP_CR_LINK) g_cp_wptr = pi_fifo_wptr();
 }
 
 static void cp_drain() {
-    cp_sync_wptr();
     if (!(g_cp_cr & CP_CR_READ)) return;
     uint32_t base = g_cp_base & 0x03FFFFE0, end = g_cp_end & 0x03FFFFE0;
     uint32_t wptr = g_cp_wptr & 0x03FFFFE0;
@@ -426,6 +434,7 @@ static void gp_flush32() {
     } else {
         wptr = (wptr & 0x04000000) | addr;
     }
+    cp_follow_pi();
     cp_drain();
     cp_watermarks();  // cp_drain returns early while the GP is stopped, and the writer is not
     memmove(g_gp_buf, g_gp_buf + 32, g_gp_len - 32);
@@ -474,6 +483,7 @@ void gp_flush_partial() {
     memcpy(phys_ptr(addr), g_gp_buf, dma_fit("write-gather", addr, g_gp_len));
     wptr = (wptr & 0x04000000) | ((addr + g_gp_len) & 0x03FFFFFF);
     g_gp_len = 0;
+    cp_follow_pi();
     cp_drain();
 }
 
@@ -558,7 +568,6 @@ void cp_write16(uint32_t off, uint16_t v) {
     case 0x00: g_cp_sr = v; break;
     case 0x02:
         if ((v ^ g_cp_cr) & ~1u) LOG(LOG_GX, "CP_CR %04X -> %04X", g_cp_cr, v);
-        cp_sync_wptr();  // with the old link state: an unlink keeps the pointer where the PI left it
         g_cp_cr = v;
         if (!(v & CP_CR_BPEN)) g_cp_sr &= ~0x10;
         cp_update_irq();
@@ -579,7 +588,12 @@ void cp_write16(uint32_t off, uint16_t v) {
 
 uint16_t pe_read16(uint32_t off) {
     switch (off & 0xFF) {
-    case 0x0A: return g_pe_ctrl;
+    // The interrupt bits are write-only (acknowledge by writing 1) and read as 0, as in
+    // Dolphin. The SDK's token handler acknowledges with a read-modify-write that clears
+    // only the token bit, so reading back a pending finish acknowledged it too, before
+    // it was delivered: a game whose frame wait is on the draw-done callback, and whose
+    // frame ends with tokens, waited forever.
+    case 0x0A: return g_pe_ctrl & (PE_TOKEN_EN | PE_FINISH_EN);
     case 0x0E:
         if (!fe_threaded() || !g_token_at) return g_pe_token;
         g_tok_reads++;
@@ -598,7 +612,10 @@ uint16_t pe_read16(uint32_t off) {
 void pe_write16(uint32_t off, uint16_t v) {
     switch (off & 0xFF) {
     case 0x0A:
-        if ((v & PE_FINISH_INT) && (g_pe_ctrl & PE_FINISH_INT)) g_pe_finish_acked++;
+        if ((v & PE_FINISH_INT) && (g_pe_ctrl & PE_FINISH_INT)) {
+            g_pe_finish_acked++;
+            if (toklog()) fprintf(stderr, "[fin] acked (%u)\n", g_pe_finish_acked);
+        }
         g_pe_ctrl = (uint16_t)((g_pe_ctrl & (PE_TOKEN_INT | PE_FINISH_INT)) & ~(v & (PE_TOKEN_INT | PE_FINISH_INT))) |
                     (v & (PE_TOKEN_EN | PE_FINISH_EN));
         pe_update_irq();

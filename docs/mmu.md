@@ -3,9 +3,11 @@
 Most GameCube games touch memory only through the BATs the IPL leaves behind, which map
 0x80000000 and 0xC0000000 onto RAM; `HOST()` in `runtime/recomp.h` is that mapping and
 nothing else. A game may also program the MMU proper -- a page table through SDR1, segment
-registers, and a window in 0x40000000-0x7FFFFFFF, which no BAT covers, that it maps page
-by page, pages in on a DSI and evicts again -- and `runtime/mmu.cpp` is what makes that
-run. The comment at the top of that file is the design; this is what to know when using
+registers, and a window below 0x80000000, which no BAT covers, that it maps page by
+page, pages in on a DSI and evicts again -- and `runtime/mmu.cpp` is what makes that run.
+The window the runtime translates is 0x02000000-0x7FFFFFFF; below it is physical RAM,
+which the runtime's own DMA and page table walk address directly, and which no game's
+virtual addresses use. The comment at the top of that file is the design; this is what to know when using
 or extending it.
 
 ## How it works
