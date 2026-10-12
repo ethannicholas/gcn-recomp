@@ -81,7 +81,10 @@ void mem_init() {
     void* p = plat_reserve(reserve);
     if (!p) fatal("mem reserve failed");
     g_mem = (uint8_t*)p;
-    if (!plat_commit(g_mem, RAM_SIZE)) fatal("mem commit failed");
+    // Plus a guard of zeros past the end: a read that runs a little beyond RAM (a
+    // paired-single load at the top of the arena) gets nothing on the hardware and zeros
+    // in Dolphin, not a fault. A megabyte, short of where a page table's window begins.
+    if (!plat_commit(g_mem, RAM_SIZE + 0x100000)) fatal("mem commit failed");
     if (!plat_commit(g_mem + LC_BASE, LC_SIZE)) fatal("lc commit failed");
     g_aram = (uint8_t*)calloc(1, ARAM_SIZE);
 }

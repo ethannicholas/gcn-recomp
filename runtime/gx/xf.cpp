@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <deque>
 #include <thread>
+#include <unordered_set>
 
 namespace gx {
 
@@ -291,6 +292,12 @@ static Layout make_layout(int vat) {
     L.nrm_scale = (L.nrm_fmt == 1 || L.nrm_fmt == 0) ? 1.0f / 64 : (L.nrm_fmt == 4 ? 1.0f : 1.0f / 16384);
     L.col_desc[0] = (lo >> 13) & 3; L.col_fmt[0] = (a >> 14) & 7;
     L.col_desc[1] = (lo >> 15) & 3; L.col_fmt[1] = (a >> 18) & 7;
+    // GCN_VATLOG=1: each vertex layout as it is built (VCD and VAT), for reading a draw's
+    // vertex data against the format it was decoded with.
+    static const bool vatlog = getenv("GCN_VATLOG") != nullptr;
+    if (vatlog)
+        fprintf(stderr, "[vat] vat%d vcd=%08X/%08X A=%08X B=%08X C=%08X pos desc=%u cnt=%u fmt=%u nrm desc=%u fmt=%u col0 desc=%u fmt=%u col1 desc=%u fmt=%u\n", vat, lo, hi, a, b, c,
+                L.pos_desc, L.pos_cnt, L.pos_fmt, L.nrm_desc, L.nrm_fmt, L.col_desc[0], L.col_fmt[0], L.col_desc[1], L.col_fmt[1]);
     uint32_t tc[8] = {(a >> 21) & 1, b & 1, (b >> 9) & 1, (b >> 18) & 1, (b >> 27) & 1, (c >> 5) & 1, (c >> 14) & 1, (c >> 23) & 1};
     uint32_t tf[8] = {(a >> 22) & 7, (b >> 1) & 7, (b >> 10) & 7, (b >> 19) & 7, (b >> 28) & 7, (c >> 6) & 7, (c >> 15) & 7, (c >> 24) & 7};
     uint32_t ts[8] = {(a >> 25) & 31, (b >> 4) & 31, (b >> 13) & 31, (b >> 22) & 31, c & 31, (c >> 9) & 31, (c >> 18) & 31, (c >> 27) & 31};
@@ -872,6 +879,7 @@ struct XfDraw {
     uint32_t snap[XF_REGIONS];   // offsets into Pending::snap
     bool has_nrm;
     uint32_t cmd;                // the Batch::cmds entry drawing it; ~0 if none
+    uint8_t col_desc[2], col_fmt[2];   // how each colour was read, for GCN_LIGHTLOG
 };
 
 struct Pending {
@@ -1024,6 +1032,63 @@ static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
         if (d.snap[XF_MTX] != t_plan_snap[XF_MTX] || d.snap[XF_NRM] != t_plan_snap[XF_NRM]) forget_matrices();
         if (d.snap[XF_POST] != t_plan_snap[XF_POST]) g_post_loaded = 0;
         if (d.snap[XF_LIGHT] != t_plan_snap[XF_LIGHT]) g_lights_loaded = 0;
+    }
+    {
+    // GCN_LIGHTLOG=<min verts>: the channel and light registers of each lit draw of at
+    // least that many vertices, once per distinct setup, for seeing why a channel lights
+    // the way it does. A draw is named by its vertex count, which is what the draw log
+    // shows for it.
+    static const int lightlog = getenv("GCN_LIGHTLOG") ? atoi(getenv("GCN_LIGHTLOG")) : 0;
+    if (lightlog && (int)d.count >= lightlog) {
+        // A setup is the channel controls, materials, ambients and light colours and
+        // attenuations; a light's position and direction move with the camera every
+        // frame and are not part of what makes two setups differ.
+        uint64_t h = g_numcol;
+        auto mix = [&](uint32_t w) { h = (h ^ w) * 0x100000001B3ull; };
+        for (int c = 0; c < 2; c++) {
+            mix(g_chan[c].cctrl); mix(g_chan[c].actrl); mix(tw(XF_REGS, 0x0C + c)); mix(tw(XF_REGS, 0x0A + c));
+            uint32_t ctrl = g_chan[c].cctrl | g_chan[c].actrl;
+            uint32_t mask = ((ctrl >> 2) & 0xF) | (((ctrl >> 11) & 0xF) << 4);
+            for (int i = 0; i < 8; i++)
+                if (mask & (1u << i))
+                    for (int w = 3; w < 10; w++) mix(tw(XF_LIGHT, i * 0x10 + w));
+        }
+        static std::mutex seen_mutex;
+        static std::unordered_set<uint64_t> seen;
+        bool fresh;
+        {
+            std::lock_guard<std::mutex> lk(seen_mutex);
+            fresh = seen.insert(h).second;
+        }
+        if (fresh) {
+            const InVertex& v0 = pd.in[d.first_in];
+            // The raw colours of the first few vertices, and how many distinct alphas the
+            // draw's vertices carry between them: a fade that should be smooth and comes
+            // out stepped is told from its source here.
+            std::unordered_set<uint32_t> alphas;
+            for (uint32_t i = 0; i < d.count; i++) alphas.insert(pd.in[d.first_in + i].col[0] & 0xFF);
+            fprintf(stderr, "[light]   raw col0:");
+            for (uint32_t i = 0; i < d.count && i < 8; i++) fprintf(stderr, " %08X", pd.in[d.first_in + i].col[0]);
+            // The colour arrays are read live, so they are the draw's own only under
+            // GCN_XF_SYNC=1.
+            fprintf(stderr, "  distinct alphas=%zu  col0 desc=%u fmt=%u col1 desc=%u fmt=%u arrays %08X/%u %08X/%u\n", alphas.size(),
+                    d.col_desc[0], d.col_fmt[0], d.col_desc[1], d.col_fmt[1],
+                    g_state.cp[0xA2], g_state.cp[0xB2], g_state.cp[0xA3], g_state.cp[0xB3]);
+            fprintf(stderr, "[light] draw of %u verts (numcol %u, v0 col %08X %08X): chan0 cctrl=%04X actrl=%04X mat=%08X amb=%08X | chan1 cctrl=%04X actrl=%04X mat=%08X amb=%08X\n", d.count,
+                    g_numcol, v0.col[0], v0.col[1], g_chan[0].cctrl, g_chan[0].actrl, tw(XF_REGS, 0x0C), tw(XF_REGS, 0x0A), g_chan[1].cctrl, g_chan[1].actrl, tw(XF_REGS, 0x0D), tw(XF_REGS, 0x0B));
+            for (int c = 0; c < 2; c++) {
+                uint32_t ctrl = g_chan[c].cctrl | g_chan[c].actrl;
+                uint32_t mask = ((ctrl >> 2) & 0xF) | (((ctrl >> 11) & 0xF) << 4);
+                for (int i = 0; i < 8; i++) {
+                    if (!(mask & (1u << i))) continue;
+                    load_light(i);
+                    const LightParams& L = g_lights[i];
+                    fprintf(stderr, "[light]   chan%d light%d col=%08X pos=%.1f,%.1f,%.1f dir=%.2f,%.2f,%.2f cos=%.2f,%.2f,%.2f dist=%.2f,%.2f,%.2f\n", c, i, tw(XF_LIGHT, i * 0x10 + 3),
+                            L.pos.x, L.pos.y, L.pos.z, L.dir.x, L.dir.y, L.dir.z, L.cosatt.x, L.cosatt.y, L.cosatt.z, L.distatt.x, L.distatt.y, L.distatt.z);
+                }
+            }
+        }
+    }
     }
     t_plan_valid = true;
     memcpy(t_plan_snap, d.snap, sizeof(t_plan_snap));
@@ -1268,6 +1333,7 @@ static void draw_impl(const DrawCall& dc) {
     d.count = dc.count;
     d.seq = g_draw_seq;
     d.has_nrm = L.nrm_desc != 0;
+    for (int c = 0; c < 2; c++) { d.col_desc[c] = (uint8_t)L.col_desc[c]; d.col_fmt[c] = (uint8_t)L.col_fmt[c]; }
     d.cmd = ~0u;
     for (int r = 0; r < XF_REGIONS; r++) {
         if (pd.snap_gen[r] != g_state.xf_gen[r]) {
@@ -1518,8 +1584,8 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
     static const bool copylog = getenv("GCN_COPYLOG") != nullptr;
     if (copylog)
         fprintf(stderr, "[copy] f%u xfb=%d dest=%08X dst=%ux%u src=%ux%u@%u,%u fmt=%X clear=%d "
-                "half=%d pe=%06X\n", g_frame_counter, cc.to_xfb, dest_addr, cc.dst_w, cc.dst_h,
-                cc.src_w, cc.src_h, cc.src_x, cc.src_y, cc.format, cc.clear, (int)half, v);
+                "half=%d pe=%06X pixfmt=%u depth=%d\n", g_frame_counter, cc.to_xfb, dest_addr, cc.dst_w, cc.dst_h,
+                cc.src_w, cc.src_h, cc.src_x, cc.src_y, cc.format, cc.clear, (int)half, v, bp[0x43] & 7, (int)cc.depth);
     if (!cc.to_xfb) cc.tex_id = texture_register_efb_copy(dest_addr, cc.dst_w, cc.dst_h, cc.format);
     // In the GCN_MTXLOG dump, so the draws it lists can be read against the pass
     // boundaries: which were drawn into an off-screen target and which into the scene.

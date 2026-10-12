@@ -234,11 +234,19 @@ void main() {
 
 std::string gen_pixel_shader(const ShaderKey& k) {
     static const int tev_stop = getenv("GCN_TEV_STOP") ? atoi(getenv("GCN_TEV_STOP")) : -1;
+    // GCN_TEV_STOP_STAGES=<n> confines the stop to programs of exactly n stages, so a
+    // draw can be probed without every later draw of at least as many stages painting
+    // its own probe over it.
+    static const int tev_stop_stages = getenv("GCN_TEV_STOP_STAGES") ? atoi(getenv("GCN_TEV_STOP_STAGES")) : 0;
     static const int tev_reg = getenv("GCN_TEV_REG") ? atoi(getenv("GCN_TEV_REG")) : 0;
     static const int tev_alpha = getenv("GCN_TEV_ALPHA") ? atoi(getenv("GCN_TEV_ALPHA")) : 0;
     static const bool no_alpha_test = getenv("GCN_NO_ALPHA_TEST") != nullptr;
     static const bool no_fog = getenv("GCN_NO_FOG") != nullptr;
     static const bool ras_white = getenv("GCN_RAS_WHITE") != nullptr;
+    // GCN_TEX_WHITE=1 makes every texture sample opaque white, which leaves a draw's
+    // colour to its channels and konstants alone. The cache keys programs by their
+    // source, so the variant is kept apart from the real one.
+    static const bool tex_white = getenv("GCN_TEX_WHITE") != nullptr;
     static const int snap_stage = getenv("GCN_SNAP") ? atoi(getenv("GCN_SNAP")) : -1;
     std::string s;
     char buf[1024];
@@ -398,7 +406,7 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         if (fb) W("    tc += tc_prev;\n");
         W("    tc_prev = tc;\n");
         // ---- texture ----
-        if (tex_en) {
+        if (tex_en && !tex_white) {
             uint32_t tswap = (aenv >> 2) & 3;
             W("    tex = sample_tex(%u, snap_tex(%u, tc) / u_texsize[%u]).%s;\n", map, map, map, swizzle(k, tswap).c_str());
         } else {
@@ -505,12 +513,13 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         // result straight out, to bisect which stage a bad image comes from.
         // GCN_TEV_REG picks which register to show (0=prev, 1=c0, 2=c1, 3=c2), and
         // GCN_TEV_ALPHA=1 shows that register's alpha as greyscale instead of its rgb.
-        if (tev_stop >= 0 && (int)st == tev_stop) {
+        if (tev_stop >= 0 && (int)st == tev_stop && (!tev_stop_stages || (int)nstages == tev_stop_stages)) {
             // 0-3 pick a TEV register, 4 the texel this stage sampled, 5 the
             // rasterized colour, 6 the konst. Showing the texel separates a bad
             // texture or texcoord from bad combiner inputs.
-            static const char* kShow[7] = {"prev", "c0", "c1", "c2", "tex", "ras", "konst"};
-            const char* reg = kShow[tev_reg % 7];
+            // 7 and 8 are the two vertex colours as the fragment sees them.
+            static const char* kShow[9] = {"prev", "c0", "c1", "c2", "tex", "ras", "konst", "col0", "col1"};
+            const char* reg = kShow[tev_reg % 9];
             if (tev_alpha) W("  o_color = vec4(vec3(float(%s.a & 255) / 255.0), 1.0);\n", reg);
             else W("  o_color = vec4(vec3(%s.rgb & 255) / 255.0, 1.0);\n", reg);
             s += "  return;\n";
@@ -576,7 +585,21 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     // with a TEV value. Unlike GCN_TEV_STOP this changes no control flow at all --
     // every stage, the alpha test and fog still run exactly as they normally would --
     // so it cannot perturb what it is measuring.
-    if (const char* show = getenv("GCN_SHOW")) {
+    // GCN_SHOW_STAGES=<n> confines it to programs of exactly n stages, as
+    // GCN_TEV_STOP_STAGES does for the stop; col0 and col1 name the vertex colours.
+    static const int show_stages = getenv("GCN_SHOW_STAGES") ? atoi(getenv("GCN_SHOW_STAGES")) : 0;
+    // GCN_SHOW_MIN_STAGES=<n> leaves programs of fewer stages alone instead, which keeps
+    // a one-stage full-screen blit from painting its own value over everything.
+    static const int show_min_stages = getenv("GCN_SHOW_MIN_STAGES") ? atoi(getenv("GCN_SHOW_MIN_STAGES")) : 0;
+    const char* show = getenv("GCN_SHOW");
+    if (show && show_stages && (int)nstages != show_stages) show = nullptr;
+    if (show && show_min_stages && (int)nstages < show_min_stages) show = nullptr;
+    if (show) {
+        // "stages" paints the program's stage count as a grey level, n/16, so one frame
+        // says which program drew each pixel.
+        static char stages_expr[32];
+        snprintf(stages_expr, sizeof(stages_expr), "ivec4(%u * 16)", nstages);
+        if (!strcmp(show, "stages")) show = stages_expr;
         // "probe" packs stage 12's three inputs into one image so they are measured in
         // a single run, on the same pixels of the same frame: red is prev as it entered
         // the stage (GCN_SNAP), green is c1's red, blue is c1's alpha. Comparing these
@@ -592,6 +615,13 @@ std::string gen_pixel_shader(const ShaderKey& k) {
                  " float(prev.r & 255) / 255.0, 1.0);\n";
         else if (getenv("GCN_SHOW_ALPHA")) W("  o_color = vec4(vec3(float(%s.a & 255) / 255.0), 1.0);\n", show);
         else W("  o_color = vec4(vec3(%s.rgb & 255) / 255.0, 1.0);\n", show);
+        // GCN_SHOW_SPLIT=<x> shows the value only right of EFB column x (in the target's
+        // own pixels, so 640 is the middle at --scale=2), leaving the left half as it
+        // normally renders: the two can then be read off one frame, which matters when
+        // no two runs reach the same frame at the same moment.
+        if (const char* split = getenv("GCN_SHOW_SPLIT")) {
+            s.insert(s.rfind("  o_color = vec4(vec3("), "  if (gl_FragCoord.x > " + std::string(split) + ".0)\n  ");
+        }
     }
     s += "}\n";
     return s;

@@ -593,7 +593,10 @@ void main() {
     vec4 c = texture(u_src, uv);
     if ((u_mode & 32) != 0) {
         float z = texture(u_depth, uv).r;
-        uint zi = uint(z * 16777215.0 + 0.5);
+        // Clamped: at the far plane z * 16777215 + 0.5 rounds up to 16777216 in single
+        // precision, whose top byte is 0, so a cleared depth buffer copied as Z8 read as
+        // the nearest depth instead of the farthest.
+        uint zi = min(uint(z * 16777215.0 + 0.5), 16777215u);
         c = vec4(float((zi >> 16) & 255u), float((zi >> 8) & 255u), float(zi & 255u), 255.0) / 255.0;
         c = vec4(c.r, c.g, c.b, c.r);
     }
@@ -1593,6 +1596,9 @@ static bool is_grab_copy(const EfbCopyCmd& c) {
     return !c.to_xfb && !c.clear && c.dst_w <= kGrabMax && c.dst_h <= kGrabMax;
 }
 
+// Presented frames so far; the number the frame dumps carry. Defined here because the
+// copy dump below keys on it.
+static uint32_t g_present_count;
 static void do_efb_copy(const EfbCopyCmd& c) {
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
@@ -1641,6 +1647,34 @@ static void do_efb_copy(const EfbCopyCmd& c) {
         glUniform1i(g_copy_u_mode, (int)c.format | (c.depth ? 32 : 0));
         glBindVertexArray(g_copy_vao);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        // GCN_COPYDUMP=<dir> with GCN_DRAWLOG=<frame>: every texture copy made in that
+        // frame is written out as it was produced, twice -- its colour, and its alpha
+        // as grey -- named by the frame, the copy's order in it and its texture id.
+        {
+            static const char* copydump = getenv("GCN_COPYDUMP");
+            static const uint32_t copydump_frame = getenv("GCN_DRAWLOG") ? (uint32_t)atoi(getenv("GCN_DRAWLOG")) : 0;
+            static uint32_t copydump_n = 0;
+            if (copydump && copydump_frame && g_present_count + 1 == copydump_frame) {
+                const int w = c.dst_w * g_scale, h = c.dst_h * g_scale;
+                std::vector<uint8_t> px((size_t)w * h * 4), out((size_t)w * h * 4);
+                glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                char path[512];
+                for (int pass = 0; pass < 2; pass++) {
+                    for (int y = 0; y < h; y++)
+                        for (int x = 0; x < w; x++) {
+                            const uint8_t* q = &px[((size_t)y * w + x) * 4];
+                            uint8_t* o = &out[((size_t)y * w + x) * 4];
+                            if (pass == 0) { o[0] = q[0]; o[1] = q[1]; o[2] = q[2]; }
+                            else { o[0] = o[1] = o[2] = q[3]; }
+                            o[3] = 255;
+                        }
+                    snprintf(path, sizeof(path), "%s/copy_%05u_%03u_tex%u_%s.png", copydump, g_present_count + 1, copydump_n,
+                             c.tex_id, pass == 0 ? "rgb" : "alpha");
+                    write_png(path, out.data(), w, h);
+                }
+                copydump_n++;
+            }
+        }
         if (!reuse && old != g_textures.end()) glDeleteTextures(1, &old->second.tex);
         g_textures[c.tex_id] = t;
         glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
@@ -1664,7 +1698,6 @@ static void do_efb_copy(const EfbCopyCmd& c) {
 
 const char* g_dump_dir = nullptr;
 int g_dump_every = 0;
-static uint32_t g_present_count;
 // The second pass of a stereo pair (render_execute_stereo_pair) presents the same frame
 // again: it is not counted twice, and its dump is told apart by a suffix.
 static bool g_pair_second = false;
@@ -2436,7 +2469,8 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         }
     }
     static const uint32_t eye_drawlog_frame = getenv("GCN_DRAWLOG") ? (uint32_t)atoi(getenv("GCN_DRAWLOG")) : 0;
-    const bool eye_drawlog = eye_drawlog_frame && g_render_frame == eye_drawlog_frame;
+    // Keyed on the presented frame, the number the dumps carry; a frame may take several batches.
+    const bool eye_drawlog = eye_drawlog_frame && g_present_count + 1 == eye_drawlog_frame;
     int eye_draw_index = 0;   // the flat draw log's numbering: every draw command, in order
     for (size_t i = 0; i < b.cmds.size(); i++) {
         Cmd& c = b.cmds[i];
@@ -2672,7 +2706,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     skip_hi = dash ? atoi(dash + 1) : skip_lo;
                 }
             }
-            if (drawlog && g_render_frame == drawlog) {
+            if (drawlog && g_present_count + 1 == drawlog) {
                 const PixelState& st = b.states[c.state];
                 // The projection type and the view-space depth are what decide a draw's
                 // fate in an eye: a perspective batch is re-projected as world geometry,
@@ -2766,6 +2800,11 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X pecntrl=%06X", bp[0xF3], bp[0x40], bp[0x41], bp[0x43]);
                     fprintf(stderr, "\n        viewport=%.1f,%.1f,%.1f %.1f,%.1f,%.1f scissor=%06X %06X offset=%06X", st.viewport[0],
                             st.viewport[1], st.viewport[2], st.viewport[3], st.viewport[4], st.viewport[5], bp[0x20], bp[0x21], bp[0x59]);
+                    // Each bound map's mode register (wrap, filters, LOD bias): BP 0x80-0x83
+                    // and 0xA0-0xA3 for maps 0-3 and 4-7.
+                    fprintf(stderr, "\n       ");
+                    for (int i = 0; i < 8; i++)
+                        if (st.tex_id[i]) fprintf(stderr, " mode%d=%06X", i, bp[i < 4 ? 0x80 + i : 0xA0 + (i - 4)]);
                     for (int r = 0; r < 4; r++)
                         fprintf(stderr, "\n        reg%d=%08X %08X  konst%d=%08X %08X", r, st.tev_reg[r][0], st.tev_reg[r][1],
                                 r, st.tev_konst[r][0], st.tev_konst[r][1]);
@@ -2817,6 +2856,45 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                 n_apply++;
             }
             draw_cmd(b, c);
+            // GCN_PIXEL=x,y[;x,y...] (EFB pixels) with GCN_DRAWLOG=<frame>: after every draw
+            // of that frame, each listed pixel is read back and printed when it changed,
+            // with the draw's index in the draw log. Which draws touch a pixel, and what
+            // each leaves there, read off one frame.
+            {
+                static std::vector<std::pair<int, int>> probes = [] {
+                    std::vector<std::pair<int, int>> v;
+                    if (const char* e = getenv("GCN_PIXEL")) {
+                        for (const char* q = e; *q; ) {
+                            int x = atoi(q);
+                            const char* comma = strchr(q, ',');
+                            if (!comma) break;
+                            v.push_back({x, atoi(comma + 1)});
+                            const char* semi = strchr(comma, ';');
+                            if (!semi) break;
+                            q = semi + 1;
+                        }
+                    }
+                    return v;
+                }();
+                static std::vector<uint32_t> last(probes.size(), 0xFFFFFFFFu), last_z(probes.size(), 0xFFFFFFFFu);
+                if (!probes.empty() && drawlog && g_present_count + 1 == drawlog) {
+                    glFinish();
+                    for (size_t pi = 0; pi < probes.size(); pi++) {
+                        uint8_t px[4] = {0, 0, 0, 0};
+                        const int gx = probes[pi].first * g_scale, gy = (EFB_H - 1 - probes[pi].second) * g_scale;
+                        glReadPixels(gx, gy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                        float depth = -1.0f;
+                        glReadPixels(gx, gy, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+                        const uint32_t v = (px[0] << 24) | (px[1] << 16) | (px[2] << 8) | px[3];
+                        const uint32_t z = (uint32_t)(depth * 16777215.0f + 0.5f);
+                        if (v != last[pi] || z != last_z[pi]) {
+                            fprintf(stderr, "[pix] %d,%d after draw %d: %08X z=%06X\n", probes[pi].first, probes[pi].second, this_draw, v, z);
+                            last[pi] = v;
+                            last_z[pi] = z;
+                        }
+                    }
+                }
+            }
             break;
         }
         case CmdType::EfbCopy: {

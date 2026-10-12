@@ -314,7 +314,10 @@ bool plat_read_at(PlatFile* f, uint64_t offset, void* dst, uint32_t len) {
     uint32_t done = 0;
     while (done < len) {
         ssize_t r = pread(f->fd, out + done, len - done, (off_t)(offset + done));
-        if (r <= 0) return false;
+        if (r <= 0) {
+            if (r < 0) fprintf(stderr, "read of %u bytes at %llu failed: %s\n", len, (unsigned long long)offset, strerror(errno));
+            return false;
+        }
         done += (uint32_t)r;
     }
     return true;

@@ -238,6 +238,57 @@ use, which every lookup prolonged.
   layer the eye gave it (`[eyedraw]`: world, sky, the foreground or HUD bands, the HUD
   frame). `GCN_DRAW_SKIP=a-b` then drops a range of them, in the eyes too, to attribute a
   piece of the image to the draws that made it.
+- `GCN_PIXEL=x,y[;x,y...]` (EFB pixels) with `GCN_DRAWLOG` reads each listed pixel back
+  after every draw of that frame and prints it, colour and 24-bit depth, whenever it
+  changed, with the draw's index: which draws touch a pixel and what each leaves there,
+  from one frame. This is what found a shadow pass darkening a whole terrain -- the draw
+  that blackened the ground was six indices long, and every probe before it had been read
+  through later draws that painted over it.
+- `GCN_COPYDUMP=<dir>` with `GCN_DRAWLOG` writes every texture copy made in that frame
+  as it was produced, twice: its colour, and its alpha as grey (`copy_<frame>_<n>_tex<id>`).
+- The draw log's verbose form (`GCN_DRAWLOG_VERBOSE=1`) also prints the pixel format and
+  each bound map's mode register (wrap, filters, LOD bias).
+- `GCN_LIGHTLOG=<min verts>` prints, once per distinct lighting setup (channel controls,
+  materials, ambients, light colours and attenuations; a light's position and direction
+  move every frame and are not part of it), the channel and light registers of a draw of
+  at least that many vertices, with the raw colours of its first vertices, how many
+  distinct alphas they carry, the colour layouts and -- live, so only under
+  `GCN_XF_SYNC=1` -- the colour arrays. A draw here is a front-end draw, before the batcher
+  merges runs of them: a terrain of thousands of six-vertex tiles never reaches a
+  threshold its merged draw-log entry would.
+
+## Reading a TEV program
+
+Each of these regenerates the fragment shaders (the cache keys programs by their source,
+so the variants never mix with the real ones).
+
+- `GCN_TEV_STOP=<n>` ends every program after stage n and writes out what
+  `GCN_TEV_REG` selects: 0-3 the TEV registers (prev, c0, c1, c2), 4 the texel the stage
+  sampled, 5 its rasterised colour, 6 its konstant, 7 and 8 the two vertex colours as the
+  fragment sees them; `GCN_TEV_ALPHA=1` shows the alpha as grey. The value is written
+  opaque, so a blended draw covers whatever was under it. `GCN_TEV_STOP_STAGES=<n>`
+  confines the stop to programs of exactly n stages, so a later draw of as many stages
+  or more does not paint its own probe over the one wanted.
+- `GCN_SHOW=prev|c0|c1|c2|konst|col0|col1|stages` (with `GCN_SHOW_ALPHA=1`) replaces the
+  final colour without changing control flow -- every stage, the alpha test and fog
+  still run -- so it cannot perturb what it measures. `stages` paints the program's stage
+  count as a grey level, n/16, which says which program drew each pixel.
+  `GCN_SHOW_STAGES=<n>` confines it to programs of exactly n stages;
+  `GCN_SHOW_MIN_STAGES=<n>` leaves programs of fewer stages alone, which keeps a
+  one-stage full-screen blit from painting its own value over everything.
+  `GCN_SHOW_SPLIT=<x>` shows the value only right of EFB column x (in the target's own
+  pixels: 640 is the middle at `--scale=2`), so the probe and the normal image are read
+  off one frame. Since GCN_SHOW writes an opaque colour too, a blended draw that touches a
+  pixel last covers it; `GCN_PIXEL` is the tool when that is the question.
+- `GCN_TEX_WHITE=1` makes every texture sample opaque white, leaving a draw's colour to
+  its channels and konstants; `GCN_RAS_WHITE=1` does the same to the rasterised colour.
+- `GCN_DUMP_SHADERS=1` prints every program's source as it is compiled, which at start-up
+  is all of the cache: the one wanted is found by its stage count and the maps it samples.
+- The frame a run presents at a given count is not the same moment in every run: under
+  load, or flat out (`--fast`), the attract sequence drifts by hundreds of frames, and
+  two runs reach "frame 10600" in different scenes. Probes that compare pixel values
+  across runs are unsound; the split, the stop by stage count and `GCN_PIXEL` all exist
+  so that one run answers the question.
   `GCN_DRAWLOG_VERBOSE=1` adds each draw's TEV setup (stage orders, colour and alpha
   combiners, konst selectors, the colour registers and konsts, alpha test, Z and blend
   modes) and its first vertices with colours and texture coordinates.

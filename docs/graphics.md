@@ -270,6 +270,11 @@ exactly as many pixels, which at internal scale 1 leaves the last row's coordina
 volume drawn in horizontal chunks, each copied and read back that way, showed a faint line
 along every chunk's edge at scale 1 and none at scale 2. The snap is from the arithmetic,
 not yet from a frame of that game; it leaves every frame without depth copies unchanged.
+The 24-bit depth the copy shader packs is clamped at 16777215: at the far plane the
+rounding `z * 16777215 + 0.5` lands on 16777216 in single precision, whose top byte is 0,
+so a cleared depth buffer copied as Z8 read as the nearest depth. A game that renders its
+shadow casters into a cleared region from above, copies the depth as Z8 and then darkens
+its ground wherever the copy is below 1.0 shadowed the whole ground.
 
 ## Depth bands in an eye
 
