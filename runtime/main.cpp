@@ -42,9 +42,8 @@ bool write_png(const char* path, const uint8_t* rgba, int w, int h);
 static bool g_eye_mode = false;
 static GLuint g_eye_fbo, g_eye_tex, g_eye_depth;
 static const int kEyeW = 960, kEyeH = 720;
-// A VR frontend's typical HUD placement, in game units at 50 units per metre.
-static const float kHudDist = 200.0f, kHudScale = 0.5f, kHudHeight = -18.0f;
-static const float kWorldPitch = 23.2f * 3.14159265f / 180.0f;
+// The game's VR settings (eye_init), for the eye's planes and the HUD frame's placement.
+static VrConfig g_eye_cfg;
 
 static void eye_init() {
     glGenTextures(1, &g_eye_tex);
@@ -61,7 +60,13 @@ static void eye_init() {
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_eye_depth);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) fatal("eye fbo incomplete");
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    gx::render_set_world_pitch(kWorldPitch);
+    // The game's VR settings as a headset would have them -- its defaults, then ./vr.txt --
+    // so the preview shows what the game's hooks do: its world pitch, its depth layers and
+    // what its eye filter leaves out.
+    const VrConfig& c = g_eye_cfg = vr::load_config(".");
+    gx::render_set_world_pitch(c.world_pitch_deg * 3.14159265f / 180.0f);
+    gx::render_set_depth_layers(c.background_band, c.foreground_band, c.foreground_scale, c.hud_band, c.hud_band_scale);
+    gx::render_set_eye_filter(vr::game_hooks().eye_filter);
     gx::render_set_vr_morph(1.0f, nullptr);
 }
 
@@ -70,7 +75,8 @@ static void eye_init() {
 static void eye_matrices(float* proj, float* view, float* hud) {
     const float fov = 1.0f;   // tan(45 deg): a 90 degree vertical field
     const float aspect = (float)kEyeW / (float)kEyeH;
-    const float n = 5.0f, f = 100000.0f;
+    const float u = g_eye_cfg.units_per_metre;
+    const float n = g_eye_cfg.near_m * u, f = g_eye_cfg.far_m * u;
     memset(proj, 0, 16 * sizeof(float));
     proj[0] = 1.0f / (fov * aspect);
     proj[5] = 1.0f / fov;
@@ -79,7 +85,8 @@ static void eye_matrices(float* proj, float* view, float* hud) {
     proj[14] = -(2.0f * f * n) / (f - n);
     memset(view, 0, 16 * sizeof(float));
     view[0] = view[5] = view[10] = view[15] = 1.0f;
-    gx::render_hud_frame(kHudDist, fov, kHudScale, kHudHeight, 0.0f, hud);
+    gx::render_hud_frame(g_eye_cfg.hud_distance_m * u, fov, g_eye_cfg.hud_scale, g_eye_cfg.hud_height_m * u,
+                         g_eye_cfg.hud_pitch_deg * 3.14159265f / 180.0f, hud);
 }
 
 static void eye_dump(uint32_t n) {
