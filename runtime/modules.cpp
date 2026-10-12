@@ -33,6 +33,8 @@ namespace {
 struct Candidate { uint32_t module, off; };
 std::unordered_map<uint64_t, std::vector<Candidate>> g_sigs;
 
+// An instance covers the module's code, not its whole region: the game packs modules
+// closer than the region's length, and a neighbour's instance must not claim an address.
 struct Instance { uint32_t base, size, module; };
 constexpr int MAX_INSTANCES = 256;
 Instance g_instances[MAX_INSTANCES];
@@ -120,7 +122,7 @@ bool modules_bind(uint32_t addr) {
     }
     int n = g_instance_count.load();
     if (n >= MAX_INSTANCES) fatal("modules: more than %d loaded at once", MAX_INSTANCES);
-    g_instances[n] = {base, m.size, best->module};
+    g_instances[n] = {base, m.code_end, best->module};
     g_instance_count.store(n + 1, std::memory_order_release);
     LOG(LOG_OS, "module %s bound at %08X (called at +%X, %u of %u bytes match)", m.name, base, best->off, best_score, m.code_end - m.entry);
     return true;
