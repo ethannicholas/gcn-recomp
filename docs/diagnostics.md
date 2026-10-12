@@ -421,6 +421,15 @@ must not difference across a pause: a frozen vehicle reads as a dead stop. Nor a
 limits the game's smoothing: they are fast enough to let a collision through, so noise the
 game sends arrives as noise.
 
+Three things are the game's to choose. `yaw_heading` false sends `yaw` as the platform's own
+angle rather than a heading to wash out, for a game that yaws the platform only for what a
+driver feels through the seat (a slide, a spin) and not for every turn, which on a platform
+that cannot turn all the way round is jarring. `roughness` (0 to 1) adds a road texture,
+band-limited noise on heave, pitch and roll growing with speed, without which a platform sits
+dead still on a straight. `rpm`, `max_rpm` and `gear` go to the packet for a shaker's engine
+effect. `telemetry::set_default` gives a key a game's own default, which `telemetry.txt` still
+overrides: a vehicle's gains, or a faster `yaw_rate` for a spin.
+
 The packet is version 102 of SRS's "api" format. Its layout comes from SRS's own listener,
 which unpacks it with Python's `struct` format `3sI50s50s50sfffifffffffffffIIII` and no
 byte-order prefix, so in Python's native alignment: 236 bytes, a pad byte after the `api` tag

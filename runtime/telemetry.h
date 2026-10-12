@@ -25,11 +25,24 @@ struct Motion {
     float speed_kmh = 0;
     float pitch = 0;       // nose up is positive
     float roll = 0;        // right side down is positive
-    float yaw = 0;         // heading, any range; it is sent washed out (see telemetry.cpp)
+    // A heading, any range, sent washed out (see telemetry.cpp) -- or, with yaw_heading false,
+    // the angle the platform itself should be turned to, right positive: the game decides
+    // when the platform yaws (a slide, a spin) and it is sent as it is, still faded and limited.
+    float yaw = 0;
+    bool yaw_heading = true;
     float surge = 0;       // acceleration forward, m/s^2
     float sway = 0;        // acceleration to the right, m/s^2
     float heave = 0;       // acceleration up, m/s^2, without gravity: 0 at rest
     float sway_velocity = 0;  // m/s to the right: sliding sideways
+    // The engine, for a shaker's engine effect: revolutions a minute, the most it reaches, and
+    // the gear. Sent as they are while active; zero at rest.
+    float rpm = 0;
+    float max_rpm = 0;
+    int gear = 1;
+    // How rough the ground under the vehicle is, 0 for none to 1 for the roughest: the module
+    // adds a road texture to heave, pitch and roll that grows with this and with speed (see
+    // publish() in telemetry.cpp). 0 adds nothing.
+    float roughness = 0;
 };
 
 // "host:port", "" or null for the default. Reads telemetry.txt. Returns false if the
@@ -40,5 +53,9 @@ void publish(const Motion& m);
 
 // A key from telemetry.txt that this module does not know, for the game's own use.
 float get(const char* key, float fallback);
+
+// The game's own default for a key, the module's or its own: telemetry.txt still overrides
+// it. For a game whose vehicle wants other gains or limits than the module's defaults.
+void set_default(const char* key, float value);
 
 }  // namespace telemetry

@@ -31,11 +31,14 @@ namespace {
 sock_t g_sock = kNoSocket;
 sockaddr_in g_dest{};
 std::map<std::string, float> g_keys;
+std::map<std::string, float> g_defaults;   // the game's own (set_default)
 bool g_log = false;
 
 float key(const char* k, float fallback) {
     auto it = g_keys.find(k);
-    return it == g_keys.end() ? fallback : it->second;
+    if (it != g_keys.end()) return it->second;
+    it = g_defaults.find(k);
+    return it == g_defaults.end() ? fallback : it->second;
 }
 
 void read_file() {
@@ -69,9 +72,9 @@ void send_srs(const Motion& m) {
     put_str(p, 58, 50, "");
     put_str(p, 108, 50, "");
     put_f32(p, 160, m.speed_kmh);
-    put_f32(p, 164, 0.0f);            // rpm
-    put_f32(p, 168, 0.0f);            // max rpm
-    put_u32(p, 172, 1);               // gear
+    put_f32(p, 164, m.rpm);
+    put_f32(p, 168, m.max_rpm);
+    put_u32(p, 172, (uint32_t)m.gear);
     put_f32(p, 176, m.pitch);
     put_f32(p, 180, m.roll);
     put_f32(p, 184, m.yaw);
@@ -123,6 +126,8 @@ bool enabled() { return g_sock != kNoSocket; }
 
 float get(const char* k, float fallback) { return key(k, fallback); }
 
+void set_default(const char* k, float value) { g_defaults[k] = value; }
+
 // What goes to the platform is built in four stages, each of which on its own would stop a
 // class of jerk, so that no single mistake upstream reaches the rider:
 //
@@ -136,7 +141,8 @@ float get(const char* k, float fallback) { return key(k, fallback); }
 // 3. Yaw washout. A heading is not a position a platform can hold: it runs on for ever and
 //    wraps from +180 to -180. What is sent is how far the heading has turned from where it
 //    was `yaw_washout_s` ago, more or less -- the turn itself, returning to centre once it is
-//    over -- unwrapped, so a wrap is not a turn.
+//    over -- unwrapped, so a wrap is not a turn. A game that sends the platform's own yaw
+//    instead (yaw_heading false: a slide's angle, a spin) has it sent as it is.
 // 4. Limits. Last of all, after the gains, every channel is clamped to a range and to a rate
 //    of change: angles to `max_angle` degrees, pitch and roll to `angle_rate` degrees a
 //    second and yaw to `yaw_rate`, accelerations to `max_accel` m/s^2 and `accel_rate`
@@ -152,7 +158,15 @@ float get(const char* k, float fallback) { return key(k, fallback); }
 //    off a ramp (the hull pitching at some 300 degrees a second) as a slow lean. Smoothing
 //    belongs upstream, where the game knows what is noise; the jerks the limits are here
 //    for are the discontinuities stages 1 and 2 already take out. Yaw keeps the slow rate:
-//    a heading that swings is the one jerk on a start line that is not yet explained.
+//    a heading that swings is the one jerk on a start line that is not yet explained. (A
+//    game that sends its own yaw can raise it with set_default.)
+//
+// Between the gains and the limits, a road texture (5): band-limited noise on heave, pitch and
+// roll, as strong as the game's `roughness` and the speed make it, eased in and out with the
+// rest of the motion. A platform that sat dead still on a straight felt like no road at all.
+// `texture_heave`, `texture_pitch` and `texture_roll` are its RMS at roughness 1 and
+// `texture_speed_kmh` or faster (m/s^2 and degrees), `texture_hz` its bandwidth, and
+// `texture_gain` scales the lot.
 namespace {
 
 enum Ch { kSpeed, kPitch, kRoll, kYaw, kSurge, kSway, kHeave, kSlide, kChannels };
@@ -182,7 +196,10 @@ void publish(const Motion& in) {
     static float held[kChannels];        // the last active input: what rest fades away from
     static bool have_heading = false;
     static float heading_prev, unwrapped, reference;
-    if (in.active) {
+    if (in.active && !in.yaw_heading) {
+        have_heading = false;
+        to_array(in, held);
+    } else if (in.active) {
         if (!have_heading || in.discontinuity) {
             unwrapped = reference = in.yaw;
             have_heading = true;
@@ -227,6 +244,26 @@ void publish(const Motion& in) {
     want[kSurge] *= key("surge_gain", 1.0f);
     want[kSway] *= key("sway_gain", 1.0f);
     want[kHeave] *= key("heave_gain", 1.0f);
+
+    // Road texture (5): white noise through a one-pole low-pass, normalised to unit RMS.
+    {
+        static float tex[3];
+        static uint32_t seed = 0x2545F491u;
+        auto noise = [] {
+            seed = seed * 1664525u + 1013904223u;
+            return (float)(seed >> 8) * (2.0f / 16777216.0f) - 1.0f;   // uniform in [-1, 1)
+        };
+        const float a = 1.0f - expf(-dt * 6.2831853f * key("texture_hz", 8.0f));
+        const float norm = a > 0.0f ? 1.0f / sqrtf(a / (2.0f - a) / 3.0f) : 0.0f;
+        for (float& t : tex) t += (noise() - t) * a;
+        const float rough = in.active ? fminf(1.0f, fmaxf(0.0f, in.roughness)) : 0.0f;
+        const float at_speed = fminf(1.0f, fabsf(held[kSpeed]) / fmaxf(1.0f, key("texture_speed_kmh", 60.0f)));
+        const float amp = rough * at_speed * level * key("texture_gain", 1.0f) * norm;
+        want[kHeave] += tex[0] * amp * key("texture_heave", 1.5f);
+        want[kPitch] += tex[1] * amp * key("texture_pitch", 0.3f);
+        want[kRoll] += tex[2] * amp * key("texture_roll", 0.5f);
+    }
+
     const float max_angle = key("max_angle", 25.0f), angle_rate = key("angle_rate", 120.0f);
     const float yaw_rate = key("yaw_rate", 60.0f);
     const float max_accel = key("max_accel", 15.0f), accel_rate = key("accel_rate", 300.0f);
@@ -242,6 +279,11 @@ void publish(const Motion& in) {
     m.active = in.active;
     m.speed_kmh = out[kSpeed]; m.pitch = out[kPitch]; m.roll = out[kRoll]; m.yaw = out[kYaw];
     m.surge = out[kSurge]; m.sway = out[kSway]; m.heave = out[kHeave]; m.sway_velocity = out[kSlide];
+    if (in.active) {
+        m.rpm = in.rpm;
+        m.max_rpm = in.max_rpm;
+        m.gear = in.gear;
+    }
     send_srs(m);
 
     if (g_log) {
@@ -252,8 +294,8 @@ void publish(const Motion& in) {
         if (change)
             fprintf(stderr, "[telemetry] %s\n", in.discontinuity ? "discontinuity: crossfading" : in.active ? "active: easing in" : "rest: easing out");
         if (n++ % 30 == 0)
-            fprintf(stderr, "[telemetry] %s %5.1f km/h pitch %+5.1f roll %+5.1f yaw %+6.1f | surge %+6.2f sway %+6.2f heave %+6.2f m/s2 slide %+5.2f m/s\n",
-                    in.active ? "active" : "rest  ", m.speed_kmh, m.pitch, m.roll, m.yaw, m.surge, m.sway, m.heave, m.sway_velocity);
+            fprintf(stderr, "[telemetry] %s %5.1f km/h pitch %+5.1f roll %+5.1f yaw %+6.1f | surge %+6.2f sway %+6.2f heave %+6.2f m/s2 slide %+5.2f m/s | %4.0f rpm\n",
+                    in.active ? "active" : "rest  ", m.speed_kmh, m.pitch, m.roll, m.yaw, m.surge, m.sway, m.heave, m.sway_velocity, m.rpm);
     }
 }
 
