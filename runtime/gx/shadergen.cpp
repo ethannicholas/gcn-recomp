@@ -27,6 +27,7 @@ ShaderKey make_shader_key(const PixelState& st) {
     k.fog = (bp[0xF1] >> 20) & 0xF;  // proj bit + fsel
     k.num_texgens = st.num_texgens;
     k.efb_has_alpha = (bp[0x43] & 7) == 1;
+    if ((bp[0xF5] >> 2) & 3) k.ztex = bp[0xF5] & 0xF;
     uint32_t used = 0;
     for (uint32_t s = 0; s < nstages; s++) {
         uint32_t order = bp[0x28 + s / 2] >> ((s & 1) * 12);
@@ -266,6 +267,7 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     s += "uniform ivec2 u_alpharef;\n";
     s += "uniform vec4 u_fog;\n";       // A, C, bmag, bshift
     s += "uniform vec3 u_fogcolor;\n";
+    if (k.ztex) s += "uniform int u_zbias;\n";  // bp[0xF4]
     s += "layout(location = 0) out vec4 o_color;\n";
     s += "uniform vec2 u_indcoordscale[4];\n";
     s += "vec2 u_indscalef(int i) { return u_indcoordscale[i]; }\n";
@@ -553,6 +555,20 @@ std::string gen_pixel_shader(const ShaderKey& k) {
             s += "  vec3 fc = mix(vec3(outc.rgb), u_fogcolor * 255.0, fog);\n";
             s += "  outc.rgb = ivec3(round(fc));\n";
         }
+    }
+    // Z texture (GXSetZTexture): the last stage's texel, read as a depth, replaces the
+    // fragment's depth or is added to it. A frame is commonly cleared this way -- a
+    // quad at the near plane with a texture holding the far depth, Z compare off and Z
+    // update on -- and without it that quad wrote the nearest depth over the whole
+    // frame and nothing drawn after it passed the depth test. The texel layouts are the
+    // ones the texture decoder gives the Z formats' memory: Z8 in alpha, Z16 as alpha
+    // (high byte) and red, Z24X8 as red, green, blue.
+    if (k.ztex) {
+        static const char* kZTexel[4] = {"tex.a", "tex.a << 8 | tex.r", "tex.r << 16 | tex.g << 8 | tex.b",
+                                         "tex.r << 16 | tex.g << 8 | tex.b"};
+        W("  int ztexel = (%s) + u_zbias;\n", kZTexel[k.ztex & 3]);
+        if (((k.ztex >> 2) & 3) == 1) s += "  ztexel += int(gl_FragCoord.z * 16777215.0);\n";
+        s += "  gl_FragDepth = float(ztexel & 0xFFFFFF) / 16777215.0;\n";
     }
     s += "  o_color = vec4(outc) / 255.0;\n";
     if (getenv("GCN_FLAT")) s += "  o_color = vec4(1.0, 0.0, 1.0, 1.0);\n";

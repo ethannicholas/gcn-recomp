@@ -17,6 +17,7 @@ struct ShaderKey {
     uint32_t num_texgens;
     uint32_t efb_has_alpha;
     uint32_t efb_tex_mask;
+    uint32_t ztex;  // bp[0xF5]: the Z texture's format (bits 0-1) and operation (bits 2-3); 0 when off
     bool operator==(const ShaderKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 

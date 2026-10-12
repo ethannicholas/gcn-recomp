@@ -76,7 +76,7 @@ struct UniformShadow {
 struct Program {
     GLuint prog;
     GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_konst, u_texsize, u_indmtx, u_indscale,
-        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap;
+        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
     mutable UniformShadow shadow;
 };
@@ -284,7 +284,7 @@ static GLuint link(GLuint vs, GLuint fs) {
 static std::string g_shader_cache_path;
 static bool g_binaries_supported = false;
 static constexpr uint32_t kCacheMagic = 0x43535257;  // "WRSC"
-static constexpr uint32_t kCacheVersion = 1;
+static constexpr uint32_t kCacheVersion = 2;
 
 static uint64_t hash_str(const char* s, uint64_t h = 1469598103934665603ull) {
     for (; s && *s; s++) h = (h ^ (uint8_t)*s) * 1099511628211ull;
@@ -403,6 +403,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_fogcolor = glGetUniformLocation(p, "u_fogcolor");
     pr.u_indcoordscale = glGetUniformLocation(p, "u_indcoordscale");
     pr.u_texsnap = glGetUniformLocation(p, "u_texsnap");
+    pr.u_zbias = glGetUniformLocation(p, "u_zbias");
     glUseProgram(p);
     GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     glUniform1iv(pr.u_tex, 8, units);
@@ -1305,6 +1306,8 @@ static void apply_state(const PixelState& st, int prim) {
         glUniform2iv(pr.u_alpharef, 1, aref);
         u.aref = bp[0xF3];
     }
+    // Only a shader with a Z texture has the bias, and few draws do: set every time.
+    if (pr.u_zbias >= 0) glUniform1i(pr.u_zbias, (GLint)(bp[0xF4] & 0xFFFFFF));
     // Indirect matrices
     if (!held_words(bp + 0x06, u.ind, 9)) {
         g_astat.ind++;
@@ -2760,7 +2763,9 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     for (uint32_t i = 0; i < nstages; i++)
                         fprintf(stderr, "\n        st%u order=%06X cenv=%06X aenv=%06X ksel=%06X", i,
                                 bp[0x28 + i / 2], bp[0xC0 + 2 * i], bp[0xC1 + 2 * i], bp[0xF6 + i / 2]);
-                    fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X", bp[0xF3], bp[0x40], bp[0x41]);
+                    fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X pecntrl=%06X", bp[0xF3], bp[0x40], bp[0x41], bp[0x43]);
+                    fprintf(stderr, "\n        viewport=%.1f,%.1f,%.1f %.1f,%.1f,%.1f scissor=%06X %06X offset=%06X", st.viewport[0],
+                            st.viewport[1], st.viewport[2], st.viewport[3], st.viewport[4], st.viewport[5], bp[0x20], bp[0x21], bp[0x59]);
                     for (int r = 0; r < 4; r++)
                         fprintf(stderr, "\n        reg%d=%08X %08X  konst%d=%08X %08X", r, st.tev_reg[r][0], st.tev_reg[r][1],
                                 r, st.tev_konst[r][0], st.tev_konst[r][1]);
