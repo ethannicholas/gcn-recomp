@@ -1,4 +1,5 @@
 // Command Processor / Pixel Engine registers, write-gather pipe and FIFO feeding.
+#include <algorithm>
 #include "../runtime.h"
 #include "gx.h"
 #include "render.h"
@@ -53,6 +54,35 @@ void pe_signal_finish() {
 }
 
 void cp_init() {}
+
+static gx::GuestFrameHook g_guest_frame_hook;
+void gx::set_guest_frame_hook(GuestFrameHook hook) { g_guest_frame_hook = hook; }
+
+// GCN_RAM_DUMP_AT=<frame>,... writes the guest RAM at the end of each of those submitted
+// frames (the count scripted input keys on) to GCN_RAM_DUMP_DIR (default .) as
+// ram_<frame>.bin, from the guest thread, so each is one consistent moment. For finding a
+// game's variables by comparing its memory across a scripted run.
+static void ram_dump_frame(uint32_t frame) {
+    static const std::vector<uint32_t> at = [] {
+        std::vector<uint32_t> v;
+        if (const char* e = getenv("GCN_RAM_DUMP_AT"))
+            for (const char* p = e; *p;) {
+                char* end;
+                v.push_back((uint32_t)strtoul(p, &end, 10));
+                p = *end ? end + 1 : end;
+            }
+        return v;
+    }();
+    if (at.empty() || std::find(at.begin(), at.end(), frame) == at.end()) return;
+    const char* dir = getenv("GCN_RAM_DUMP_DIR");
+    char path[1024];
+    snprintf(path, sizeof path, "%s/ram_%05u.bin", dir ? dir : ".", frame);
+    if (FILE* f = fopen(path, "wb")) {
+        fwrite(g_mem, 1, RAM_SIZE, f);
+        fclose(f);
+        fprintf(stderr, "[ram] frame %u written to %s\n", frame, path);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The front end on its own thread.
@@ -296,6 +326,8 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
         }
         debug_guest_check("frame");
         heap_trace_frame(gx::g_frames_submitted.load());
+        ram_dump_frame(gx::g_frames_submitted.load());
+        if (g_guest_frame_hook) g_guest_frame_hook(gx::g_frames_submitted.load());
         break;
     }
 }

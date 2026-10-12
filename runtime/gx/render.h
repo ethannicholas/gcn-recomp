@@ -168,4 +168,11 @@ std::unique_ptr<Batch> take_batch(int timeout_ms);
 // Frame pacing / stats
 extern std::atomic<uint32_t> g_frames_submitted;
 
+// Called on the guest thread at the end of every submitted frame, with the count above: the
+// game's own per-frame work on its state, which is consistent there -- the guest is between
+// frames -- unlike on the render thread, which may be frames behind it. A game installs it
+// from a static initializer in its SOURCES; one hook.
+using GuestFrameHook = void (*)(uint32_t frame);
+void set_guest_frame_hook(GuestFrameHook hook);
+
 }  // namespace gx

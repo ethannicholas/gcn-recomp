@@ -153,7 +153,14 @@ void rels_linked(uint32_t info) {
         g_live[slot] = {base, s.size, s.canon, (uint32_t)k, info};
         if (slot == n) g_live_count.store(n + 1, std::memory_order_release);
     }
-    LOG(LOG_OS, "OSLink: %s (module %u) at %08X\n", m.name, id, info);
+    if (g_log_enabled[LOG_OS]) {
+        char secs[REL_MAX_SECTIONS * 16] = "";
+        size_t n = 0;
+        for (uint32_t i = 0; i < m.count && n < sizeof secs - 16; i++)
+            n += snprintf(secs + n, sizeof secs - n, " %u:%08X", m.sections[i].index,
+                          g_rel_base[k * REL_MAX_SECTIONS + m.sections[i].index]);
+        LOG(LOG_OS, "OSLink: %s (module %u) at %08X, sections%s\n", m.name, id, info, secs);
+    }
 }
 
 void rels_unlinked(uint32_t info) {
@@ -163,6 +170,12 @@ void rels_unlinked(uint32_t info) {
         for (uint32_t s = 0; s < REL_MAX_SECTIONS; s++) g_rel_base[k * REL_MAX_SECTIONS + s] = 0;
         LOG(LOG_OS, "OSUnlink: %s at %08X\n", g_recomp_rels[k].name, info);
     }
+}
+
+uint32_t rels_section_address(uint32_t module_id, uint32_t section) {
+    const int k = module_index(module_id);
+    if (k < 0 || section >= REL_MAX_SECTIONS) return 0;
+    return g_rel_base[k * REL_MAX_SECTIONS + section];
 }
 
 uint32_t rels_canon(uint32_t a) {

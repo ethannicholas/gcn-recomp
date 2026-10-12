@@ -245,6 +245,10 @@ use, which every lookup prolonged.
   `GCN_PNMLOG=a-b` lists the position matrices used over a window of frames.
 - `GCN_WATCH=a,b,c` (with `GCN_MTXLOG` set) prints those guest addresses every frame;
   `GCN_PEEK=a,b` prints them in the crash dump.
+- `GCN_RAM_DUMP_AT=<frame>,...` writes the guest RAM at the end of each of those submitted
+  frames (the count `GCN_INPUT` keys on) to `GCN_RAM_DUMP_DIR` as `ram_<frame>.bin`, from
+  the guest thread; for finding a game's variables by comparing its memory over a scripted
+  run.
 - `GCN_TOKLOG=1` prints every PE token as it is signalled, and every draw-done (finish)
   as it is raised and acknowledged, with a note when one is raised while the last is
   still pending.

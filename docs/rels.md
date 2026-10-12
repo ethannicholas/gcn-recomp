@@ -48,7 +48,9 @@ so the first configure bootstraps:
 3. the main build then compiles them with the rest.
 
 `<build>/rels-runtime` is kept between configures, so this happens once per build
-directory. The game's own code, run on the user's disc, is what produces the modules; the
+directory. A cross build (Android) cannot run what it builds, so it copies the modules from
+a desktop build's `rels-runtime/` instead (`GCN_HOST_BUILD_DIR`, by default `build/`) and
+says so if there is none. The game's own code, run on the user's disc, is what produces the modules; the
 build contains nothing that knows how.
 
 ## Run time

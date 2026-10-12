@@ -54,7 +54,7 @@ macro(_gcn_bootstrap_rels missing)
   set(_boot ${CMAKE_BINARY_DIR}/bootstrap)
   message(STATUS "Bootstrapping ${missing}: building and running the game without them")
   set(_boot_args -S ${CMAKE_SOURCE_DIR} -B ${_boot} -G ${CMAKE_GENERATOR} -DGCN_BOOTSTRAP=ON
-                 -DCMAKE_BUILD_TYPE=Release "-DGAME_ISO=${GAME_ISO}"
+                 -DGCN_BENCH_ONLY=ON -DCMAKE_BUILD_TYPE=Release "-DGAME_ISO=${GAME_ISO}"
                  -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
   if(CMAKE_OSX_SYSROOT)
     list(APPEND _boot_args -DCMAKE_OSX_SYSROOT=${CMAKE_OSX_SYSROOT})
@@ -211,7 +211,20 @@ function(gcn_add_game)
             list(APPEND _missing ${m})
           endif()
         endforeach()
-        if(_missing)
+        if(_missing AND CMAKE_CROSSCOMPILING)
+          # The bootstrap has to run here, and a cross build's binaries do not: take the
+          # modules from a desktop build of the same project instead.
+          set(GCN_HOST_BUILD_DIR ${CMAKE_SOURCE_DIR}/build CACHE PATH
+              "A desktop build of this project, whose rels-runtime/ a cross build takes")
+          foreach(m ${_missing})
+            if(NOT EXISTS ${GCN_HOST_BUILD_DIR}/rels-runtime/${m}.rel)
+              message(FATAL_ERROR "${m} is made by running the game, which a cross build cannot do here. "
+                      "Build for the desktop first (it writes ${GCN_HOST_BUILD_DIR}/rels-runtime/), "
+                      "or point -DGCN_HOST_BUILD_DIR at a desktop build that has.")
+            endif()
+            file(COPY ${GCN_HOST_BUILD_DIR}/rels-runtime/${m}.rel DESTINATION ${REL_RUNTIME_DIR})
+          endforeach()
+        elseif(_missing)
           _gcn_bootstrap_rels("${_missing}")
         endif()
         foreach(m ${G_REL_RUNTIME})

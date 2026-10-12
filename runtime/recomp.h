@@ -301,6 +301,9 @@ extern uint32_t g_rel_base[];  /* [module * REL_MAX_SECTIONS + section]: where i
 #define REL_HI(m, s, a) ((uint16_t)(REL_V(m, s, a) >> 16))
 #define REL_HA(m, s, a) ((uint16_t)((REL_V(m, s, a) + 0x8000u) >> 16))
 uint32_t rels_canon(uint32_t a);
+/* Where a module's section is now: the address OSLink gave it, 0 while the module (by its
+   REL id) is not linked. For a game's own code that reads a module's data. */
+uint32_t rels_section_address(uint32_t module_id, uint32_t section);
 void rels_linking(uint32_t module_info);
 void rels_linked(uint32_t module_info);
 void rels_unlinked(uint32_t module_info);
