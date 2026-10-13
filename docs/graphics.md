@@ -301,6 +301,26 @@ repeated) at the destination (`copy_writeback` in `render_gl.cpp`). The guest's 
 waits for the front end, so the CPU then finds the bytes there. Each one is a round trip
 through the transform and the renderer, which is why it is opt-in and per copy.
 
+## Constant destination alpha
+
+`GXSetDstAlpha` (BP 0x42: the alpha in bits 0-7, enabled by bit 8) makes every draw with
+alpha updates on store that constant in the EFB's alpha instead of the TEV's; the TEV's
+alpha still decides the alpha test and the blend. The renderer ignored the register, and
+every draw stored its own alpha. A game that marks pixels for a later full-screen pass
+through the EFB's alpha then marks the wrong ones. One game sets 0xE7 on nearly every
+draw and turns it off only for its shadows, whose alpha a copy of the EFB (A8, half size)
+then turns into a darkening quad (`4 * (alpha - 0xE7)`). Storing the TEV's alpha left the
+sky at 0xFF, so the quad darkened every pixel showing the sky instead of the shadows, and
+the copy's box filter left a pixel-wide band of undarkened sky round anything in front of
+it -- a halo round the characters -- while nothing cast a shadow.
+
+`dst_alpha_mode` (`shadergen.cpp`) decides it per draw: the shader writes the constant as
+its alpha (`u_dstalpha`); when the blend reads source alpha, the TEV's goes out as a second
+output and the colour's factors become `GL_SRC1_ALPHA` / `GL_ONE_MINUS_SRC1_ALPHA`, and the
+alpha channel's are `GL_ONE, GL_ZERO`. Dual-source blending is core in desktop GL 3.3 and
+`GL_EXT_blend_func_extended` on ES; without it, a blended draw that reads source alpha
+still stores its own. The verbose draw log prints the register as `dstalpha=`.
+
 ## Depth past the viewport's range
 
 GX clips depth before the viewport, at `-w <= z <= 0` in clip space, and clamps the depth

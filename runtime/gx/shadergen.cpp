@@ -8,6 +8,17 @@
 
 namespace gx {
 
+bool g_dual_source = false;
+
+uint32_t dst_alpha_mode(const uint32_t* bp) {
+    const uint32_t bm = bp[0x41];
+    if (!((bp[0x42] >> 8) & 1) || !((bm >> 4) & 1) || (bp[0x43] & 7) != 1) return 0;
+    const bool blend = (bm & 1) && !((bm >> 11) & 1);  // subtract is ONE, ONE
+    const uint32_t sf = (bm >> 8) & 7, df = (bm >> 5) & 7;
+    if (!blend || (sf != 4 && sf != 5 && df != 4 && df != 5)) return 1;
+    return g_dual_source ? 2 : 0;
+}
+
 ShaderKey make_shader_key(const PixelState& st) {
     ShaderKey k;
     memset(&k, 0, sizeof(k));
@@ -28,6 +39,7 @@ ShaderKey make_shader_key(const PixelState& st) {
     k.num_texgens = st.num_texgens;
     k.efb_has_alpha = (bp[0x43] & 7) == 1;
     if ((bp[0xF5] >> 2) & 3) k.ztex = bp[0xF5] & 0xF;
+    k.dst_alpha = dst_alpha_mode(bp);
     uint32_t used = 0;
     for (uint32_t s = 0; s < nstages; s++) {
         uint32_t order = bp[0x28 + s / 2] >> ((s & 1) * 12);
@@ -293,6 +305,8 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     const bool zfreeze = (k.genmode >> 19) & 1;
     if (zfreeze) s += "uniform vec4 u_zplane;\n";  // see the z freeze below
     s += "layout(location = 0) out vec4 o_color;\n";
+    if (k.dst_alpha) s += "uniform float u_dstalpha;\n";
+    if (k.dst_alpha == 2) s += "layout(location = 0, index = 1) out vec4 o_src1;\n";
     s += "uniform vec2 u_indcoordscale[4];\n";
     s += "vec2 u_indscalef(int i) { return u_indcoordscale[i]; }\n";
     // The maps sampled nearest whose coordinate is snapped to the centre of the texel GX
@@ -609,6 +623,10 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         s += "  gl_FragDepth = float(ztexel & 0xFFFFFF) / 16777215.0;\n";
     }
     s += "  o_color = vec4(outc) / 255.0;\n";
+    // The constant destination alpha (dst_alpha_mode): stored in place of the TEV's,
+    // which the blend then reads from the second output.
+    if (k.dst_alpha == 2) s += "  o_src1 = o_color;\n";
+    if (k.dst_alpha) s += "  o_color.a = u_dstalpha;\n";
     if (getenv("GCN_FLAT")) s += "  o_color = vec4(1.0, 0.0, 1.0, 1.0);\n";
     // GCN_SHOW=prev|c0|c1|c2|konst (plus GCN_SHOW_ALPHA=1) replaces the final colour
     // with a TEV value. Unlike GCN_TEV_STOP this changes no control flow at all --
@@ -653,6 +671,11 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         }
     }
     s += "}\n";
+#ifdef GCN_GL_ES
+    // An #extension has to precede every non-preprocessor token, the precision statements
+    // of GCN_GLSL_VERSION among them, so it goes straight after the #version line.
+    if (k.dst_alpha == 2) s.insert(s.find('\n') + 1, "#extension GL_EXT_blend_func_extended : require\n");
+#endif
     return s;
 }
 

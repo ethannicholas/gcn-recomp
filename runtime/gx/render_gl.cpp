@@ -76,7 +76,7 @@ struct UniformShadow {
 struct Program {
     GLuint prog;
     GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_konst, u_texsize, u_indmtx, u_indscale,
-        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane;
+        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
     mutable UniformShadow shadow;
 };
@@ -404,6 +404,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_indcoordscale = glGetUniformLocation(p, "u_indcoordscale");
     pr.u_texsnap = glGetUniformLocation(p, "u_texsnap");
     pr.u_zbias = glGetUniformLocation(p, "u_zbias");
+    pr.u_dstalpha = glGetUniformLocation(p, "u_dstalpha");
     pr.u_zplane = glGetUniformLocation(p, "u_zplane");
     glUseProgram(p);
     GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -653,9 +654,16 @@ void render_init(int internal_scale) {
         }
         if (!g_clip_ok)
             fprintf(stderr, "no GL_EXT_clip_cull_distance: the theater/stereo morph is uncropped\n");
+        for (GLint i = 0; i < n && !g_dual_source; i++) {
+            const char* e = (const char*)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+            g_dual_source = e && !strcmp(e, "GL_EXT_blend_func_extended");
+        }
+        if (!g_dual_source)
+            fprintf(stderr, "no GL_EXT_blend_func_extended: a blended draw stores its own alpha, not GXSetDstAlpha's\n");
     }
 #else
     g_clip_ok = true;
+    g_dual_source = true;
     // GX clips depth in clip space and clamps what the viewport makes of it, so a viewport
     // may map depth well past the buffer's range; the vertex shader clips at GX's planes
     // through clip distances 4 and 5, which every program here writes. ES has no depth
@@ -889,6 +897,14 @@ static float fog_float(uint32_t v) {
     return f;
 }
 
+// Dual-source blending's factors: core in desktop GL 3.3, and GL_EXT_blend_func_extended's
+// (the same values) on ES, whose loader does not define them.
+#ifndef GL_SRC1_ALPHA
+#define GL_SRC1_ALPHA 0x8589
+#endif
+#ifndef GL_ONE_MINUS_SRC1_ALPHA
+#define GL_ONE_MINUS_SRC1_ALPHA 0x88FB
+#endif
 static const GLenum kBlendSrc[8] = {GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
 static const GLenum kBlendDst[8] = {GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
 static const GLenum kDepthFunc[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
@@ -1370,6 +1386,7 @@ static void apply_state(const PixelState& st, int prim) {
     }
     // Only a shader with a Z texture has the bias, and few draws do: set every time.
     if (pr.u_zbias >= 0) glUniform1i(pr.u_zbias, (GLint)(bp[0xF4] & 0xFFFFFF));
+    if (pr.u_dstalpha >= 0) glUniform1f(pr.u_dstalpha, (float)(bp[0x42] & 0xFF) / 255.0f);
     if (pr.u_zplane >= 0) glUniform4fv(pr.u_zplane, 1, g_zplane);
     // Indirect matrices
     if (!held_words(bp + 0x06, u.ind, 9)) {
@@ -1543,21 +1560,38 @@ static void apply_state(const PixelState& st, int prim) {
     u.gen = g_uniform_gen;
     u.view_gen = g_view_gen;
     // Blend / logic op, colour mask
-    const bool same_blend = g_applied.valid && bp[0x41] == abp[0x41] && bp[0x43] == abp[0x43];
+    const bool same_blend = g_applied.valid && bp[0x41] == abp[0x41] && bp[0x42] == abp[0x42] && bp[0x43] == abp[0x43];
     uint32_t bm = bp[0x41];
     if (!same_blend) {
         g_astat.blend++;
         bool blend = bm & 1, logic = (bm >> 1) & 1, sub = (bm >> 11) & 1;
+        // A constant destination alpha (dst_alpha_mode) is the shader's alpha output, kept
+        // as it is; the colour's source-alpha factors read the TEV's from source 1.
+        const uint32_t dst_alpha = dst_alpha_mode(bp);
         if (sub) {
             glEnable(GL_BLEND);
             set_logic_op_off();
-            glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
-            glBlendFunc(GL_ONE, GL_ONE);
+            if (dst_alpha) {
+                glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ZERO);
+            } else {
+                glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+                glBlendFunc(GL_ONE, GL_ONE);
+            }
         } else if (blend) {
             glEnable(GL_BLEND);
             set_logic_op_off();
             glBlendEquation(GL_FUNC_ADD);
-            glBlendFunc(kBlendSrc[(bm >> 8) & 7], kBlendDst[(bm >> 5) & 7]);
+            GLenum sf = kBlendSrc[(bm >> 8) & 7], df = kBlendDst[(bm >> 5) & 7];
+            if (dst_alpha) {
+                auto src1 = [](GLenum f) {
+                    return f == GL_SRC_ALPHA ? (GLenum)GL_SRC1_ALPHA
+                         : f == GL_ONE_MINUS_SRC_ALPHA ? (GLenum)GL_ONE_MINUS_SRC1_ALPHA : f;
+                };
+                glBlendFuncSeparate(src1(sf), src1(df), GL_ONE, GL_ZERO);
+            } else {
+                glBlendFunc(sf, df);
+            }
         } else if (logic) {
             glDisable(GL_BLEND);
             set_logic_op(bm >> 12);
@@ -2925,7 +2959,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     for (uint32_t i = 0; i < nstages; i++)
                         fprintf(stderr, "\n        st%u order=%06X cenv=%06X aenv=%06X ksel=%06X", i,
                                 bp[0x28 + i / 2], bp[0xC0 + 2 * i], bp[0xC1 + 2 * i], bp[0xF6 + i / 2]);
-                    fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X pecntrl=%06X", bp[0xF3], bp[0x40], bp[0x41], bp[0x43]);
+                    fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X dstalpha=%06X pecntrl=%06X", bp[0xF3], bp[0x40], bp[0x41], bp[0x42], bp[0x43]);
                     fprintf(stderr, "\n        viewport=%.1f,%.1f,%.1f %.1f,%.1f,%.1f scissor=%06X %06X offset=%06X", st.viewport[0],
                             st.viewport[1], st.viewport[2], st.viewport[3], st.viewport[4], st.viewport[5], bp[0x20], bp[0x21], bp[0x59]);
                     // Each bound map's mode register (wrap, filters, LOD bias): BP 0x80-0x83
