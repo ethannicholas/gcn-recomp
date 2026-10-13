@@ -87,6 +87,15 @@ game's business: `render_set_eye_hook` takes a per-frame callback that returns a
 transform, a HUD transform and the draws to leave out, and a game project installs it.
 Nothing here knows what the game is.
 
+An eye takes a copy of the whole displayed frame for the game compositing its finished
+picture, so it substitutes a grab of its own for it and does not count it as ending an
+off-screen pass (`is_fullscreen_copy`). A copy of *depth* is never that, whatever its size:
+a grab is of colour. A game that renders its flashlight's shadow map at the screen's size,
+from the light, and copies it out as depth with a clear had that pass replayed from each
+eye and the eye's colour grab sampled as the map, which lit everything the light fell on a
+solid yellow. Depth copies are now render targets like any other: a clearing one ends an
+off-screen pass, which the flat pass draws once and the eyes sample.
+
 `render_set_frame_hook` is the other half: a game's look at every batch the renderer is given,
 flat or stereo, before anything is drawn from it and before the eye hook, with the off-screen
 passes marked. A game that follows something on screen in every view -- its player's vehicle,

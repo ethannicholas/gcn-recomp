@@ -2424,8 +2424,14 @@ static size_t first_part_end(const Batch& b, const std::vector<uint8_t>& skip) {
 // image: a post pass reads the EFB out and draws it straight back as a screen-filling
 // quad. Smaller copies are real scene content -- the water reflection, the sprite sheet
 // the spray uses -- and the eye pass needs them.
+//
+// A copy of depth is never that, whatever its size: an eye's grab is of colour and cannot
+// stand in for it. A shadow map rendered from a light at the screen's size and copied out
+// as depth is a render target like any other, and the eyes must sample the flat pass's;
+// taken for the frame, its pass was replayed from each eye and the eye's own colour grab
+// sampled in its place, which lit every surface it fell on a solid colour.
 static bool is_fullscreen_copy(const EfbCopyCmd& c, uint32_t dw, uint32_t dh) {
-    return !c.to_xfb && c.dst_w >= dw && c.dst_h >= dh;
+    return !c.to_xfb && !c.depth && c.dst_w >= dw && c.dst_h >= dh;
 }
 
 // Marks the commands an eye must not replay.
