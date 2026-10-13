@@ -309,10 +309,11 @@ alpha still decides the alpha test and the blend. The renderer ignored the regis
 every draw stored its own alpha. A game that marks pixels for a later full-screen pass
 through the EFB's alpha then marks the wrong ones. One game sets 0xE7 on nearly every
 draw and turns it off only for its shadows, whose alpha a copy of the EFB (A8, half size)
-then turns into a darkening quad (`4 * (alpha - 0xE7)`). Storing the TEV's alpha left the
-sky at 0xFF, so the quad darkened every pixel showing the sky instead of the shadows, and
-the copy's box filter left a pixel-wide band of undarkened sky round anything in front of
-it -- a halo round the characters -- while nothing cast a shadow.
+then turns into a darkening quad (`4 * (alpha - 0xE7)`). Storing the TEV's alpha left
+surfaces whose alpha came out 0xFF -- a large floor panel in front of the camera -- marked
+in the shadows' place, so the quad darkened them instead of the shadows, and the copy's box
+filter left a pixel-wide band of them undarkened round anything in front -- a bright halo
+round the characters -- while nothing cast a shadow.
 
 `dst_alpha_mode` (`shadergen.cpp`) decides it per draw: the shader writes the constant as
 its alpha (`u_dstalpha`); when the blend reads source alpha, the TEV's goes out as a second
