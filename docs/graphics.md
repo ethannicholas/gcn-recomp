@@ -103,6 +103,19 @@ for motion telemetry -- does its finding there, and its eye hook can then hand b
 frame hook already worked out for the same batch. `render_first_person()` tells the frame
 hook whether the eye will want it.
 
+A game's eye filter (`render_set_eye_filter`, `EyeFilter` in `render.h`) can call a draw
+`EyeFlat`: a 3D model the game composes into its 2D picture -- a character's face in a
+window of the HUD -- drawn with a frustum of its own into a viewport the size of that
+window. Its positions are in a little scene of its own, so an eye that took it for world
+geometry floated it at that scene's depth, out of step with the HUD frame around it, and
+uncomfortable to look at. An `EyeFlat` draw is painted on the HUD frame instead, through its
+own projection and then its viewport, which is exactly where the flat frame puts it
+(`u_vr` 5), clipped to that viewport by the four clip planes the morph uses (an eye's
+target has no viewport to bound it), and depth-tested by the depth the game's own projection
+gives it, so its parts hide one another as on the screen. The eye's depth buffer is cleared
+before the first of them: they sort among themselves, in front of everything, as the HUD
+does. `EyeDrawFacts` carries the viewport's rectangle for a filter to tell them by.
+
 ## PC VR: OpenXR on desktop GL
 
 `openxr/xr_frontend.cpp` is the OpenXR frontend for every platform; `openxr/xr_desktop.cpp`

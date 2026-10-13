@@ -63,9 +63,13 @@ struct PixelState {
 // A game's own say over what an eye draws, on top of the eye hook: called once per pixel
 // state per frame, before the eye passes, with what the renderer knows of a draw that a
 // game's rule might turn on. It answers EyeKeep, EyeHideDraw to leave that state's draws
-// out of the eyes, or EyeHideObject to leave out every draw of the frame that shares a
+// out of the eyes, EyeHideObject to leave out every draw of the frame that shares a
 // position matrix with one of them -- the rest of a rigid model whose other materials
-// have nothing to name them by. The flat view is untouched; a hidden draw's textures are
+// have nothing to name them by -- or EyeFlat for a 3D draw the game composes into its 2D
+// picture (a model shown in a window of the HUD, with a frustum and a viewport of its
+// own): painted on the HUD frame where the flat frame has it, sorted among the other such
+// draws by its own depth, rather than floating in the world at the depth of its private
+// little scene. The flat view is untouched; a hidden draw's textures are
 // kept alive. For a game that hides a model's materials (by TexData::hash, the same in
 // every run) or an effect that cannot be re-projected (a screen-space refraction of part
 // of the frame).
@@ -75,9 +79,10 @@ struct EyeDrawFacts {
     bool samples_copy;            // samples an EFB copy
     bool samples_fullscreen_copy; // ... of the whole frame, which an eye substitutes its own grab for
     float band_lo, band_hi;       // the viewport's depth band
+    float vp_x, vp_y, vp_w, vp_h; // the viewport on the screen, in EFB pixels from the top left
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2 };
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };

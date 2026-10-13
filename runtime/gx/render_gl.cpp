@@ -58,7 +58,7 @@ static inline void set_lod_bias(GLuint s, float bias) {
 struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
-    uint8_t view_space, background, foreground, fg_layer, hud_layer;
+    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
@@ -143,6 +143,12 @@ static bool g_eye_overridden = false;
 // Per command of the batch being drawn: 1 for a draw the game's eye leaves out (the
 // player's own model, say). Empty when nothing is hidden.
 static std::vector<uint8_t> g_hide;
+// Per pixel state of the batch being drawn: 1 for one the game's eye filter called a 3D
+// draw composed into the 2D picture (EyeFlat), which an eye paints on the HUD frame where
+// the flat frame puts it. Empty when there is none. g_cur_flat3d is the state apply_state
+// is applying, in an eye.
+static std::vector<uint8_t> g_flat3d;
+static bool g_cur_flat3d = false;
 // The morph between theater and stereo; see render_set_vr_morph. 1 is plain stereo.
 static float g_morph = 1.0f;
 // A flat frame drawn as one of a stereo pair (render_execute_stereo_pair): where the eye
@@ -1285,12 +1291,47 @@ static void apply_state(const PixelState& st, int prim) {
     // they stayed where the chase camera saw them while the game's own eye moved off.
     static const bool vs3d = !(getenv("GCN_EYE_VS3D") && atoi(getenv("GCN_EYE_VS3D")) == 0);
     const bool view_space = st.view_space && !g_view_space_world;
-    const bool view_space_3d = perspective && view_space && vs3d;
-    const bool on_hud_frame = (!perspective || view_space) && !view_space_3d;
+    // A 3D draw the game composes into its 2D picture (EyeFlat): a model in a window of the
+    // HUD, drawn with a frustum of its own into a viewport no bigger than that window. Its
+    // positions are in a little scene of its own, so in the world it floats at whatever
+    // depth that scene happens to put it, which matches nothing the HUD frame shows. It goes
+    // on the HUD frame instead, through its own projection and viewport -- exactly where the
+    // flat frame has it -- and keeps the game's own depth to sort its parts by.
+    const bool flat3d = g_vr_active && g_cur_flat3d && perspective;
+    const bool view_space_3d = perspective && view_space && vs3d && !flat3d;
+    const bool on_hud_frame = flat3d || ((!perspective || view_space) && !view_space_3d);
     if (perspective) {
         P[0] = p[0]; P[8] = p[1]; P[5] = p[2]; P[9] = p[3]; P[10] = p[4]; P[14] = p[5]; P[11] = -1.0f;
     } else {
         P[0] = p[0]; P[12] = p[1]; P[5] = p[2]; P[13] = p[3]; P[10] = p[4]; P[14] = p[5]; P[15] = 1.0f;
+    }
+    // The game's own clip space bounds a flat3d draw to its viewport, which the eye's
+    // target does not have: distance i of these planes is >= 0 inside it.
+    float flat_crop[16] = {0};
+    if (flat3d)
+        for (int c = 0; c < 4; c++) {
+            const float x = P[c * 4 + 0], y = P[c * 4 + 1], w = P[c * 4 + 3];
+            flat_crop[c * 4 + 0] = w - x;
+            flat_crop[c * 4 + 1] = w + x;
+            flat_crop[c * 4 + 2] = w - y;
+            flat_crop[c * 4 + 3] = w + y;
+        }
+    if (flat3d) {
+        // The viewport, as a map from the draw's clip space into the 640x480 frame's that
+        // the HUD frame is painted with (y up): x' = a*x + b*w, y' = c*y + d*w.
+        int xoff, yoff;
+        scissor_offset(st.bp, xoff, yoff);
+        const float* vp = st.viewport;
+        float V[16] = {0};
+        V[0] = 2.0f * vp[0] / 640.0f;
+        V[12] = 2.0f * (vp[3] - xoff) / 640.0f - 1.0f;
+        V[5] = -2.0f * vp[1] / 480.0f;
+        V[13] = 1.0f - 2.0f * (vp[4] - yoff) / 480.0f;
+        V[10] = 1.0f;
+        V[15] = 1.0f;
+        float VP[16];
+        mat4_mul(V, P, VP);
+        memcpy(P, VP, sizeof(P));
     }
     // Depth layers. GX has no depth-range call, but a viewport carries a z range, and a game
     // can confine a draw to a band of the depth buffer with it -- a sky kept behind the
@@ -1314,7 +1355,8 @@ static void apply_state(const PixelState& st, int prim) {
     const bool fg_layer = g_fg_to > 0.0f && perspective && band_hi <= g_fg_to;
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
-                           foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer;
+                           foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer &&
+                           flat3d == u.flat3d && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -1376,8 +1418,9 @@ static void apply_state(const PixelState& st, int prim) {
             mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
             mat4_mul(g_vr_proj, b, M);
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
-            glUniform1i(pr.u_vr, 2);
-            g_eye_layer_name = "hud-frame";
+            if (flat3d) glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, flat_crop);
+            glUniform1i(pr.u_vr, flat3d ? 5 : 2);
+            g_eye_layer_name = flat3d ? "hud-frame(3d)" : "hud-frame";
         } else if (g_flat_eye != 0.0f && perspective &&
                    !(g_panel_band > 0.0f && band_hi > band_lo && band_hi <= g_panel_band)) {
             // One of a stereo pair on the panel (a draw in the panel band falls through to
@@ -1409,6 +1452,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.foreground = foreground;
         u.fg_layer = fg_layer;
         u.hud_layer = hud_layer;
+        u.flat3d = flat3d;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
@@ -1698,8 +1742,11 @@ static void apply_state(const PixelState& st, int prim) {
     // Depth. In an eye the HUD is a quad out in the world rather than something laid over
     // the finished image, so the game's depth state no longer places it: the scene it is
     // meant to sit over is mostly nearer than the frame, and every element of the HUD is
-    // on one plane. It is submitted last, so submission order is the layering.
-    const bool hud_depth = g_vr_active && on_hud_frame;
+    // on one plane. It is submitted last, so submission order is the layering. A 3D draw
+    // composed into the HUD (flat3d) keeps the game's depth state: the eye cleared its
+    // depth before the first of them (render_execute_eye), so they sort only among
+    // themselves, by the game's own depth.
+    const bool hud_depth = g_vr_active && on_hud_frame && !flat3d;
     if (!(g_applied.valid && bp[0x40] == abp[0x40] && hud_depth == g_applied.hud_depth)) {
         g_astat.depth++;
         uint32_t zm = bp[0x40];
@@ -2189,6 +2236,12 @@ static EyeDrawFacts draw_facts(const PixelState& st) {
     f.indirect = ((st.bp[0x00] >> 16) & 7) != 0;
     f.band_hi = st.viewport[5] / 16777215.0f;
     f.band_lo = (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f;
+    int xoff, yoff;
+    scissor_offset(st.bp, xoff, yoff);
+    f.vp_w = 2.0f * fabsf(st.viewport[0]);
+    f.vp_h = 2.0f * fabsf(st.viewport[1]);
+    f.vp_x = st.viewport[3] - xoff - 0.5f * f.vp_w;
+    f.vp_y = st.viewport[4] - yoff - 0.5f * f.vp_h;
     for (int i = 0; i < 8; i++) {
         if (!st.tex_id[i]) continue;
         if (st.tex_is_efb[i]) {
@@ -2227,6 +2280,7 @@ void render_set_vr_eye(const float proj[16], const float view[16], const float h
 // mark_offscreen_passes leaves it.
 static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_hide.clear();
+    g_flat3d.clear();
     g_eye_overridden = false;
     hud_upright();
     EyeOverride o;
@@ -2251,6 +2305,11 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         int8_t& a = answer[c.state];
         if (a < 0) a = (int8_t)g_eye_filter(b.states[c.state], draw_facts(b.states[c.state]));
         if (a == EyeKeep) continue;
+        if (a == EyeFlat) {
+            if (g_flat3d.empty()) g_flat3d.assign(b.states.size(), 0);
+            g_flat3d[c.state] = 1;
+            continue;
+        }
         if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
         g_hide[i] = 1;
         if (a == EyeHideObject) {
@@ -2734,6 +2793,11 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             for (GLenum i = 0; i < 4; i++) glEnable(kClipDistance0 + i);
         draw_morph_background(P, bg);
     }
+    // The same four planes keep a 3D draw composed into the HUD (EyeFlat) inside its
+    // viewport; every other draw outside the morph writes distances of 1.
+    const bool clip4 = g_clip_ok && (morph || !g_flat3d.empty());
+    if (clip4 && !morph)
+        for (GLenum i = 0; i < 4; i++) glEnable(kClipDistance0 + i);
 
     uint32_t cur_state = UINT32_MAX;
     gl_state_invalidate();
@@ -2752,6 +2816,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     // Keyed on the presented frame, the number the dumps carry; a frame may take several batches.
     const bool eye_drawlog = eye_drawlog_frame && g_present_count + 1 == eye_drawlog_frame;
     int eye_draw_index = 0;   // the flat draw log's numbering: every draw command, in order
+    bool flat3d_cleared = false;
     const size_t eye_end = first_part_end(b, skip);
     for (size_t i = 0; i < eye_end; i++) {
         Cmd& c = b.cmds[i];
@@ -2816,7 +2881,18 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         const bool zfreeze = (b.states[c.state].bp[0x00] >> 19) & 1;
         if (!zfreeze) zfreeze_plane_eye(b, c, g_zplane);
         if (c.state != cur_state || c.prim != cur_prim) {
+            g_cur_flat3d = !g_flat3d.empty() && g_flat3d[c.state];
+            // The 3D draws composed into the HUD sort among themselves by the game's
+            // depth, and the world's depth in this eye means nothing to them: they are
+            // on the HUD frame, in front of everything. The first of them clears it.
+            if (g_cur_flat3d && !flat3d_cleared) {
+                flat3d_cleared = true;
+                glDepthMask(GL_TRUE);
+                glClear(GL_DEPTH_BUFFER_BIT);
+                gl_state_invalidate();
+            }
             apply_state(b.states[c.state], c.prim);
+            g_cur_flat3d = false;
             // apply_state binds the EFB's scissor and viewport expectations; the eye
             // target overrides both.
             glViewport(0, 0, w, h);
@@ -2843,7 +2919,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         fprintf(stderr, "[eye-rt] f%u %s flat %6.2fms eye %6.2fms  draws %d\n", g_render_frame,
                 do_copies ? "first" : "second", ms_flat, ms_since(t_start) - ms_flat, n_drawn);
     apply_stats_flush(do_copies ? "eye0" : "eye1", g_render_frame);
-    if (morph && g_clip_ok)
+    if (clip4)
         for (GLenum i = 0; i < 4; i++) glDisable(kClipDistance0 + i);
 #ifdef GCN_GL_ES
     // The eye's depth buffer is finished with: nothing reads it, and the next pass clears

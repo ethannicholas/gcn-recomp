@@ -214,6 +214,15 @@ void main() {
         gl_Position = u_proj * vec4(a_pos, 1.0);
     } else if (u_vr == 3) {
         gl_Position = u_proj * vec4(a_pos, 1.0);
+    } else if (u_vr == 5) {
+        // A 3D draw composed into the 2D picture, on the HUD frame like a 2D element (the
+        // chain on the CPU includes its viewport), but with the depth the game's own
+        // projection gives it, so that its parts hide one another as they do on the
+        // screen. GX's clip depth runs from -w to 0.
+        gl_Position = u_proj * vec4(a_pos, 1.0);
+        float cz = u_zproj.x * a_pos.z + u_zproj.y;
+        float cw = u_zproj.z * a_pos.z + u_zproj.w;
+        gl_Position.z = (2.0 * cz / cw + 1.0) * gl_Position.w;
     } else {
         vec4 clip = u_proj * vec4(a_pos, 1.0);
         vec4 p;
@@ -239,8 +248,9 @@ void main() {
     if (u_vr != 0) gx_clip = vec2(gl_Position.z + gl_Position.w, gl_Position.w - gl_Position.z);
     gl_ClipDistance[4] = gx_clip.x;
     gl_ClipDistance[5] = gx_clip.y;
-    // Ignored unless enabled, which only the morph does.
-    vec4 cd = (u_vr == 3) ? u_crop * vec4(a_pos, 1.0) : vec4(1.0);
+    // Ignored unless enabled, which the morph does, and an eye with a 3D draw composed into
+    // its HUD (u_vr 5: its own clip space, which the eye's target has no viewport to bound).
+    vec4 cd = (u_vr == 3 || u_vr == 5) ? u_crop * vec4(a_pos, 1.0) : vec4(1.0);
     gl_ClipDistance[0] = cd.x;
     gl_ClipDistance[1] = cd.y;
     gl_ClipDistance[2] = cd.z;
