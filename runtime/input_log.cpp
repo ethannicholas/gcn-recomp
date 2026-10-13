@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "platform.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <algorithm>
@@ -65,6 +66,28 @@ std::vector<Jump> g_jumps;
 size_t g_jump_pos;
 std::atomic<uint64_t> g_next_jump_at{UINT64_MAX};
 
+// ---- poses (input_pose) ----
+// A kind's reads are counted from 1; a record is the state from that read on. The same
+// channel serves recording and replay, since every read is counted whichever it is.
+struct PoseRecord { uint32_t read; bool valid; std::vector<float> v; };
+struct PoseChannel {
+    std::string kind;
+    uint32_t reads = 0;                // reads made so far, this run
+    std::vector<PoseRecord> replay;    // the log's records, in order
+    size_t pos = 0;                    // first replay record not yet applied
+    bool have = false;                 // a state is in force (replayed or recorded)
+    bool valid = false;
+    std::vector<float> v;              // the state in force
+};
+std::vector<PoseChannel> g_poses;
+
+PoseChannel& pose_channel(const char* kind) {
+    for (auto& c : g_poses) if (c.kind == kind) return c;
+    g_poses.emplace_back();
+    g_poses.back().kind = kind;
+    return g_poses.back();
+}
+
 void record(int chan, const PadState& s) {
     if (!g_out) return;
     if (g_have_last[chan] && same(g_last[chan], s)) return;
@@ -90,10 +113,11 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
     time_t now = time(nullptr);
     strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", localtime(&now));
     rtc_set_base(now);
-    fprintf(g_out, "# gcn-recomp input log v3\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
+    fprintf(g_out, "# gcn-recomp input log v4\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
     fprintf(g_out, "# poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r\n");
     fprintf(g_out, "# (hex; each line is that channel's state from that pad poll on)\n");
     fprintf(g_out, "# jump <back-edge count> <edges>: the clock caught up with the host there (decimal)\n");
+    fprintf(g_out, "# pose <kind> <read> <valid> <values...>: what the game's Nth read of that pose saw, from there on\n");
     fflush(g_out);
     if (plat_readable(memcard_path.c_str())) {
         if (!copy_file(memcard_path, dir + "/memcard_a.raw"))
@@ -136,6 +160,23 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
             g_jumps.push_back(Jump{(uint64_t)jat, (uint64_t)jedges});
             continue;
         }
+        char kind[32];
+        unsigned read, valid;
+        int used = 0;
+        if (sscanf(line, "pose %31s %u %u%n", kind, &read, &valid, &used) == 3) {
+            PoseRecord r;
+            r.read = read;
+            r.valid = valid != 0;
+            for (const char* p = line + used; r.valid;) {
+                char* end;
+                const float f = strtof(p, &end);
+                if (end == p) break;
+                r.v.push_back(f);
+                p = end;
+            }
+            pose_channel(kind).replay.push_back(r);
+            continue;
+        }
         unsigned key, frame, chan, conn, buttons, sx, sy, cx, cy, l, r;
         if (version >= 2) {
             if (sscanf(line, "%u %u %u %u %x %x %x %x %x %x %x", &key, &frame, &chan, &conn, &buttons, &sx, &sy, &cx, &cy, &l, &r) != 11) continue;
@@ -173,8 +214,10 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
             memcard_out.clear();
         }
     }
-    fprintf(stderr, "[input] replaying %zu changes over %u %s and %zu clock jumps from %s%s%s\n", g_replay.size(),
-            g_replay_last_key, g_replay_by_frame ? "frames" : "polls", g_jumps.size(), path.c_str(),
+    size_t poses = 0;
+    for (const auto& c : g_poses) poses += c.replay.size();
+    fprintf(stderr, "[input] replaying %zu changes over %u %s, %zu clock jumps and %zu pose changes from %s%s%s\n", g_replay.size(),
+            g_replay_last_key, g_replay_by_frame ? "frames" : "polls", g_jumps.size(), poses, path.c_str(),
             memcard_out.empty() ? "" : " (with its card snapshot)",
             g_replay_by_frame ? " (v1 log: keyed by frame, so only approximate)" : "");
     return true;
@@ -199,6 +242,40 @@ uint64_t input_replay_take_jump(uint64_t count) {
 bool input_replay_active() {
     std::lock_guard<std::mutex> lk(g_mutex);
     return g_replay_loaded && replay_key() <= g_replay_last_key;
+}
+
+bool input_pose(const char* kind, bool* valid, float* v, int n) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    PoseChannel& ch = pose_channel(kind);
+    ch.reads++;
+    bool replayed = false;
+    if (g_replay_loaded && replay_key() <= g_replay_last_key) {
+        while (ch.pos < ch.replay.size() && ch.replay[ch.pos].read <= ch.reads) {
+            const PoseRecord& r = ch.replay[ch.pos++];
+            ch.have = true;
+            ch.valid = r.valid;
+            ch.v = r.v;
+        }
+        if (ch.have && (int)ch.v.size() == n) {
+            *valid = ch.valid;
+            for (int i = 0; i < n; i++) v[i] = ch.v[i];
+            replayed = true;
+        }
+    }
+    if (g_out) {
+        bool changed = !ch.have || ch.valid != *valid || (int)ch.v.size() != n;
+        for (int i = 0; !changed && *valid && i < n; i++) changed = ch.v[i] != v[i];
+        if (changed) {
+            ch.have = true;
+            ch.valid = *valid;
+            ch.v.assign(v, v + n);
+            fprintf(g_out, "pose %s %u %d", kind, ch.reads, *valid ? 1 : 0);
+            if (*valid) for (int i = 0; i < n; i++) fprintf(g_out, " %.9g", v[i]);
+            fputc('\n', g_out);
+            fflush(g_out);
+        }
+    }
+    return replayed;
 }
 
 bool input_pad_poll(int chan, PadState& s) {

@@ -45,6 +45,19 @@ at the last change, which can be well before where the run stopped, so a log tha
 one (a run killed from outside) can be given one by hand. Lines can be edited or written
 by hand; `frame` is for the reader.
 
+A headset's poses are input too. A game hook that reads the controllers or the eyes on
+the guest thread (`vr::hand_pose`, `vr::eye_views`) and steers the game by them -- aiming
+a weapon from a hand, culling to where the viewer is looking -- makes the simulation
+depend on them, and a replay without them parts from its recording as soon as that
+matters: a session that fought its way through a room replays into standing still and
+dying. So every such read is counted per kind (`hand0`, `hand1`, `eyes`) in the order the
+guest makes them, and a change in what a read returned is logged against that count
+(`pose <kind> <read> <valid> <values...>`, floats printed to round-trip exactly); a replay
+answers the Nth read of a kind with the state its log had at read N, so the hook sees
+exactly what it saw, in the harness as much as in the app. Reads from a frontend's own
+threads are not logged, since they never reach the game. A log without pose lines (version
+3 or earlier) or one that has run out replays with the live poses, as before.
+
 ## Scripted input
 
 `GCN_INPUT="frame:BUTTON:duration,..."` presses buttons at given submitted-frame counts; `+`

@@ -46,6 +46,19 @@ bool input_pad_poll(int chan, PadState& s);
 // Whether a replay is in progress (loaded and not yet past its last poll).
 bool input_replay_active();
 
+// Poses the game's hooks read on the guest thread (vr::hand_pose and vr::eye_views in
+// vr_game.h) are input too: a game that aims from a controller or culls to the viewer's
+// head steers its simulation by them, and a replay without them parts from the recording
+// as soon as they matter. Each read is counted per kind, in the order the guest makes
+// them, and a change in what a read returned is logged against that count
+// (`pose <kind> <read> <valid> <values...>`); a replay answers the Nth read of a kind
+// with the state its log had at N, so a hook sees exactly what it saw. Only reads from
+// the guest thread are logged: a frontend's own reads do not reach the game. A log
+// without pose lines, or one that has run out, leaves the live poses in force.
+// `valid` and the `n` floats are the live result on entry and the result to use on
+// return; returns true when a replay supplied it.
+bool input_pose(const char* kind, bool* valid, float* v, int n);
+
 // The clock's catch-up jumps (clock_pace in cpu.cpp): a jump of `edges` back-edges made
 // when the guest's back-edge count was `at`. Recorded so that a replay makes the same
 // jump at the same count, which keeps it exact: the guest then reads the same time base

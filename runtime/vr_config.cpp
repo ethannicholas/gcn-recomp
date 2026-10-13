@@ -1,6 +1,8 @@
 // See vr_config.h and vr_game.h.
 #include "vr_config.h"
 #include "vr_game.h"
+#include "input_log.h"
+#include "runtime.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -92,10 +94,24 @@ void set_hand_pose(Hand h, const HandPose* p) {
     if (p) g_hands[h] = *p;
 }
 
+// A read from the guest thread is input (input_log.h, input_pose): logged, and answered
+// from the log in a replay. The frontends' own reads are not.
 bool hand_pose(Hand h, HandPose* out) {
-    std::lock_guard<std::mutex> l(g_hand_lock);
-    if (g_hand_valid[h]) *out = g_hands[h];
-    return g_hand_valid[h];
+    bool valid;
+    {
+        std::lock_guard<std::mutex> l(g_hand_lock);
+        valid = g_hand_valid[h];
+        if (valid) *out = g_hands[h];
+    }
+    if (cpu_current()) {
+        float v[7];
+        memcpy(v, out->pos, sizeof(out->pos));
+        memcpy(v + 3, out->rot, sizeof(out->rot));
+        input_pose(h == kLeftHand ? "hand0" : "hand1", &valid, v, 7);
+        memcpy(out->pos, v, sizeof(out->pos));
+        memcpy(out->rot, v + 3, sizeof(out->rot));
+    }
+    return valid;
 }
 
 static EyeView g_eyes[2];
@@ -108,9 +124,29 @@ void set_eye_views(const EyeView* views) {
 }
 
 bool eye_views(EyeView out[2]) {
-    std::lock_guard<std::mutex> l(g_hand_lock);
-    if (g_eyes_valid) out[0] = g_eyes[0], out[1] = g_eyes[1];
-    return g_eyes_valid;
+    bool valid;
+    {
+        std::lock_guard<std::mutex> l(g_hand_lock);
+        valid = g_eyes_valid;
+        if (valid) out[0] = g_eyes[0], out[1] = g_eyes[1];
+    }
+    if (cpu_current()) {
+        float v[22];
+        for (int e = 0; e < 2; e++) {
+            float* d = v + 11 * e;
+            memcpy(d, out[e].pos, sizeof(out[e].pos));
+            memcpy(d + 3, out[e].rot, sizeof(out[e].rot));
+            d[7] = out[e].tan_left; d[8] = out[e].tan_right; d[9] = out[e].tan_up; d[10] = out[e].tan_down;
+        }
+        input_pose("eyes", &valid, v, 22);
+        for (int e = 0; e < 2; e++) {
+            const float* d = v + 11 * e;
+            memcpy(out[e].pos, d, sizeof(out[e].pos));
+            memcpy(out[e].rot, d + 3, sizeof(out[e].rot));
+            out[e].tan_left = d[7]; out[e].tan_right = d[8]; out[e].tan_up = d[9]; out[e].tan_down = d[10];
+        }
+    }
+    return valid;
 }
 
 VrConfig load_config(const std::string& dir) {
