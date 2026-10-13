@@ -71,6 +71,9 @@ before it goes near a headset. `--first-person` puts the eye wherever the game p
 hook says (`render_set_eye_hook` in `runtime/gx/render_gl.h`: the renderer asks the game, per
 frame, for a view transform and the draws to leave out, and a game without a hook keeps the
 chase camera). With `--dump-dir`/`--dump-every` the eye's frames are written as `eye_NNNNN.png`.
+An eye frame presents nothing through the EFB, so the renderer steps its presented count
+once per eye frame instead, and `GCN_DRAWLOG=<n>` names the frame `eye_<n>.png` shows (it
+logged nothing in the eye preview before 2026-10-12, the count never moving).
 
 ## On a headset
 

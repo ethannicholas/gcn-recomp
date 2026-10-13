@@ -425,6 +425,18 @@ off by default.
   twenty units out, at the weapon's scale it stood ten metres off, a billboard; at a tenth
   it is at arm's length, the same angular size, with the weapon where it was.
 
+A perspective draw the game placed in view space itself -- a position matrix with no tilt,
+in the camera's own frame (`PixelState::view_space`) -- is by default something held in
+front of the camera: it takes the head's transform but not the world's pitch correction or
+the game's own eye, so a rig of lights the game hangs before its camera stays there. A game
+whose view-space draws are billboards instead -- sprites turned to face the camera but
+standing at points in the scene, which is how one marks its item boxes -- says so with
+`view_space_world` in `vr.txt` (`render_set_view_space_world`, usually from its
+`config_defaults`), and they are drawn as world geometry: their vertices are in the camera's
+frame as every world vertex is. Held before the camera, they stayed where the chase camera
+saw them while the game's eye moved off into the driver's seat, and hung in the sky above
+their boxes.
+
 A game can also leave draws out of the eyes altogether (`vr::GameHooks::eye_filter`, a
 `gx::EyeFilter`): the renderer asks it once per pixel state per frame, with what it knows
 of the draw -- orthographic or not, indirect texturing, whether it samples an EFB copy and

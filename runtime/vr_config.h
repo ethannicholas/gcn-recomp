@@ -66,6 +66,15 @@ struct VrConfig {
     float hud_band = 0.0f;
     float hud_band_scale = 1.0f;
 
+    // What a perspective draw the game placed in view space itself (a position matrix with
+    // no tilt, in the camera's own frame) is in stereo. Off, it is something held in front
+    // of the camera -- a rig of lights, say -- and goes with the camera rather than the
+    // world. On, it is a billboard standing in the world, a sprite turned to face the camera
+    // but placed at a point in the scene, and goes with the world: through the world's pitch
+    // correction and the game's own eye, so that it stays where the scene puts it. See
+    // gx::render_set_view_space_world.
+    bool view_space_world = false;
+
     // How many samples the EFB keeps per hardware pixel, in each axis, in each view.
     // In theater the EFB *is* the picture, so more samples are filtered down into the
     // panel as antialiasing. In stereo the eyes are drawn at the headset's resolution and

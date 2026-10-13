@@ -88,6 +88,13 @@ void render_set_world_pitch_hook(WorldPitchHook hook);
 void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale,
                              float hud_to = 0.0f, float hud_scale = 1.0f);
 
+// What a perspective draw the game placed in view space itself is in an eye (PixelState::
+// view_space). Off, the default, it is held in front of the camera: drawn with the head's
+// transform but outside the world's pitch correction and the game's own eye. On, it is a
+// billboard in the world -- a sprite turned to face the camera but standing at a point in
+// the scene -- and is drawn as world geometry.
+void render_set_view_space_world(bool on);
+
 // A game's draw filter for the eyes (gx::EyeFilter in render.h), installed by the
 // frontend from vr::GameHooks::eye_filter.
 void render_set_eye_filter(EyeFilter filter);

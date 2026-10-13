@@ -114,6 +114,9 @@ static float g_vr_view_fg[16], g_vr_view_world_fg[16];
 static float g_hud_to = 0.0f;
 static float g_hud_scale = 1.0f;
 static float g_vr_view_hud[16], g_vr_view_world_hud[16];
+// Whether a perspective draw placed in view space is a billboard in the world rather than
+// something held before the camera (render_set_view_space_world). Off unless a game says.
+static bool g_view_space_world = false;
 static float g_world_pitch = 0.0f;
 static float g_vr_hud[16];
 // What the HUD frame goes through before the eye's view: the identity, unless the game's
@@ -1249,9 +1252,16 @@ static void apply_state(const PixelState& st, int prim) {
     // means it to, and the head still moves within that.
     //
     // GCN_EYE_VS3D=0 puts it back on the HUD frame, which is where it was.
+    //
+    // Unless the game says its view-space draws are billboards in the world
+    // (render_set_view_space_world): a sprite the game turns to face its camera, placed at
+    // a point in the scene. Those are world geometry like anything else -- their vertices
+    // are in the camera's frame as every world vertex is -- and held before the camera
+    // they stayed where the chase camera saw them while the game's own eye moved off.
     static const bool vs3d = !(getenv("GCN_EYE_VS3D") && atoi(getenv("GCN_EYE_VS3D")) == 0);
-    const bool view_space_3d = perspective && st.view_space && vs3d;
-    const bool on_hud_frame = (!perspective || st.view_space) && !view_space_3d;
+    const bool view_space = st.view_space && !g_view_space_world;
+    const bool view_space_3d = perspective && view_space && vs3d;
+    const bool on_hud_frame = (!perspective || view_space) && !view_space_3d;
     if (perspective) {
         P[0] = p[0]; P[8] = p[1]; P[5] = p[2]; P[9] = p[3]; P[10] = p[4]; P[14] = p[5]; P[11] = -1.0f;
     } else {
@@ -1269,7 +1279,7 @@ static void apply_state(const PixelState& st, int prim) {
     static const bool sky_at_infinity = !(getenv("GCN_EYE_SKY") && atoi(getenv("GCN_EYE_SKY")) == 0);
     const float band_lo = (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f;
     const float band_hi = st.viewport[5] / 16777215.0f;
-    const bool background = sky_at_infinity && g_bg_from > 0.0f && perspective && !st.view_space &&
+    const bool background = sky_at_infinity && g_bg_from > 0.0f && perspective && !view_space &&
                             band_lo >= g_bg_from;
     // The HUD layer takes precedence over the foreground, whose band it sits inside.
     const bool hud_layer = g_hud_to > 0.0f && g_hud_scale != 1.0f && perspective && band_hi <= g_hud_to;
@@ -2109,6 +2119,8 @@ void render_set_depth_layers(float background_from, float foreground_to, float f
     compose_world_view();
 }
 
+void render_set_view_space_world(bool on) { g_view_space_world = on; }
+
 void render_set_eye_hook(EyeHook hook) { g_eye_hook = hook; }
 void render_set_world_pitch_hook(WorldPitchHook hook) { g_pitch_hook = hook; }
 static FrameHook g_frame_hook = nullptr;
@@ -2800,6 +2812,11 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
 #endif
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     g_vr_active = false;
+    // An eye frame presents nothing through the EFB, so the presented count -- which the
+    // draw log, the copy dump and the stereo logs key on -- is stepped here instead, once
+    // per frame: the frontends number their eye dumps the same way, so GCN_DRAWLOG=<n>
+    // names the frame eye_<n>.png shows.
+    if (do_copies) g_present_count++;
     return true;
 }
 

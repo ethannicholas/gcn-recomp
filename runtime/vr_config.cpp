@@ -38,6 +38,7 @@ VrConfig vr_config_load(const std::string& dir, const VrConfig& defaults) {
         else if (!strcmp(key, "foreground_scale")) c.foreground_scale = (float)val;
         else if (!strcmp(key, "hud_band")) c.hud_band = (float)val;
         else if (!strcmp(key, "hud_band_scale")) c.hud_band_scale = (float)val;
+        else if (!strcmp(key, "view_space_world")) c.view_space_world = val != 0;
         else if (!strcmp(key, "theater_scale")) c.theater_scale = (int)val;
         else if (!strcmp(key, "stereo_scale")) c.stereo_scale = (int)val;
         else if (!strcmp(key, "eye_scale")) c.eye_scale = (float)val;
