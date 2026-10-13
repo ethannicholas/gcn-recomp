@@ -49,7 +49,10 @@ by hand; `frame` is for the reader.
 
 `GCN_INPUT="frame:BUTTON:duration,..."` presses buttons at given submitted-frame counts; `+`
 joins buttons (`A+B`), and `SL SR SU SD` push the control stick. Presses are counted in
-presented game frames, not wall-clock. `GCN_INPUT_LOG=1` prints each press as it fires. A
+submitted frames, not wall-clock: display copies the guest has issued. For most games that
+is one per presented frame, but a game that renders its frame in parts (graphics.md, "Frames
+rendered in parts") issues several, so its count runs several times ahead of the frame
+numbers the dumps carry; `GCN_INPUT_LOG=1` shows the count. It prints each press as it fires. A
 scripted press is recorded in the input log like any other, so a script is one way to make
 a log.
 

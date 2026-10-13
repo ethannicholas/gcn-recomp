@@ -349,7 +349,35 @@ everything farther failed the depth test behind it. The flat pass now takes the 
 each triangle draw's last triangle as it goes (`zfreeze_plane` in `render_gl.cpp`: the
 vertex shader's own placement, in the target's window coordinates, culled draws included)
 and a z freeze program writes `gl_FragDepth` from it (`u_zplane`). Before any plane in a
-frame, and in an eye, a z freeze draw keeps its own depth.
+frame, a z freeze draw keeps its own depth.
+
+An eye takes the plane the same way, from the triangle as the eye sees it
+(`zfreeze_plane_eye`): the eye's projection and view, the depth mapped into the draw's band
+as the vertex shader maps it, in the eye target's window coordinates. A triangle placed by
+the camera (positions in view space, as a sky's reference triangle is) goes through the
+eye's view of the camera, as apply_state draws it. Keeping the sky's own depth in an eye
+hid everything past the dome: in a flight over a surface only the craft and the HUD were
+left.
+
+## Frames rendered in parts
+
+A game whose EFB cannot hold its frame (anti-aliased, the EFB is 640x264) renders it in
+parts and copies each to its place in the XFB, with strips to a scratch buffer between
+them; the renderer assembles the parts (`Xfb` in `render_gl.cpp`). A batch used to end at
+every display copy, so such a frame arrived as five batches, and that broke both headset
+paths: the OpenXR frontend takes one batch per display frame, which would have run the game
+at a fraction of its speed, and an eye drew every batch as a frame of its own, the last of
+them a strip with nothing in it. Now the front end tracks the XFB rows each display copy
+writes as the renderer does (`display_copy_ends_frame` in `xf.cpp`) and ends a batch only at
+the copy that completes a frame, or one that is a whole frame by itself. Strips to an
+address that never fills ride along in the next batch. A game whose display copies are
+whole frames sees no change; the flat frames of a game in parts are byte-identical.
+
+Each part draws the same scene through its own window of the frame. An eye has no window,
+so it draws the commands up to the first part's display copy and leaves the rest to the
+flat pass (`first_part_end`); strips copied before the first part, left over from the
+previous frame, have no draws in front of them and do not count. `display_size` takes such
+a frame's height from the VI rather than from a part.
 
 ## Normals a vertex does not carry, and emboss
 

@@ -1625,6 +1625,45 @@ void renderer_bp_write(uint32_t reg, uint32_t v) {
     }
 }
 
+// Whether a display copy finishes a frame, which is where a batch ends. A game whose EFB
+// cannot hold a whole frame renders it in parts and copies each to its place in the XFB
+// (render_gl.cpp assembles them, see Xfb there); ending a batch at every part handed a
+// frontend several batches per game frame, and one that takes a batch per display frame
+// ran the game at a fraction of its speed, while an eye drew each part as a frame of its
+// own. So the rows each XFB has had written are tracked here as the renderer tracks them,
+// and only the copy that completes one, or a copy of the whole frame, ends the batch.
+// Copies to an address that never fills up (strips to a scratch buffer) then simply ride
+// along in the next batch.
+namespace {
+struct XfbRows {
+    uint32_t base, stride, h, n;
+    std::vector<uint8_t> written;
+};
+std::vector<XfbRows> g_xfb_rows;
+}  // namespace
+
+static bool display_copy_ends_frame(const EfbCopyCmd& cc) {
+    const uint32_t h = vi_display_height();
+    if (!h || cc.dst_h >= h) return true;
+    const uint32_t stride = cc.dst_w * 2;
+    XfbRows* x = nullptr;
+    for (auto& r : g_xfb_rows)
+        if (r.stride == stride && r.h == h && cc.dest >= r.base && cc.dest < r.base + stride * h) x = &r;
+    if (!x) {
+        g_xfb_rows.push_back({cc.dest, stride, h, 0, std::vector<uint8_t>(h, 0)});
+        if (g_xfb_rows.size() > 8) g_xfb_rows.erase(g_xfb_rows.begin());
+        x = &g_xfb_rows.back();
+    }
+    const uint32_t row0 = (cc.dest - x->base) / stride;
+    const uint32_t rows = std::min(cc.dst_h, h - row0);
+    for (uint32_t r = row0; r < row0 + rows; r++)
+        if (!x->written[r]) { x->written[r] = 1; x->n++; }
+    if (x->n < h) return false;
+    std::fill(x->written.begin(), x->written.end(), 0);
+    x->n = 0;
+    return true;
+}
+
 std::atomic<uint32_t> g_copy_writebacks_done{0};
 std::atomic<bool> g_renderer_writes_back{false};
 static CopyWritebackFilter g_copy_writeback;
@@ -1787,8 +1826,10 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
             debug_guest_check("frame");
             heap_trace_frame(g_frames_submitted.load());
         }
-        g_have_last_state = false;
-        flush_batch();
+        if (display_copy_ends_frame(cc)) {
+            g_have_last_state = false;
+            flush_batch();
+        }
     }
 }
 

@@ -1163,6 +1163,45 @@ static bool zfreeze_plane(const Batch& b, const Cmd& c, float out[4]) {
     return true;
 }
 
+// The same plane as an eye sees the triangle: the eye's projection and its view of the
+// world, the depth mapped into the draw's band as the vertex shader maps it, in the eye
+// target's window coordinates. A sky drawn with z freeze after a triangle culled at the
+// far end of the frustum otherwise keeps its own depth in an eye, a hundred units out
+// around the camera, and hides everything beyond it. A triangle placed by the camera (its
+// positions in view space) is seen through the eye's view of the camera, as apply_state
+// draws it. A 2D draw sets none (w = 0), and the draws that follow keep their own depth.
+static bool zfreeze_plane_eye(const Batch& b, const Cmd& c, float out[4]) {
+    out[3] = 0.0f;
+    if (c.prim != 0 || c.count < 3) return false;
+    const PixelState& st = b.states[c.state];
+    if ((int)st.proj[6] != 0) return false;
+    float M[16];
+    mat4_mul(g_vr_proj, st.view_space ? g_vr_view : g_vr_view_world, M);
+    const float band_lo = (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f;
+    const float band_hi = st.viewport[5] / 16777215.0f;
+    double X[3], Y[3], Z[3];
+    for (int i = 0; i < 3; i++) {
+        const float* v = b.verts[b.indices[c.first + c.count - 3 + i]].pos;
+        float clip[4];
+        for (int r = 0; r < 4; r++) clip[r] = M[r] * v[0] + M[4 + r] * v[1] + M[8 + r] * v[2] + M[12 + r];
+        if (clip[3] <= 0.0f) return false;
+        const double zn = (band_hi + band_lo - 1.0) + (band_hi - band_lo) * (clip[2] / clip[3]);
+        X[i] = (clip[0] / clip[3] + 1.0) * 0.5 * g_eye_w;
+        Y[i] = (clip[1] / clip[3] + 1.0) * 0.5 * g_eye_h;
+        Z[i] = (zn + 1.0) * 0.5;
+    }
+    const double ux = X[1] - X[0], uy = Y[1] - Y[0], uz = Z[1] - Z[0];
+    const double wx = X[2] - X[0], wy = Y[2] - Y[0], wz = Z[2] - Z[0];
+    const double det = ux * wy - uy * wx;
+    if (fabs(det) < 1e-9) return false;
+    const double a = (uz * wy - uy * wz) / det, bb = (ux * wz - uz * wx) / det;
+    out[0] = (float)a;
+    out[1] = (float)bb;
+    out[2] = (float)(Z[0] - a * X[0] - bb * Y[0]);
+    out[3] = 1.0f;
+    return true;
+}
+
 static void apply_state(const PixelState& st, int prim) {
     int xoff, yoff;
     scissor_offset(st.bp, xoff, yoff);
@@ -2328,12 +2367,37 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                           bool again = false);
 
 // The size of the frame the game actually scans out, which is the display copy's. It is
-// not the EFB's size: the EFB is 640x528 and the game displays 640x480 of it.
+// not the EFB's size: the EFB is 640x528 and the game displays 640x480 of it. A frame
+// rendered in parts (see Xfb) is as wide as its copies and as tall as the VI's frame;
+// its strips and parts are smaller than the frame they belong to.
 static void display_size(const Batch& b, uint32_t& w, uint32_t& h) {
     w = EFB_W;
     h = EFB_H;
-    for (auto& c : b.cmds)
-        if (c.type == CmdType::EfbCopy && c.copy.to_xfb) { w = c.copy.dst_w; h = c.copy.dst_h; }
+    bool any = false;
+    for (auto& c : b.cmds) {
+        if (c.type != CmdType::EfbCopy || !c.copy.to_xfb) continue;
+        if (!any || c.copy.dst_h > h) { w = c.copy.dst_w; h = c.copy.dst_h; }
+        any = true;
+    }
+    const uint32_t vh = vi_display_height();
+    if (any && vh > h) h = vh;
+}
+
+// Where the first part of a frame rendered in parts ends: the first partial display copy
+// after a draw of the main scene (`skip` marks the off-screen passes). Each part draws the
+// same scene through its own window of the frame, and an eye has no window, so it draws
+// the first part's commands and leaves the rest out; the flat pass still runs them all.
+// Strips copied before the first part, left over from the previous frame, have no draws in
+// front of them. Returns the command count when the frame is not in parts.
+static size_t first_part_end(const Batch& b, const std::vector<uint8_t>& skip) {
+    const uint32_t vh = vi_display_height();
+    bool drew = false;
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type == CmdType::Draw && !skip[i]) drew = true;
+        if (drew && c.type == CmdType::EfbCopy && c.copy.to_xfb && vh && c.copy.dst_h < vh) return i;
+    }
+    return b.cmds.size();
 }
 
 // A copy that takes the whole displayed frame is the game compositing its finished
@@ -2497,7 +2561,6 @@ static void flat_pass_trim(const Batch& b, const std::vector<uint8_t>& skip, std
 // which is what makes stereo affordable here. Pass do_copies for the first eye only;
 // the second reuses what it produced.
 bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
-    memset(g_zplane, 0, sizeof(g_zplane));  // an eye keeps z freeze draws' own depth
     // The scene samples textures the game produces by copying them back out of the EFB:
     // the water reflection, the sprite sheet the spray uses. An eye pass never draws into
     // the EFB, so on its own it would copy out an empty one -- which once left a model
@@ -2549,6 +2612,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     g_vr_active = true;
     g_eye_w = w;
     g_eye_h = h;
+    memset(g_zplane, 0, sizeof(g_zplane));  // the flat pass's planes are the EFB's
     view_invalidate();   // this eye's matrices and target
     bool grabbed = false, grabbed_spray = false;
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
@@ -2627,7 +2691,8 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     // Keyed on the presented frame, the number the dumps carry; a frame may take several batches.
     const bool eye_drawlog = eye_drawlog_frame && g_present_count + 1 == eye_drawlog_frame;
     int eye_draw_index = 0;   // the flat draw log's numbering: every draw command, in order
-    for (size_t i = 0; i < b.cmds.size(); i++) {
+    const size_t eye_end = first_part_end(b, skip);
+    for (size_t i = 0; i < eye_end; i++) {
         Cmd& c = b.cmds[i];
         // Copies and the present are the first eye's business, done against the EFB.
         if (c.type != CmdType::Draw) {
@@ -2686,6 +2751,9 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         // gave each draw (see eye_layer_name), beside its band: how a draw that lands
         // somewhere surprising in an eye is told from one the game put there.
         if (eye_skip_lo >= 0 && eye_draw_index >= eye_skip_lo && eye_draw_index <= eye_skip_hi) { eye_draw_index++; continue; }
+        // The z freeze plane as this eye sees it (zfreeze_plane_eye).
+        const bool zfreeze = (b.states[c.state].bp[0x00] >> 19) & 1;
+        if (!zfreeze) zfreeze_plane_eye(b, c, g_zplane);
         if (c.state != cur_state || c.prim != cur_prim) {
             apply_state(b.states[c.state], c.prim);
             // apply_state binds the EFB's scissor and viewport expectations; the eye
@@ -2694,6 +2762,8 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             glDisable(GL_SCISSOR_TEST);
             cur_state = c.state;
             cur_prim = c.prim;
+        } else if (zfreeze && g_applied.pr && g_applied.pr->u_zplane >= 0) {
+            glUniform4fv(g_applied.pr->u_zplane, 1, g_zplane);
         }
         if (eye_drawlog && do_copies) {
             const PixelState& st = b.states[c.state];
