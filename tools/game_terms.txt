@@ -56,3 +56,9 @@ luigi'?s ?mansion
 \bGLME01\b
 \bgadd\b
 \bpoltergust\b
+
+# Burnout 2: Point of Impact (burnout2-recomp)
+burnout
+point of impact
+\bcriterion\b
+\bGB4E51\b
