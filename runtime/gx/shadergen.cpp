@@ -312,6 +312,10 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     // The maps sampled nearest whose coordinate is snapped to the centre of the texel GX
     // would read (the floor of the coordinate in texels), set for EFB copies of depth.
     // See apply_state().
+    // A point's texture offsets (see line_point_tex_offset in xf.cpp): the range each
+    // coordinate runs across the point, for a draw of points; u_points is 0 for any other,
+    // where gl_PointCoord means nothing.
+    s += "uniform int u_points;\nuniform float u_point_off[8];\n";
     s += "uniform int u_texsnap;\n";
     s += "#define snap_tex(m, t) (((u_texsnap >> (m)) & 1) != 0 ? floor(t) + 0.5 : (t))\n";
     // A macro, not a function: a sampler array has to be indexed by a constant
@@ -341,7 +345,9 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     }
     // texcoords (projective divide)
     for (uint32_t i = 0; i < 8; i++) {
-        if (i < k.num_texgens) W("  vec2 uv%u = v_tex[%u].xy / (v_tex[%u].z == 0.0 ? 1.0 : v_tex[%u].z);\n", i, i, i, i);
+        if (i < k.num_texgens)
+            W("  vec2 uv%u = (v_tex[%u].xy + (u_points != 0 ? u_point_off[%u] * (gl_PointCoord - 0.5) * v_tex[%u].z : vec2(0.0)))"
+              " / (v_tex[%u].z == 0.0 ? 1.0 : v_tex[%u].z);\n", i, i, i, i, i, i);
         else W("  vec2 uv%u = vec2(0.0);\n", i);
         // A texgen that addresses a copy of the whole frame, or one of the spray's
         // grabs, is a screen-space lookup, and in an eye the screen is this eye's.

@@ -417,6 +417,14 @@ front end moves each such coordinate to the middle of its range when it packs th
 (`line_point_tex_offset` in `xf.cpp`). Left at the edge, every line was fully transparent.
 Lines are still one GL pixel wide at any width the game asks for.
 
+A point is a sprite, though: GL draws it at the game's size, and a particle textured with a
+puff of smoke or a spark needs the whole texture across it. With every fragment sampling the
+middle of the range, smoke, dust and sparks came out as flat squares of one texel's colour.
+So for a draw of points the fragment shader spreads each such coordinate back out with
+`gl_PointCoord` (`u_points`, `u_point_off`, set per draw in `apply_state`; 0 for anything
+else, where `gl_PointCoord` is undefined): from the vertex's value at the point's top left to
+value + 1/n at its bottom right, as GX does. Points keep their size in EFB pixels in an eye.
+
 ## Depth bands in an eye
 
 GX has no depth-range call, but a viewport carries a z range, and a game can confine a draw

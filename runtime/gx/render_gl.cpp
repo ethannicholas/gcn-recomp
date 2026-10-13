@@ -62,6 +62,7 @@ struct UniformShadow {
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
+    uint32_t point_tex;        // point_tex_key(): what u_points and u_point_off were sent for
     uint32_t tev_reg[4][2], tev_konst[4][2];
     uint32_t aref;             // bp[0xF3]
     uint32_t ind[9];           // bp[0x06..0x0E]
@@ -78,6 +79,7 @@ struct Program {
     GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_konst, u_texsize, u_indmtx, u_indscale,
         u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
+    GLint u_points, u_point_off;
     mutable UniformShadow shadow;
 };
 
@@ -408,6 +410,8 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_texsnap = glGetUniformLocation(p, "u_texsnap");
     pr.u_zbias = glGetUniformLocation(p, "u_zbias");
     pr.u_dstalpha = glGetUniformLocation(p, "u_dstalpha");
+    pr.u_points = glGetUniformLocation(p, "u_points");
+    pr.u_point_off = glGetUniformLocation(p, "u_point_off");
     pr.u_zplane = glGetUniformLocation(p, "u_zplane");
     glUseProgram(p);
     GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -1212,6 +1216,19 @@ static bool zfreeze_plane_eye(const Batch& b, const Cmd& c, float out[4]) {
     out[3] = 1.0f;
     return true;
 }
+// The texture offset a point's coordinates run across (SU_LPSIZE bits 19-21: 1/16 to 1),
+// and which of a draw's coordinates have it enabled (bit 19 of each SU_SSIZE): the
+// coordinates in the low byte, with bit 8 set so that a draw of points with none enabled
+// still differs from 0, which is every other draw's.
+static const float kPointTexOffset[8] = {0.0f, 1.0f / 16, 1.0f / 8, 1.0f / 4, 1.0f / 2, 1.0f, 1.0f, 1.0f};
+static uint32_t point_tex_key(const PixelState& st) {
+    if (kPointTexOffset[(st.bp[0x22] >> 19) & 7] == 0.0f) return 0;
+    uint32_t mask = 0;
+    for (uint32_t t = 0; t < st.num_texgens && t < 8; t++)
+        if ((st.bp[0x30 + 2 * t] >> 19) & 1) mask |= 1u << t;
+    return mask ? (mask | 0x100u | (((st.bp[0x22] >> 19) & 7) << 9)) : 0;
+}
+
 
 static void apply_state(const PixelState& st, int prim) {
     int xoff, yoff;
@@ -1415,6 +1432,24 @@ static void apply_state(const PixelState& st, int prim) {
         }
     } else if (!held) {
         u.psize_reg = ~0u;
+    }
+    // A point's texture coordinates run across it, from the vertex's value to that plus the
+    // point's texture offset, in each coordinate that has offsets enabled (GX's point
+    // sprites: smoke, sparks and dust). GL gives each point one interpolated coordinate, so
+    // the fragment shader spreads it with gl_PointCoord; every other draw sends 0.
+    {
+        const uint32_t key = prim == 2 ? point_tex_key(st) : 0;
+        if (!(held && key == u.point_tex) && pr.u_points >= 0) {
+            float off[8] = {};
+            if (key) {
+                const float range = kPointTexOffset[(bp[0x22] >> 19) & 7];
+                for (int t = 0; t < 8; t++)
+                    if ((key >> t) & 1) off[t] = range;
+            }
+            glUniform1i(pr.u_points, key != 0);
+            if (pr.u_point_off >= 0) glUniform1fv(pr.u_point_off, 8, off);
+            u.point_tex = key;
+        }
     }
 
     // TEV registers
