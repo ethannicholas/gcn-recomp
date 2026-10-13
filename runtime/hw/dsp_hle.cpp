@@ -48,11 +48,12 @@ static void boot_ucode() {
         g_boot_iram_len, g_boot_dram_len, g_boot_start, ucode_hash(g_boot_iram_mm, g_boot_iram_len));
     g_upload_in_progress = false;
     g_next_is_cmdlist = false;
-    if (jaudio_is_ucode(ucode_hash(g_boot_iram_mm, g_boot_iram_len))) {
+    const uint32_t hash = ucode_hash(g_boot_iram_mm, g_boot_iram_len);
+    if (jaudio_is_ucode(hash)) {
         // Booted again at another vector, it is resuming after another ucode had the DSP.
         if (g_jaudio_init_vector == ~0u) g_jaudio_init_vector = g_boot_start;
         g_ucode = UCode::JAudio;
-        jaudio_boot(g_boot_start != g_jaudio_init_vector);
+        jaudio_boot(hash, g_boot_start != g_jaudio_init_vector);
         return;
     }
     // Otherwise the first ucode the game boots is AX; anything else of a different size, or

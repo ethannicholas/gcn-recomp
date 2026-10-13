@@ -49,3 +49,10 @@ double ?dash
 \baether\b
 \bluminoth
 \bG2ME01\b
+
+# Luigi's Mansion (lm-recomp)
+luigi'?s ?mansion
+\bluigi\b
+\bGLME01\b
+\bgadd\b
+\bpoltergust\b

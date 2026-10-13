@@ -20,6 +20,17 @@
 // - CDD10001 hands the DSP to another ucode (the boot ROM mails that load it follow),
 //   CDD10002 resets to the boot ROM, CDD10000 halts.
 //
+// An earlier build of the ucode speaks an earlier protocol, with the same synthesizer:
+//
+// - At boot it sends one mail, which the library polls for.
+// - A command is its words alone, with no count mail: the opcode says how many follow
+//   (0: none, a wait; 1: four, as above; 2: two, the output buffers; 0xB: one, the memory
+//   card unlock's parameters). Each is answered by one mail, not interrupting, which the
+//   library polls for: any mail but 88881357.
+// - Opcode 2 only sets up the frame. Each zero mail then releases one subframe, every
+//   voice in it, and the ucode answers with 88881357 and the DSP interrupt; the library
+//   counts the interrupts, and after the last subframe sends the next frame's opcode 2.
+//
 // The synthesizer. Opcode 1's words are the voice parameter blocks (0x180 bytes each), the
 // resampling filter (64 phases of 4 taps, then four 64-sample oscillator patterns and a
 // quarter sine), the 16 ADPCM coefficient pairs and the four effect lines. A frame is
@@ -52,8 +63,11 @@ enum : uint32_t {
 };
 
 // Fingerprints (dsp_hle.cpp's ucode_hash) of the builds of this ucode that speak the
-// protocol above.
+// protocol above, and of the earlier build that speaks the earlier one.
 constexpr uint32_t kHashes[] = {0x2FCDF1EC};
+constexpr uint32_t kEarlyHashes[] = {0x42F64AC4};
+constexpr uint32_t EARLY_HALT = 0x88881357;
+bool g_early;
 
 enum class State { Waiting, Command, Sync, Halted };
 State g_state;
@@ -63,6 +77,10 @@ std::deque<std::vector<uint32_t>> g_pending;
 bool g_can_execute;
 
 void ack(uint32_t cmd) {
+    if (g_early) {
+        dsp_send_mail(ACK | (cmd >> 16), false);
+        return;
+    }
     dsp_send_mail(DSP_SYNC, true);
     dsp_send_mail(ACK | (cmd >> 16), false);
 }
@@ -138,6 +156,11 @@ enum : uint16_t {
     SRC_SQUARE = 0, SRC_SAW = 1, SRC_SQUARE_25 = 3, SRC_PATTERN_1 = 4, SRC_ADPCM2 = 5,
     SRC_PATTERN_0 = 7, SRC_PCM8 = 8, SRC_ADPCM4 = 9, SRC_PATTERN_0_STEP = 10, SRC_PATTERN_2 = 11,
     SRC_PATTERN_3 = 12, SRC_PCM16 = 16,
+    // The earlier build's streamed music: PCM16 from a ring in main memory that the CPU
+    // refills. PB_START's high half is the ucode's place in the ring, which the CPU reads;
+    // the ring is PB_LOOP_END's high half samples long; PB_REMAINING counts down the
+    // stream's samples.
+    SRC_DIRECT_PCM16 = 0x21,
 };
 
 // What the ucode keeps for a voice between frames beyond what the block holds: the ADPCM
@@ -181,6 +204,19 @@ void decode_adpcm(Voice& v, uint32_t aram, int bytes) {
 bool next_sample(PB& pb, Voice& v, int16_t& out) {
     const uint16_t src = pb.u16(PB_SOURCE);
     const bool adpcm = src == SRC_ADPCM4 || src == SRC_ADPCM2;
+    if (src == SRC_DIRECT_PCM16) {
+        const uint32_t remaining = pb.u32(PB_REMAINING);
+        if (remaining == 0) return false;
+        const uint32_t ring = pb.u32(PB_LOOP_END) >> 16;
+        uint32_t pos = pb.u32(PB_START) >> 16;
+        if (ring && pos >= ring) pos = 0;
+        out = (int16_t)mem_r16(0x80000000u | ((pb.u32(PB_BASE) + 2 * pos) & 0x01FFFFFF));
+        pos++;
+        if (ring && pos >= ring) pos = 0;
+        pb.put32(PB_START, pos << 16);
+        pb.put32(PB_REMAINING, remaining - 1);
+        return true;
+    }
     if (v.block_pos >= v.block_len) {
         uint32_t remaining = pb.u32(PB_REMAINING);
         uint32_t skip = 0;
@@ -228,7 +264,7 @@ bool next_sample(PB& pb, Voice& v, int16_t& out) {
 bool voice_samples(PB& pb, Voice& v, int16_t* out) {
     const uint16_t src = pb.u16(PB_SOURCE);
     const uint32_t ratio = pb.u16(PB_PITCH);
-    if (src == SRC_ADPCM4 || src == SRC_ADPCM2 || src == SRC_PCM8 || src == SRC_PCM16) {
+    if (src == SRC_ADPCM4 || src == SRC_ADPCM2 || src == SRC_PCM8 || src == SRC_PCM16 || src == SRC_DIRECT_PCM16) {
         // Resampled with the ucode's own filter: four taps in 64 phases, interpolating
         // between the second and third of the last four input samples.
         uint32_t pos = pb.u16(PB_POS_FRAC) & 0xFFF;
@@ -293,14 +329,19 @@ void render_voice(uint32_t index) {
         // already for an ADPCM wave started part way in; PCM skips PB_START samples).
         memset(&v, 0, sizeof(v));
         const uint16_t src = pb.u16(PB_SOURCE);
-        uint32_t base = pb.u32(PB_BASE), end = pb.u32(PB_LOOP_END);
-        if (src == SRC_PCM16 || src == SRC_PCM8) {
-            const uint32_t skip = pb.u32(PB_START);
-            base += skip * (src / 8);
-            end = end > skip ? end - skip : 0;
+        if (src == SRC_DIRECT_PCM16) {
+            // The CPU set the stream's length itself; the ring starts at its beginning.
+            pb.put32(PB_START, 0);
+        } else {
+            uint32_t base = pb.u32(PB_BASE), end = pb.u32(PB_LOOP_END);
+            if (src == SRC_PCM16 || src == SRC_PCM8) {
+                const uint32_t skip = pb.u32(PB_START);
+                base += skip * (src / 8);
+                end = end > skip ? end - skip : 0;
+            }
+            pb.put32(PB_CUR_ADDR, base);
+            pb.put32(PB_REMAINING, end);
         }
-        pb.put32(PB_CUR_ADDR, base);
-        pb.put32(PB_REMAINING, end);
         pb.put16(PB_POS_FRAC, 0);
         pb.put16(PB_RESET, 0);
     }
@@ -526,6 +567,19 @@ void render() {
     dsp_send_mail(DSP_FRAME_END, true);
 }
 
+// The earlier protocol's release: one subframe, every voice.
+void render_subframe() {
+    if (!g_rendering || g_frame >= g_frames) {
+        LOG(LOG_DSP, "jaudio: subframe released outside a frame");
+        return;
+    }
+    open_frame();
+    for (uint32_t v = 0; v < g_voices_per_frame; v++) render_voice(v);
+    finish_frame();
+    if (++g_frame == g_frames) g_rendering = false;
+    dsp_send_mail(EARLY_HALT, true);
+}
+
 void execute(const std::vector<uint32_t>& cmd) {
     uint32_t op = (cmd[0] >> 24) & 0x7F;
     auto arg = [&](size_t i) { return i < cmd.size() ? cmd[i] : 0u; };
@@ -556,7 +610,12 @@ void execute(const std::vector<uint32_t>& cmd) {
         g_frame = g_voice = g_released = 0;
         g_frame_open = false;
         g_rendering = true;
-        render();
+        if (g_early) ack(cmd[0]);
+        else render();
+        break;
+    case 0x00:  // the earlier protocol's wait
+    case 0x0B:  // the earlier protocol's memory card unlock: the card does not check the answer
+        ack(cmd[0]);
         break;
     default:
         LOG(LOG_DSP, "jaudio: command %02X (%zu words) not implemented", op, cmd.size());
@@ -578,11 +637,21 @@ void run_pending() {
 bool jaudio_is_ucode(uint32_t hash) {
     for (uint32_t h : kHashes)
         if (h == hash) return true;
+    for (uint32_t h : kEarlyHashes)
+        if (h == hash) return true;
     return false;
 }
 
-void jaudio_boot(bool resume) {
+void jaudio_boot(uint32_t hash, bool resume) {
+    g_early = false;
+    for (uint32_t h : kEarlyHashes)
+        if (h == hash) g_early = true;
     g_state = State::Waiting;
+    if (g_early) {
+        g_rendering = false;
+        dsp_send_mail(DSP_INIT, false);
+        return;
+    }
     if (resume) {
         dsp_send_mail(DSP_RESUME, true);
         return;
@@ -594,7 +663,55 @@ void jaudio_boot(bool resume) {
     dsp_send_mail(HANDSHAKE, false);
 }
 
+namespace {
+
+// The earlier protocol: how many words follow each opcode.
+int early_args(uint32_t op) {
+    switch (op) {
+    case 0x00: return 0;
+    case 0x01: return 4;
+    case 0x02: return 2;
+    case 0x0B: return 1;
+    default: return -1;
+    }
+}
+
+JAudioNext early_mail(uint32_t mail) {
+    if (g_state == State::Command) {
+        g_batch.push_back(mail);
+        if (g_batch.size() == g_batch_len) {
+            g_state = State::Waiting;
+            execute(g_batch);
+        }
+        return JAudioNext::Stay;
+    }
+    if (mail == 0) {
+        render_subframe();
+        return JAudioNext::Stay;
+    }
+    if ((mail >> 16) == 0xCDD1) {
+        switch (mail & 0xFFFF) {
+        case 1: g_state = State::Halted; return JAudioNext::NewUcode;
+        case 2: g_state = State::Halted; return JAudioNext::Reset;
+        default: return JAudioNext::Stay;
+        }
+    }
+    const int n = (mail & 0x80000000u) ? early_args((mail >> 24) & 0x7F) : -1;
+    if (n < 0) {
+        LOG(LOG_DSP, "jaudio: unexpected mail %08X", mail);
+        return JAudioNext::Stay;
+    }
+    g_batch.assign(1, mail);
+    g_batch_len = (uint32_t)n + 1;
+    if (n == 0) execute(g_batch);
+    else g_state = State::Command;
+    return JAudioNext::Stay;
+}
+
+}  // namespace
+
 JAudioNext jaudio_mail(uint32_t mail) {
+    if (g_early && g_state != State::Halted) return early_mail(mail);
     switch (g_state) {
     case State::Halted:
         LOG(LOG_DSP, "jaudio: mail %08X while halted", mail);
