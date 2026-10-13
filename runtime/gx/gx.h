@@ -103,7 +103,8 @@ void set_draw_sync_lag(bool on);
 // for every texture copy; each it accepts is written to RAM in its texture format, and
 // the front end waits for that before going on, so a draw-done after the copy finds the
 // bytes in place, as on the hardware. It costs a round trip to the renderer per copy, so
-// keep the filter narrow. Ignored without a renderer.
+// keep the filter narrow. Ignored without a renderer. `dest` is the physical address the
+// copy register holds.
 using CopyWritebackFilter = bool (*)(uint32_t dest, uint32_t w, uint32_t h, uint32_t format, bool clear);
 void set_copy_writeback(CopyWritebackFilter filter);
 

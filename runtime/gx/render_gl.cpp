@@ -1838,12 +1838,23 @@ static uint32_t g_present_count;
 // writes whole tiles; rows and columns past the rect repeat its edge here. Counted done
 // whatever happens, so the front end, which waits on it, never waits on a format this does
 // not encode.
+//
+// The copy shader has already written each texel as the game will read it (kCopyFS), so a
+// format is only a matter of packing: the one-byte formats (I8, A8, R8, G8, B8, and the
+// depth bytes Z8, Z8M, Z8L, which GX copies by the same nibbles) hold their byte in every
+// channel, in 8x4 tiles; the two-byte ones (IA8, RG8, GB8, and Z16 and Z16L as the last
+// two) are read back as IA8, alpha then intensity, in 4x4 tiles. A depth copy into the
+// colour formats is not encoded.
 static void copy_writeback(const EfbCopyCmd& c) {
     const uint32_t fmt = c.format & 0xF, w = c.dst_w, h = c.dst_h, s = (uint32_t)g_scale;
-    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    const bool one_byte = fmt == 1 || (fmt >= 7 && fmt <= 10);
+    const bool two_byte = fmt == 3 || fmt == 11 || fmt == 12;
+    const bool colour = fmt == 4 || fmt == 5 || fmt == 6;
+    const uint32_t tw = one_byte ? 8 : 4;
+    const uint32_t bw = (w + tw - 1) / tw, bh = (h + 3) / 4;
     const uint32_t bytes = fmt == 6 ? bw * bh * 64 : bw * bh * 32;
-    const bool known = fmt == 4 || fmt == 5 || fmt == 6;
-    if (!known || c.depth || (c.dest & 0x01FFFFFF) + bytes > RAM_SIZE) {
+    const bool known = one_byte || two_byte || (colour && !c.depth);
+    if (!known || (c.dest & 0x01FFFFFF) + bytes > RAM_SIZE) {
         static bool warned;
         if (!warned) { warned = true; fprintf(stderr, "[copy] write-back of format %X%s not done\n", c.format, c.depth ? " (depth)" : ""); }
         g_copy_writebacks_done++;
@@ -1861,9 +1872,17 @@ static void copy_writeback(const EfbCopyCmd& c) {
     for (uint32_t by = 0; by < bh; by++)
         for (uint32_t bx = 0; bx < bw; bx++) {
             uint8_t* blk = out + ((size_t)by * bw + bx) * (fmt == 6 ? 64 : 32);
+            if (one_byte) {
+                for (uint32_t i = 0; i < 32; i++) blk[i] = at(bx * 8 + i % 8, by * 4 + i / 8)[0];
+                continue;
+            }
             for (uint32_t i = 0; i < 16; i++) {
                 const uint8_t* p = at(bx * 4 + i % 4, by * 4 + i / 4);
                 uint16_t v;
+                if (two_byte) {
+                    blk[2 * i] = p[3]; blk[2 * i + 1] = p[0];
+                    continue;
+                }
                 if (fmt == 6) {  // RGBA8: AR pairs in the first half of the tile, GB in the second
                     blk[2 * i] = p[3]; blk[2 * i + 1] = p[0];
                     blk[32 + 2 * i] = p[1]; blk[32 + 2 * i + 1] = p[2];
