@@ -44,7 +44,8 @@
 // frame's output. The ucode keeps its place in the block (next ARAM address, samples
 // left, the resampler's fraction), and the CPU reads and moves those to stream music
 // through a ring in ARAM. GCN_JAUDIO_WAV=<path> records the output at 32 kHz;
-// GCN_JAUDIO_STATS=1 prints levels and what the game uses.
+// GCN_JAUDIO_STATS=1 prints levels and what the game uses; GCN_JAUDIO_VOICES=1 each voice as
+// it starts, and where a streamed voice is in its ring.
 #include "../runtime.h"
 #include "dsp_hle.h"
 #include "jaudio.h"
@@ -144,6 +145,7 @@ enum : uint32_t {
     // the high byte; the current and target volume; and whether it is on.
     PB_AM_PAN = 0x50, PB_AM_FX = 0x52, PB_AM_VOLUME = 0x54, PB_AM_TARGET = 0x56, PB_AM_ON = 0x58,
     PB_POS_FRAC = 0x60, PB_BLOCK_SAMPLES = 0x64, PB_START = 0x68,
+    PB_LOOP_LEFT = 0x6C,  // ucode: (high half) samples left before the loop point
     PB_CUR_ADDR = 0x70,   // ucode: the next byte of sample data to fetch, in ARAM
     PB_REMAINING = 0x74,  // ucode: samples left to fetch before the end or the loop point
     PB_SOURCE = 0x100, PB_LOOP = 0x102, PB_LOOP_YN1 = 0x104, PB_LOOP_YN2 = 0x106,
@@ -157,9 +159,12 @@ enum : uint16_t {
     SRC_PATTERN_0 = 7, SRC_PCM8 = 8, SRC_ADPCM4 = 9, SRC_PATTERN_0_STEP = 10, SRC_PATTERN_2 = 11,
     SRC_PATTERN_3 = 12, SRC_PCM16 = 16,
     // The earlier build's streamed music: PCM16 from a ring in main memory that the CPU
-    // refills. PB_START's high half is the ucode's place in the ring, which the CPU reads;
-    // the ring is PB_LOOP_END's high half samples long; PB_REMAINING counts down the
-    // stream's samples.
+    // refills. PB_START's high half is the ucode's place in the ring; PB_LOOP_LEFT's high
+    // half is how many samples are left before it wraps, which is what the CPU reads to
+    // tell which part of the ring is playing and so may not be refilled (left at 0, every
+    // part looked free: the CPU decoded the whole stream into the ring during its first
+    // lap and the voice played the same 1.4 s of ring over and over); the ring is
+    // PB_LOOP_END's high half samples long; PB_REMAINING counts down the stream's samples.
     SRC_DIRECT_PCM16 = 0x21,
 };
 
@@ -214,6 +219,7 @@ bool next_sample(PB& pb, Voice& v, int16_t& out) {
         pos++;
         if (ring && pos >= ring) pos = 0;
         pb.put32(PB_START, pos << 16);
+        pb.put32(PB_LOOP_LEFT, (ring ? ring - pos : 0) << 16);
         pb.put32(PB_REMAINING, remaining - 1);
         return true;
     }
@@ -314,6 +320,9 @@ bool voice_samples(PB& pb, Voice& v, int16_t* out) {
 // GCN_JAUDIO_STATS=1 prints, once a second, the loudest mixer volume, the voices mixed and
 // the loudest bus sample before the output volume.
 const bool g_stats = getenv("GCN_JAUDIO_STATS") != nullptr;
+// GCN_JAUDIO_VOICES=1 prints each voice as it starts: its source, pitch, where its samples
+// are and how it loops, and its first two mixer slots.
+const bool g_voice_log = getenv("GCN_JAUDIO_VOICES") != nullptr;
 int32_t g_stat_vmax, g_stat_bmax;
 uint32_t g_stat_mixes, g_stat_frames;
 uint32_t g_stat_srcs, g_stat_filters;
@@ -329,9 +338,15 @@ void render_voice(uint32_t index) {
         // already for an ADPCM wave started part way in; PCM skips PB_START samples).
         memset(&v, 0, sizeof(v));
         const uint16_t src = pb.u16(PB_SOURCE);
+        if (g_voice_log)
+            fprintf(stderr, "[jaudio] voice %2u start: src %02X pitch %04X base %08X start %08X end %08X loop %u@%08X am %u fx %04X mix %04X@%04X %04X@%04X\n",
+                    index, src, pb.u16(PB_PITCH), pb.u32(PB_BASE), pb.u32(PB_START), pb.u32(PB_LOOP_END), pb.u16(PB_LOOP),
+                    pb.u32(PB_LOOP_START), pb.u16(PB_AM_ON), pb.u16(PB_AM_FX), pb.u16(PB_MIXERS), pb.u16(PB_MIXERS + 2),
+                    pb.u16(PB_MIXERS + 8), pb.u16(PB_MIXERS + 10));
         if (src == SRC_DIRECT_PCM16) {
             // The CPU set the stream's length itself; the ring starts at its beginning.
             pb.put32(PB_START, 0);
+            pb.put32(PB_LOOP_LEFT, pb.u32(PB_LOOP_END) & 0xFFFF0000u);
         } else {
             uint32_t base = pb.u32(PB_BASE), end = pb.u32(PB_LOOP_END);
             if (src == SRC_PCM16 || src == SRC_PCM8) {
@@ -344,6 +359,16 @@ void render_voice(uint32_t index) {
         }
         pb.put16(PB_POS_FRAC, 0);
         pb.put16(PB_RESET, 0);
+    }
+    if (g_voice_log && pb.u16(PB_SOURCE) == SRC_DIRECT_PCM16) {
+        static uint32_t n[MAX_VOICES];
+        if (n[index]++ % 200 == 0) {
+            const uint32_t ring = pb.u32(PB_LOOP_END) >> 16, base = pb.u32(PB_BASE);
+            uint32_t sum[4] = {};
+            for (uint32_t i = 0; i < ring; i++) sum[i * 4 / ring] = sum[i * 4 / ring] * 31 + mem_r16(0x80000000u | ((base + 2 * i) & 0x01FFFFFF));
+            fprintf(stderr, "[jaudio] voice %2u stream: pos %05X remaining %08X paused %u ring sums %08X %08X %08X %08X\n", index,
+                    pb.u32(PB_START) >> 16, pb.u32(PB_REMAINING), pb.u16(PB_PAUSE), sum[0], sum[1], sum[2], sum[3]);
+        }
     }
     if (pb.u16(PB_PAUSE)) return;
     if (g_stats) {
