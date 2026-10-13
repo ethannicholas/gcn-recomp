@@ -322,7 +322,10 @@ so the variants never mix with the real ones).
   so that one run answers the question.
   `GCN_DRAWLOG_VERBOSE=1` adds each draw's TEV setup (stage orders, colour and alpha
   combiners, konst selectors, the colour registers and konsts, alpha test, Z and blend
-  modes) and its first vertices with colours and texture coordinates.
+  modes), for a draw with indirect stages its indirect registers (`indmtx=` the three
+  matrices, `indcs=` the coordinate scales, `iref=` the stages' maps and coordinates,
+  `indcmd=` each TEV stage's indirect command) as the raw BP words, and its first vertices
+  with colours and texture coordinates.
 - `GCN_MTXLOG=<frame>` prints the position matrix and projection of every draw in that frame;
   `GCN_PNMLOG=a-b` lists the position matrices used over a window of frames.
 - `GCN_WATCH=a,b,c` (with `GCN_MTXLOG` set) prints those guest addresses every frame;

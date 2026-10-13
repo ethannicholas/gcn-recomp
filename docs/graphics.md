@@ -260,10 +260,18 @@ repeated copy is given is remembered.
 **Copies read back in another format.** An EFB copy is kept as RGBA and sampled as it is,
 so the copy shader writes it as the format the game will read it back as. The two-channel
 copies (RG8, GB8) are read as IA8 -- the first byte alpha, the second intensity -- and a
-16-bit depth copy is RG8. A fog volume indexes a ramp with two of those through indirect
-texturing, which takes its offsets from alpha, blue and green; handed (high, middle, low)
-it took the low byte for the middle and drew a bright line across the fog wherever a byte
-wrapped. Depth copies are also always sampled nearest (`GlTex::depth`): a filter averages
+16-bit depth copy is RG8. The two-byte depth formats store the lower of their bytes first,
+the reverse of the colour order: Z16 is (middle, top), Z16L (low, middle). A fog volume
+indexes a ramp with two Z16 copies through indirect texturing, which takes its column from
+the alpha and its row from the intensity, so the ramp's rows are the top byte and its
+columns the middle. Written (top, middle), the lookup was transposed: the row became the
+middle byte, and since the ramp climbs steeply in its last rows the fog lit up wherever
+that byte neared 255, in bright one-pixel lines along contours of depth. The transposed
+lookup, emulated from the dumped copies (`GCN_COPYDUMP`) and the ramp, saturated 273
+pixels of a chunk where the frame had 253, and with the right order none; the swap removed
+the lines. (An earlier fix had the bytes swapped the other
+way, which removed coarser lines where the top byte changed, and left these.) Z16L is swapped
+by the same rule, unverified by a game. Depth copies are also always sampled nearest (`GlTex::depth`): a filter averages
 packed depths a byte at a time, and at a higher internal scale a full-screen quad no longer
 lands on texel centres. `GCN_EYELOG` prints each copy's format and whether it is of depth.
 A depth copy's coordinate is also snapped in the shader to the centre of the texel GX

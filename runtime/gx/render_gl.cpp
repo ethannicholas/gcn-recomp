@@ -610,6 +610,17 @@ void main() {
         uint zi = min(uint(z * 16777215.0 + 0.5), 16777215u);
         c = vec4(float((zi >> 16) & 255u), float((zi >> 8) & 255u), float(zi & 255u), 255.0) / 255.0;
         c = vec4(c.r, c.g, c.b, c.r);
+        // The two-byte depth formats store the lower of their two bytes first: Z16 is
+        // (middle, top) and Z16L (low, middle), the reverse of the colour order the
+        // swizzles below assume. Read back as IA8 that puts the top byte in the
+        // intensity and the middle in the alpha, and an indirect lookup that takes its
+        // column from the alpha and its row from the intensity indexes a ramp whose rows
+        // are the coarse axis. With the bytes the other way round the lookup is
+        // transposed, and the ramp's steep last rows light up wherever the middle byte
+        // nears 255, in lines across the fog.
+        int dfmt = u_mode & 15;
+        if (dfmt == 11) c = vec4(c.g, c.r, c.b, c.a);
+        else if (dfmt == 12) c = vec4(c.r, c.b, c.g, c.a);
     }
     int fmt = u_mode & 15;
     bool intensity = (u_mode & 16) != 0;
@@ -624,10 +635,7 @@ void main() {
     else if (fmt == 10) c = vec4(c.b);        // B8
     else if (fmt == 1 && !intensity) c = vec4(c.r);
     // The two-channel formats are read back as IA8: the first byte is the alpha and the
-    // second the intensity. A 16-bit depth copy is RG8 -- the depth's top byte, then its
-    // middle -- and a fog volume subtracts two of them a byte at a time; handed the colour
-    // channels as they were, it borrowed from the wrong byte and drew a line wherever
-    // the lower byte wrapped.
+    // second the intensity. (A 16-bit depth copy is RG8 with its bytes swapped above.)
     else if (fmt == 11) c = vec4(c.g, c.g, c.g, c.r);   // RG8
     else if (fmt == 12) c = vec4(c.b, c.b, c.b, c.g);   // GB8
     if (fmt == 4) c.a = 1.0;                  // RGB565
@@ -3047,6 +3055,15 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         fprintf(stderr, "\n        st%u order=%06X cenv=%06X aenv=%06X ksel=%06X", i,
                                 bp[0x28 + i / 2], bp[0xC0 + 2 * i], bp[0xC1 + 2 * i], bp[0xF6 + i / 2]);
                     fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X dstalpha=%06X pecntrl=%06X", bp[0xF3], bp[0x40], bp[0x41], bp[0x42], bp[0x43]);
+                    // The indirect stages: the matrices (BP 0x06-0x0E), the coordinate
+                    // scales (0x25-0x26), the stage references (0x27) and each TEV
+                    // stage's indirect command (0x10-0x1F).
+                    if (((bp[0] >> 16) & 7) != 0) {
+                        fprintf(stderr, "\n        indmtx=");
+                        for (int i = 0; i < 9; i++) fprintf(stderr, "%06X%s", bp[0x06 + i], i == 8 ? "" : ",");
+                        fprintf(stderr, " indcs=%06X,%06X iref=%06X indcmd=", bp[0x25], bp[0x26], bp[0x27]);
+                        for (uint32_t i = 0; i < nstages; i++) fprintf(stderr, "%06X%s", bp[0x10 + i], i + 1 == nstages ? "" : ",");
+                    }
                     fprintf(stderr, "\n        viewport=%.1f,%.1f,%.1f %.1f,%.1f,%.1f scissor=%06X %06X offset=%06X", st.viewport[0],
                             st.viewport[1], st.viewport[2], st.viewport[3], st.viewport[4], st.viewport[5], bp[0x20], bp[0x21], bp[0x59]);
                     // Each bound map's mode register (wrap, filters, LOD bias): BP 0x80-0x83
