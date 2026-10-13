@@ -27,13 +27,13 @@
 #include "recomp.h"
 #include "runtime.h"
 
-uint32_t g_rel_base[64 * REL_MAX_SECTIONS];
+uint32_t g_rel_base[REL_MAX_MODULES * REL_MAX_SECTIONS];
 
 namespace {
 
 // The executable sections currently linked: [base, base + size) maps to canon.
 struct Live { uint32_t base, size, canon, module, info; };
-constexpr int MAX_LIVE = 128;
+constexpr int MAX_LIVE = 512;
 Live g_live[MAX_LIVE];
 std::atomic<int> g_live_count{0};
 
@@ -130,7 +130,7 @@ void rels_linked(uint32_t info) {
         LOG(LOG_OS, "OSLink: module %u at %08X was not recompiled\n", id, info);
         return;
     }
-    if (k >= 64) fatal("rels: too many modules");
+    if (k >= REL_MAX_MODULES) fatal("rels: too many modules");
     forget(info);
     // After a link the header's section table pointer and each section's offset are
     // absolute; the low bit of an offset marks an executable section.

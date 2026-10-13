@@ -42,3 +42,10 @@ mario ?kart
 double ?dash
 \bmkdd\b
 \bGM4E01\b
+
+# Metroid Prime 2: Echoes (prime2-recomp)
+\bechoes\b
+\bprime2\b
+\baether\b
+\bluminoth
+\bG2ME01\b

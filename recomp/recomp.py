@@ -532,6 +532,8 @@ def main():
     table.append('\t{0, 0, 0, 0, 0, 0}};')
     table.append(f'const uint32_t g_recomp_module_count = {len(modules)};')
     # The relocatable modules: their canonical sections, for runtime/rels.cpp.
+    if len(rels) > 256:
+        sys.exit(f'error: {len(rels)} modules, more than REL_MAX_MODULES (runtime/recomp.h)')
     table.append('const RecompRel g_recomp_rels[] = {')
     for mid, name, secs in rels:
         table.append(f'\t{{{mid}u, "{name}", {len(secs)}u, {{' +

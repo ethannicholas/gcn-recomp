@@ -1,7 +1,7 @@
 # Working notes for this repository
 
 This is the shared GameCube recompilation layer used by the per-game projects
-(`~/Source/prime-recomp` and `~/Source/bluestorm-recomp`). It was split out of
+(`~/Source/prime-recomp`, `~/Source/prime2-recomp`, `~/Source/bluestorm-recomp` and others). It was split out of
 bluestorm-recomp on 2026-10-07, and bluestorm-recomp was rebased onto it the next day. The
 Android and OpenXR frontends moved here on 2026-10-08, when Prime wanted a headset build, as
 `android/`, with the game's own decisions behind `vr::GameHooks`; bluestorm-recomp still

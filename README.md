@@ -9,6 +9,7 @@ It is the common layer under per-game projects, each of which supplies its own g
 layout and steering files and nothing else:
 
 - [prime-recomp](https://github.com/ethannicholas/prime-recomp) — *Metroid Prime*
+- [prime2-recomp](https://github.com/ethannicholas/prime2-recomp) — *Metroid Prime 2: Echoes*
 - [bluestorm-recomp](https://github.com/ethannicholas/bluestorm-recomp) — *Wave Race: Blue
   Storm*, where this code was first written
 

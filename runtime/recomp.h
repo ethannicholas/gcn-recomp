@@ -291,11 +291,13 @@ uint32_t modules_canon(uint32_t a);
    game links them; see runtime/rels.cpp. A relocated immediate is computed from the base
    OSLink gave its target section, as the linker would have written it. */
 #define REL_MAX_SECTIONS 32
+#define REL_MAX_MODULES 256
 typedef struct { uint32_t index, canon, size, exec; } RecompRelSection;
 typedef struct { uint32_t id; const char* name; uint32_t count; RecompRelSection sections[REL_MAX_SECTIONS]; } RecompRel;
 extern const RecompRel g_recomp_rels[];
 extern const uint32_t g_recomp_rel_count;
-extern uint32_t g_rel_base[];  /* [module * REL_MAX_SECTIONS + section]: where it is now */
+extern uint32_t g_rel_base[];  /* [module * REL_MAX_SECTIONS + section]: where it is now;
+                                  REL_MAX_MODULES modules */
 #define REL_V(m, s, a) (g_rel_base[(m) * REL_MAX_SECTIONS + (s)] + (uint32_t)(a))
 #define REL_LO(m, s, a) ((uint16_t)REL_V(m, s, a))
 #define REL_HI(m, s, a) ((uint16_t)(REL_V(m, s, a) >> 16))
