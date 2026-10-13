@@ -78,6 +78,15 @@ game boots. Deleting the file is always safe. The startup line reports what happ
 [shaders] 29 programs from cache (0 from binaries, 29 compiled) in 44 ms
 ```
 
+The header holds a version and the size of `ShaderKey`; bump `kCacheVersion` whenever a
+record's layout or a key field's meaning changes (a new field changes the size by itself). A
+file with any other header is replaced (`[shaders] replacing unrecognised cache`). It used
+to be only skipped. The programs compiled after that were then appended behind the old
+header, so the file was skipped on every later run as well. From the version bump on
+2026-10-12 to 2026-10-13, every run compiled every program in the middle of play, about a
+thousand of them at 15-40 ms each on a Quest 3, while the file grew to 60 MB that nothing
+read. If the startup line is missing, look for that message.
+
 ## Stereo scaffolding
 
 `gx/render_gl.cpp` and `gx/shadergen.cpp` carry the stereo machinery: `render_execute_eye`,
@@ -197,6 +206,16 @@ lands off; one game turned the pair off for that. Cost is a second flat pass,
 about twice theater's; the eye path is not involved, so the panel keeps the compositor's
 reprojection. `GCN_THEATER_STEREO=<metres>` runs it on the desktop and in the harness,
 with the frame dumps in `_l`/`_r` pairs.
+
+A frontend that gives its views different internal scales (`stereo_scale`, `theater_scale`)
+changes the EFB's size on the first frame of the new view. `render_set_internal_scale`
+blits the old contents into the new targets. A console frame starts from what the last
+display copy left, not from a clear, so new targets left undefined meant the first frame
+drew over garbage, and garbage depth fails every test. That frame's first pass came out
+empty: when leaving stereo, the left image of the pair was black (or garbage) for one game
+frame, and the right image was whole because the left pass's display copy had cleared the
+EFB. EFB copies are still dropped at a change of scale, so a copy made before the change
+and sampled after it is missing for a frame.
 
 ## What the render thread spends a stereo frame on
 

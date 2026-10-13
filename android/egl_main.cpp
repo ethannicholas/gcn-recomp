@@ -555,6 +555,17 @@ int main(int argc, char** argv) {
             }
         }
         if (auto b = gx::take_batch(4)) {
+            // GCN_RESCALE=<frame>:<scale> changes the internal scale before that presented
+            // frame, as the app does when it moves between stereo and theater
+            // (stereo_scale, theater_scale).
+            static int rescale_at = -1, rescale_to = 0;
+            static const bool rescale = getenv("GCN_RESCALE") &&
+                                        sscanf(getenv("GCN_RESCALE"), "%d:%d", &rescale_at, &rescale_to) == 2;
+            if (rescale && (int)presented == rescale_at) {
+                gx::render_set_internal_scale(rescale_to);
+                fprintf(stderr, "[rescale] frame %u: internal scale %d\n", presented, rescale_to);
+                rescale_at = -1;
+            }
             // GCN_STEREOLOG=1 prints what the game's stereo hook answers whenever the answer
             // changes, which is how a hook is checked against dumped frames without a headset.
             // Asked every frame whether or not it is logged, as the app asks it: a game's

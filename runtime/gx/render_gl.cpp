@@ -295,7 +295,10 @@ static GLuint link(GLuint vs, GLuint fs) {
 static std::string g_shader_cache_path;
 static bool g_binaries_supported = false;
 static constexpr uint32_t kCacheMagic = 0x43535257;  // "WRSC"
-static constexpr uint32_t kCacheVersion = 2;
+// Bumped whenever a record's layout or a key's meaning changes. The key's size goes in
+// beside it, so a field added to ShaderKey retires the file even without a bump.
+static constexpr uint32_t kCacheVersion = 3;
+static constexpr uint32_t kCacheFormat = kCacheVersion << 16 | (uint32_t)sizeof(ShaderKey);
 
 static uint64_t hash_str(const char* s, uint64_t h = 1469598103934665603ull) {
     for (; s && *s; s++) h = (h ^ (uint8_t)*s) * 1099511628211ull;
@@ -344,7 +347,7 @@ static void shader_cache_write_record(FILE* f, const ShaderKey& k, uint64_t src_
 }
 
 static void shader_cache_write_header(FILE* f) {
-    const uint32_t magic = kCacheMagic, ver = kCacheVersion;
+    const uint32_t magic = kCacheMagic, ver = kCacheFormat;
     const uint64_t drv = driver_id();
     fwrite(&magic, sizeof(magic), 1, f);
     fwrite(&ver, sizeof(ver), 1, f);
@@ -482,12 +485,21 @@ static void shader_cache_open() {
     if (L.data.empty()) return;
     uint32_t magic = 0, ver = 0;
     uint64_t drv = 0;
-    if (L.data.size() < 16) return;
-    memcpy(&magic, L.data.data(), 4);
-    memcpy(&ver, L.data.data() + 4, 4);
-    memcpy(&drv, L.data.data() + 8, 8);
-    if (magic != kCacheMagic || ver != kCacheVersion) {
-        fprintf(stderr, "[shaders] ignoring unrecognised cache %s\n", g_shader_cache_path.c_str());
+    if (L.data.size() >= 16) {
+        memcpy(&magic, L.data.data(), 4);
+        memcpy(&ver, L.data.data() + 4, 4);
+        memcpy(&drv, L.data.data() + 8, 8);
+    }
+    if (magic != kCacheMagic || ver != kCacheFormat) {
+        // Started afresh, not just skipped. The programs compiled from here on are appended
+        // to this file, and behind the old header they would be skipped again on every run
+        // after, each one compiled anew in the middle of play.
+        fprintf(stderr, "[shaders] replacing unrecognised cache %s\n", g_shader_cache_path.c_str());
+        L.data.clear();
+        if (FILE* f = fopen(g_shader_cache_path.c_str(), "wb")) {
+            shader_cache_write_header(f);
+            fclose(f);
+        }
         return;
     }
     L.same_driver = drv == driver_id();
@@ -825,14 +837,53 @@ void render_set_internal_scale(int scale) {
     if (scale < 1) scale = 1;
     if (scale > kMaxInternalScale) scale = kMaxInternalScale;
     if (scale == g_scale) return;
+    const int old_scale = g_scale;
     g_scale = scale;
     gl_state_invalidate();
     uniforms_invalidate();
+    // The EFB keeps what it held, scaled. A frame on the console does not begin with a
+    // clear -- the previous frame's display copy cleared the EFB -- so the first frame drawn
+    // after a change of scale would otherwise start from undefined colour and depth, and
+    // depth that fails every test leaves the frame empty. A frontend changes the scale as it
+    // moves between its views, and the first pass of the new view showed it: the left image
+    // of a stereo pair came out black for a frame while the right, drawn after the left's
+    // display copy had cleared the EFB, was whole.
+    GLuint color = 0, depth = 0;
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_efb_color);
+    glGenTextures(1, &color);
+    glBindTexture(GL_TEXTURE_2D, color);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * g_scale, EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glBindTexture(GL_TEXTURE_2D, g_efb_depth);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenTextures(1, &depth);
+    glBindTexture(GL_TEXTURE_2D, depth);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, EFB_W * g_scale, EFB_H * g_scale, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_efb_fbo);
+    // A blit is cut by the scissor and the write masks; the state cache was just
+    // invalidated, so the next draw sets them again.
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    const GLint ow = EFB_W * old_scale, oh = EFB_H * old_scale, nw = EFB_W * g_scale, nh = EFB_H * g_scale;
+    glBlitFramebuffer(0, 0, ow, oh, 0, 0, nw, nh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBlitFramebuffer(0, 0, ow, oh, 0, 0, nw, nh, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &g_efb_color);
+    glDeleteTextures(1, &g_efb_depth);
+    g_efb_color = color;
+    g_efb_depth = depth;
     for (auto it = g_textures.begin(); it != g_textures.end();) {
         if (it->second.efb) {
             glDeleteTextures(1, &it->second.tex);

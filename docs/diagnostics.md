@@ -114,7 +114,9 @@ of guest RAM beside the frames, for finding the state such a hook reads.
 `GCN_THEATER_STEREO=<metres>` draws the flat frame as the stereo pair the headset hangs on
 its panel with `theater_stereo` (see "The theater panel as a stereo pair" in `graphics.md`),
 the eyes that far apart; the dumps come as `frame_NNNNN_l.png` and `_r.png`, and the
-desktop window shows the right eye's.
+desktop window shows the right eye's. `GCN_RESCALE=<frame>:<scale>` (the harness) changes
+the internal scale before that presented frame, as the app does when it moves between
+stereo and theater, so the first frame after the change can be dumped.
 
 The app has no environment of its own, so `gcn_env.txt` in its files directory
 (`/sdcard/Android/data/<package>/files/`), one `KEY=VALUE` per line, is put into it before
