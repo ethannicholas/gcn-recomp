@@ -317,7 +317,10 @@ so the variants never mix with the real ones).
 - `GCN_RAM_DUMP_AT=<frame>,...` writes the guest RAM at the end of each of those submitted
   frames (the count `GCN_INPUT` keys on) to `GCN_RAM_DUMP_DIR` as `ram_<frame>.bin`, from
   the guest thread; for finding a game's variables by comparing its memory over a scripted
-  run.
+  run. The log line names the presented frame it was taken at too, the number the frame
+  dumps carry, so a dump can be matched to what was on screen. The dump is physical RAM: a
+  game that maps memory through its page tables has its paged variables wherever their
+  pages happen to be, and its page table (in the dump too) says which virtual page each is.
 - `GCN_TOKLOG=1` prints every PE token as it is signalled, and every draw-done (finish)
   as it is raised and acknowledged, with a note when one is raised while the last is
   still pending.
@@ -327,8 +330,8 @@ so the variants never mix with the real ones).
 - Build with `-DGCN_TRACE_CALLS=ON` to keep a real guest call stack, printed by the crash
   dump (`GCN_TRACE_DEPTH` sets how many frames). Compiling with `-DGCN_WATCH` adds
   `GCN_COUNT=addr,...` (call counts per function, printed on interrupt),
-  `GCN_WATCH_ADDR=<hex>` (report every change to that word) and the store histogram
-  below.
+  `GCN_WATCH_ADDR=<hex>` (report every change to that word; a page-mapped address is read
+  with `vm_peek32` and is silent until the game maps it) and the store histogram below.
 - `--log-all` enables every log category, including the DSP mailbox and DVD reads (off by
   default, since the game reads the disc every frame);
   `--log=exi,dsp` enables just those (`cpu os hw dvd gx vi si exi dsp ai thr`).

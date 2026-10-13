@@ -12,6 +12,7 @@
 //   * OSLoadContext(ctx) resumes whichever host thread owns the binding (possibly
 //     ourselves), or spawns a new host thread for a never-run context.
 #include "runtime.h"
+#include "mmu.h"
 #include "platform.h"
 #include "input_log.h"
 #include <atomic>
@@ -576,7 +577,10 @@ extern "C" void debug_watch_check(CPU* c, uint32_t fn) {
     static uint32_t addr = [] { const char* e = getenv("GCN_WATCH_ADDR"); return e ? (uint32_t)strtoul(e, nullptr, 16) : 0u; }();
     static uint32_t last = 0xFFFFFFFF;
     if (!addr) return;
-    uint32_t v = mem_r32(addr);
+    // Peeked, so that a watch on a page-mapped address reads nothing until the game maps it
+    // rather than faulting.
+    uint32_t v;
+    if (!vm_peek32(addr, &v)) return;
     if (v != last) {
         fprintf(stderr, "[watch] %08X: %08X -> %08X at %s %08X %s (lr %08X)\n", addr, last, v,
                 (fn & 1) ? "store" : "entry", fn & ~1u, (fn & 1) ? "" : func_name(fn), c->lr);

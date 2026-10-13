@@ -238,3 +238,24 @@ extern "C" uint32_t vm_translate(uint32_t ea, int write) {
     }
     fatal("MMU: the game's handler did not map %08X", ea);
 }
+
+bool vm_peek32(uint32_t ea, uint32_t* out) {
+    if (ea & 3) return false;
+    if (ea >= 0x80000000u || ea < GCN_VM_LO) {
+        if ((ea & 0x3FFFFFFFu) + 4 > RAM_SIZE) return false;
+        *out = mem_r32(ea);
+        return true;
+    }
+    uint32_t phys;
+    const uint64_t e = g_tlb[(ea >> 12) & (TLB_ENTRIES - 1)].load(std::memory_order_relaxed);
+    if ((uint32_t)(e >> 32) == (ea >> 12) && (e & 1)) {
+        phys = ((uint32_t)e & 0xFFFFF000u) | (ea & 0xFFF);
+    } else {
+        Pte p;
+        if (!g_sdr1 || !pte_find(ea, &p)) return false;
+        phys = (p.w1 & 0xFFFFF000u) | (ea & 0xFFF);
+    }
+    if (phys + 4 > RAM_SIZE) return false;
+    *out = mem_r32(0x80000000u | phys);
+    return true;
+}

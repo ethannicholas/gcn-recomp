@@ -3,6 +3,7 @@
 #include "../runtime.h"
 #include "gx.h"
 #include "render.h"
+#include "render_gl.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -80,7 +81,8 @@ static void ram_dump_frame(uint32_t frame) {
     if (FILE* f = fopen(path, "wb")) {
         fwrite(g_mem, 1, RAM_SIZE, f);
         fclose(f);
-        fprintf(stderr, "[ram] frame %u written to %s\n", frame, path);
+        // The presented frame too, which is what the frame dumps are numbered by.
+        fprintf(stderr, "[ram] frame %u (presented %u) written to %s\n", frame, gx::present_count(), path);
     }
 }
 
