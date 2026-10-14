@@ -501,6 +501,17 @@ goes to stderr, to the crash record (first line only) and to `<save dir>/panic.t
 the one to read on a device after the fact. A host fault inside guest memory prints the
 guest address and every thread's registers.
 
+`OSResetSystem` belongs in `hle.txt` too. Games return to their title by resetting the
+console, after a death or a quit, and the runtime emulates no reboot. Left to the SDK, a
+restart clears the exception and interrupt tables at 0x80003000 on its way to loading the
+apploader, and the next interrupt calls a null handler (`call_indirect: no function at
+00000000`, with an OS idle loop for its LR). The replacement prints `[reset] the game reset
+the console (restart, code N)`, closes the input log and hands over to the frontend's reset
+handler (`set_reset_handler`). The desktop runs itself again (not in a replay), the
+headset app starts its activity again in a new process, and the harness and the benchmark
+exit 0. `GCN_RESET_AFTER=<seconds>` makes a reset happen that far into guest time, for
+trying a frontend's restart without playing to one.
+
 ## The guest heap
 
 The SDK's OSAlloc keeps no record of who owns a cell, so when a game panics on a failed

@@ -69,6 +69,7 @@ void plat_watchdog(int seconds, int exit_code) {
 }
 
 void plat_exit_now(int code) { _exit(code); }
+void plat_relaunch(char** argv) { fflush(nullptr); _execv(argv[0], argv); }
 
 static void (*g_on_interrupt)();
 static void (*g_on_fault)(const void*, int);
@@ -253,6 +254,7 @@ void plat_watchdog(int seconds, int exit_code) {
 }
 
 void plat_exit_now(int code) { _exit(code); }
+void plat_relaunch(char** argv) { fflush(nullptr); execv("/proc/self/exe", argv); execvp(argv[0], argv); }
 
 static void (*g_on_interrupt)();
 static void (*g_on_fault)(const void*, int);

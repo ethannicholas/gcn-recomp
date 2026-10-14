@@ -222,6 +222,13 @@ static bool pump_events() {
 
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
+    // The game resetting the console starts it again in a fresh process, as a power cycle
+    // would -- except in a replay, which would only replay itself from the start again.
+    static char** s_argv = argv;
+    set_reset_handler([](uint32_t, uint32_t) {
+        if (input_replay_active()) return;
+        plat_relaunch(s_argv);
+    });
     // Default: the image the build was configured with, else the first image in ./rom
     std::string iso_default = GCN_DEFAULT_ISO;
     if (!plat_readable(iso_default.c_str())) iso_default = plat_find_file("rom", ".iso");

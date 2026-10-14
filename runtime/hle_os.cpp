@@ -1,5 +1,7 @@
-// HLE replacements for a few SDK OS functions (debug output).
+// HLE replacements for a few SDK OS functions (debug output, and the reset).
 #include "runtime.h"
+#include "input_log.h"
+#include "platform.h"
 
 std::string guest_str(uint32_t addr, size_t max) {
     std::string s;
@@ -146,3 +148,25 @@ extern "C" void hle_OSPanic(CPU* c) {
     }
     fatal("guest panic: %s:%u: %s", file.c_str(), line, msg.c_str());
 }
+
+// ---------------------------------------------------------------------------
+// OSResetSystem. On the console this runs the SDK's reset callbacks and then either
+// reboots the game from the disc (a restart: __OSReboot clears the exception and interrupt
+// tables and loads the apploader) or resets the hardware. Neither is emulated, and a game
+// left to carry on after its own reboot has begun dies on the next interrupt, through the
+// table it has just cleared. So the call ends the run here, and the frontend starts the
+// game again (guest_reset). The memory card needs nothing: it is written out at the end
+// of each card command.
+static ResetHandler g_reset_handler;
+void set_reset_handler(ResetHandler fn) { g_reset_handler = fn; }
+
+void guest_reset(uint32_t kind, uint32_t code) {
+    static const char* const kinds[] = {"restart", "hot reset", "shutdown"};
+    fprintf(stderr, "[reset] the game reset the console (%s, code %u)\n", kind < 3 ? kinds[kind] : "unknown", code);
+    input_log_end();
+    fflush(nullptr);
+    if (g_reset_handler && kind != 2) g_reset_handler(kind, code);
+    plat_exit_now(0);
+}
+
+extern "C" void hle_OSResetSystem(CPU* c) { guest_reset(c->r[3], c->r[4]); }

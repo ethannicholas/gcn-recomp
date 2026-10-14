@@ -185,6 +185,38 @@ static void apply_env_file(const std::string& dir) {
     plat_exit_now(0);
 }
 
+// The game reset the console (guest_reset): the app's own launch intent, started with its
+// task cleared, after which guest_reset ends this process and Android starts the activity
+// in a new one -- a clean console, as a power cycle gives. The process cannot run a second
+// game itself (android_main refuses to be entered twice), hence the round trip.
+static void relaunch(uint32_t, uint32_t) {
+    JavaVM* vm = g_app->activity->vm;
+    JNIEnv* env = nullptr;
+    if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) { LOGE("relaunch: cannot attach to the VM"); return; }
+    jobject act = g_app->activity->clazz;
+    jclass act_cls = env->GetObjectClass(act);
+    jobject pm = env->CallObjectMethod(act, env->GetMethodID(act_cls, "getPackageManager", "()Landroid/content/pm/PackageManager;"));
+    jobject pkg = env->CallObjectMethod(act, env->GetMethodID(act_cls, "getPackageName", "()Ljava/lang/String;"));
+    jobject intent = env->CallObjectMethod(
+        pm, env->GetMethodID(env->GetObjectClass(pm), "getLaunchIntentForPackage", "(Ljava/lang/String;)Landroid/content/Intent;"), pkg);
+    if (env->ExceptionCheck() || !intent) {
+        env->ExceptionClear();
+        LOGE("relaunch: no launch intent");
+        return;
+    }
+    const jint kNewTask = 0x10000000, kClearTask = 0x00008000;  // Intent.FLAG_ACTIVITY_*
+    env->CallObjectMethod(intent, env->GetMethodID(env->GetObjectClass(intent), "addFlags", "(I)Landroid/content/Intent;"),
+                          kNewTask | kClearTask);
+    env->CallVoidMethod(act, env->GetMethodID(act_cls, "startActivity", "(Landroid/content/Intent;)V"), intent);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        LOGE("relaunch: startActivity failed");
+        return;
+    }
+    LOGI("the game reset the console: starting it again");
+}
+
 void android_main(android_app* app) {
     // Belt and braces for the same thing: if the glue ever starts a second android_main
     // while the first is still in its loop, the process still only runs one.
@@ -247,6 +279,7 @@ void android_main(android_app* app) {
     }
 
     apply_env_file(dir);
+    set_reset_handler(relaunch);
     mem_init();
     timing_init();
     input_script_init(read_script(dir).c_str());

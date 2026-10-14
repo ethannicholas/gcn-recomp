@@ -51,7 +51,7 @@ The game project provides:
 - `analysis/symbols.txt` — the DOL's function layout in decomp-toolkit's format, either
   from `dtk dol split` (`tools/fetch_dtk.sh` downloads it) or from a decompilation project.
 - `recomp/hle.txt` — functions whose body the runtime replaces (`OSSaveContext`,
-  `OSLoadContext`, `OSReport`, `OSPanic` at minimum).
+  `OSLoadContext`, `OSReport`, `OSPanic` and `OSResetSystem` at minimum).
 - `recomp/special_calls.txt` — the address of `OSSaveContext`, whose call sites become
   resume points.
 - `recomp/idle.txt` — the backward branch of the SDK scheduler's idle spin (`SelectThread`

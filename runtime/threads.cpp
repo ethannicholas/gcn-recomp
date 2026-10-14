@@ -294,6 +294,10 @@ extern "C" void irq_poll(CPU* c) {
     clock_pace();
     events_run_due();
     uint64_t now = now_ticks();
+    // GCN_RESET_AFTER=<seconds>: the game resets the console (a restart) that far into
+    // guest time, for trying a frontend's restart without playing to a reset.
+    static const double reset_after = getenv("GCN_RESET_AFTER") ? atof(getenv("GCN_RESET_AFTER")) : 0.0;
+    if (reset_after > 0.0 && now >= (uint64_t)(reset_after * TB_FREQ)) guest_reset(0, 0);
     if (g_dec_deadline.load() <= now) { g_dec_pending = true; g_dec_deadline = UINT64_MAX; }
     clock_update_limit();
     bool ext = (g_pi_intsr.load() & g_pi_intmr.load()) != 0;

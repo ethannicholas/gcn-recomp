@@ -106,6 +106,16 @@ void rtc_set_base(time_t utc);  // what the RTC reads at guest time zero (hw/exi
 // reports every change to it with where it was noticed, and after a DMA the transfer
 // itself (debug_guard_dma), so a word cleared by the runtime's own write is named at once
 // and one cleared by the guest is narrowed to the stretch since the last poll.
+// The game resetting the console: OSResetSystem (hle.txt), with the SDK's kind -- 0 a
+// restart, which reboots the game from the disc, 1 a hot reset, 2 a shutdown -- and the
+// reset code the game passes on to itself. A game returns to its title this way (after a
+// death, say), and the runtime emulates no reboot, so it ends the run instead: the input
+// log is closed, and the frontend's handler starts the game again however it can (a new
+// process is a clean console). Without a handler, or for a shutdown, the process exits.
+using ResetHandler = void (*)(uint32_t kind, uint32_t code);
+void set_reset_handler(ResetHandler fn);
+[[noreturn]] void guest_reset(uint32_t kind, uint32_t code);
+
 using GuestCheck = const char* (*)();
 void debug_set_guest_check(GuestCheck fn);
 void debug_guest_check(const char* where);

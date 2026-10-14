@@ -23,6 +23,9 @@ void plat_watchdog(int seconds, int exit_code);
 void plat_record_fatal(const char* msg);
 // Exit immediately without running destructors or flushing other threads' buffers.
 [[noreturn]] void plat_exit_now(int code);
+// Replace this process with a fresh run of the same program and arguments (argv as main
+// had it). Returns only if that failed.
+void plat_relaunch(char** argv);
 
 // ---- threads ----
 // Start a thread with a `stack_size`-byte stack (reserved, not committed).
