@@ -338,10 +338,37 @@ void threads_start_boot(uint32_t entry) {
 static GuestCheck g_guest_check;
 void debug_set_guest_check(GuestCheck fn) { g_guest_check = fn; }
 
-#ifdef GCN_GUEST_CHECKS
 uint32_t gx_frames_submitted();
 void debug_dump_threads();
+
+static const uint32_t g_guard = getenv("GCN_GUARD") ? (uint32_t)strtoul(getenv("GCN_GUARD"), nullptr, 16) : 0;
+static uint32_t g_guard_last;
+static bool g_guard_have;
+
+static void guard_check(const char* where) {
+    if (!g_guard) return;
+    const uint32_t v = mem_r32(g_guard);
+    if (g_guard_have && v == g_guard_last) return;
+    if (g_guard_have)
+        fprintf(stderr, "[guard] %08X: %08X -> %08X at %s, frame %u, guest time %.4f s\n", g_guard, g_guard_last, v,
+                where, (unsigned)gx_frames_submitted(), (double)now_ticks() / TB_FREQ);
+    g_guard_last = v;
+    g_guard_have = true;
+}
+
+void debug_guard_dma(const char* what, uint32_t addr, uint32_t len) {
+    if (!g_guard) return;
+    // Main memory is mirrored at 0x0, 0x8 and 0xC; the locked cache at 0xE is not RAM.
+    const bool ram = (addr >> 28) == 0x0 || (addr >> 28) == 0x8 || (addr >> 28) == 0xC;
+    const uint32_t a = addr & 0x01FFFFFFu, g = g_guard & 0x01FFFFFFu;
+    if (ram && g + 4 > a && g < a + len)
+        fprintf(stderr, "[guard] %08X is inside %s to %08X, %X bytes\n", g_guard, what, addr, len);
+    guard_check(what);
+}
+
 void debug_guest_check(const char* where) {
+    guard_check(where);
+#ifdef GCN_GUEST_CHECKS
     if (!g_guest_check) return;
     const char* what = g_guest_check();
     if (!what) return;
@@ -351,8 +378,8 @@ void debug_guest_check(const char* where) {
     debug_dump_threads();
     if (getenv("GCN_GUEST_CHECK_CONTINUE")) { g_guest_check = nullptr; return; }
     plat_exit_now(3);
-}
 #endif
+}
 
 void threads_request_quit() {
     g_quit = true;

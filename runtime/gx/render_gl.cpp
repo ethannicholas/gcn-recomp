@@ -1946,6 +1946,7 @@ static void copy_writeback(const EfbCopyCmd& c) {
                 blk[2 * i + 1] = (uint8_t)v;
             }
         }
+    debug_guard_dma("EFB copy write-back", c.dest, bw * bh * (fmt == 6 ? 64 : 32));
     g_copy_writebacks_done++;
 }
 

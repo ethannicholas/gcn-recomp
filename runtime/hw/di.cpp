@@ -75,6 +75,7 @@ static void di_execute() {
         debug_guest_check("before DVD read");
         if (fit && !iso_read(offset, phys_ptr(g_dimar), fit))
             LOG(LOG_DVD, "read past end of image");
+        debug_guard_dma("DVD read", g_dimar, len);
         debug_guest_check("after DVD read");
         g_dimar += len;
         g_dilen = 0;

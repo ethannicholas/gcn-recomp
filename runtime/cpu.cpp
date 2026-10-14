@@ -272,7 +272,7 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
             if (len == 0) len = 128;
             uint32_t mem = dmau & ~0x1Fu, lc = v & ~0x1Fu;
             if (v & 0x10) memcpy(HOST_W(lc), HOST(mem), len * 32);   // load: mem -> LC
-            else { memcpy(HOST_W(mem), HOST(lc), len * 32); debug_guest_check("after locked-cache DMA"); }  // store: LC -> mem
+            else { memcpy(HOST_W(mem), HOST(lc), len * 32); debug_guard_dma("locked-cache DMA", mem, len * 32); debug_guest_check("after locked-cache DMA"); }  // store: LC -> mem
             spr_ref(c, spr) &= ~2u;
         }
         return;
@@ -281,8 +281,8 @@ extern "C" void hle_mtspr(CPU* c, uint32_t spr, uint32_t v) {
     }
 }
 
-extern "C" void hle_dcbz(CPU* c, uint32_t ea) { memset(HOST_W(ea & ~31u), 0, 32); }
-extern "C" void hle_dcbz_l(CPU* c, uint32_t ea) { memset(HOST_W(ea & ~31u), 0, 32); }
+extern "C" void hle_dcbz(CPU* c, uint32_t ea) { memset(HOST_W(ea & ~31u), 0, 32); debug_guard_dma("dcbz", ea & ~31u, 32); }
+extern "C" void hle_dcbz_l(CPU* c, uint32_t ea) { memset(HOST_W(ea & ~31u), 0, 32); debug_guard_dma("dcbz_l", ea & ~31u, 32); }
 extern "C" void hle_dcbi(CPU* c, uint32_t ea) {}
 
 extern "C" void hle_lswi(CPU* c, uint32_t ea, int rd, int n) {

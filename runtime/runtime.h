@@ -99,15 +99,17 @@ void rtc_set_base(time_t utc);  // what the RTC reads at guest time zero (hw/exi
 // within a few hundred microseconds of the write that caused it rather than at the crash
 // it leads to. With an exact replay that is enough to find the writer: note the word the
 // check names, replay with GCN_WATCH_ADDR set to it. The checks are a function of guest
-// state only, so they do not perturb a replay. Without the build option the calls
-// compile to nothing and the hook is never called.
+// state only, so they do not perturb a replay. Without the build option the hook is never
+// called.
+//
+// The same points watch one word without the build option: GCN_GUARD=<hex address>
+// reports every change to it with where it was noticed, and after a DMA the transfer
+// itself (debug_guard_dma), so a word cleared by the runtime's own write is named at once
+// and one cleared by the guest is narrowed to the stretch since the last poll.
 using GuestCheck = const char* (*)();
 void debug_set_guest_check(GuestCheck fn);
-#ifdef GCN_GUEST_CHECKS
 void debug_guest_check(const char* where);
-#else
-inline void debug_guest_check(const char*) {}
-#endif
+void debug_guard_dma(const char* what, uint32_t addr, uint32_t len);
 
 // GCN_PROFILE=<file>: sample the host's program counters while the game runs, and write the
 // histogram out at the end (host_profile.cpp). Linux and Android only.
