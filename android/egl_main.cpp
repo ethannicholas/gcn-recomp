@@ -581,6 +581,16 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "[stereo] frame %u: %s\n", presented, want ? "stereo" : "theater");
                 }
             }
+            // And whether the panel would be a pair (wants_panel_pair), so a replay in --eye,
+            // where the game sees the eyes as it does in the headset, can show it too.
+            if (stereolog && vr::game_hooks().wants_panel_pair) {
+                static int last_pair = -1;
+                const int pair = vr::game_hooks().wants_panel_pair(*b) ? 1 : 0;
+                if (pair != last_pair) {
+                    last_pair = pair;
+                    fprintf(stderr, "[stereo] frame %u: panel %s\n", presented, pair ? "pair" : "flat");
+                }
+            }
             if (g_eye_mode) {
                 float P[16], V[16], H[16];
                 eye_matrices(P, V, H);
@@ -664,9 +674,11 @@ int main(int argc, char** argv) {
                         dump_fbo(g_flat_fbo, 640, 480, path);
                     }
                 }
-            } else if (theater_stereo_m > 0.0f) {
+            } else if (theater_stereo_m > 0.0f &&
+                       (!vr::game_hooks().wants_panel_pair || vr::game_hooks().wants_panel_pair(*b))) {
                 // GCN_THEATER_STEREO=<metres>: theater as the app draws it with
-                // theater_stereo, two flat passes a frame, for its cost on the device.
+                // theater_stereo, two flat passes a frame, for its cost on the device. A
+                // frame the game wants flat (wants_panel_pair) is drawn flat, as the app does.
                 const float u = g_vrcfg.units_per_metre;
                 if (gx::render_execute_stereo_pair(*b, 0, 0, theater_stereo_m * g_vrcfg.theater_depth * u, 3.2f * u))
                     presented++;

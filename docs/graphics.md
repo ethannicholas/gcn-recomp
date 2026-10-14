@@ -176,7 +176,9 @@ than a photograph: `render_execute_stereo_pair` draws the flat frame twice, each
 every perspective draw seen from half the eyes' separation to one side of the game's
 camera, and the headset frontend hangs the two images on the same panel as two quad layers
 with `eyeVisibility` left and right (`theater_stereo` in vr.txt). Orthographic draws are
-untouched and sit on the panel.
+untouched and sit on the panel. A screen that reads badly as a pair can be drawn flat, one
+image for both eyes: the game's `wants_panel_pair` hook (`runtime/vr_game.h`) is asked for
+every panel frame, and the harness and the desktop's `GCN_THEATER_STEREO` follow it too.
 
 The per-draw change is in the projection alone, because vertices arrive in the camera's view
 space: moving the view by `e` shifts clip x by `-P00*e` (P's translation column), and a

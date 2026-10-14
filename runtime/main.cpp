@@ -412,11 +412,13 @@ int main(int argc, char** argv) {
             glBindFramebuffer(GL_READ_FRAMEBUFFER, g_eye_fbo);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glBlitFramebuffer(0, 0, kEyeW, kEyeH, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-        } else if (theater_stereo_m > 0.0f) {
+        } else if (theater_stereo_m > 0.0f &&
+                   (!vr::game_hooks().wants_panel_pair || vr::game_hooks().wants_panel_pair(*b))) {
             // GCN_THEATER_STEREO=<metres>: the flat frame as the stereo pair a headset
             // would hang on its panel, the eyes that far apart; the window shows the right
             // eye's, and the frame dumps come in pairs (_l, _r). The panel is the headset
-            // frontend's, 3.2 m wide (kQuadW there), in the game's units.
+            // frontend's, 3.2 m wide (kQuadW there), in the game's units. A frame the game
+            // wants flat (wants_panel_pair) is drawn flat, as the headset does.
             static const float u = [] {
                 VrConfig d;
                 if (vr::game_hooks().config_defaults) vr::game_hooks().config_defaults(d);

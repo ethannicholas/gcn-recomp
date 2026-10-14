@@ -1339,7 +1339,9 @@ void run() {
             // one rate where a fade makes any mismatch visible. It also cost a full-screen
             // blit per display frame.
             uint32_t idx = 0, idx_r = 0;
-            const bool pair = g_vrcfg.theater_stereo && g_xr.swapchain_r != XR_NULL_HANDLE;
+            const auto wants_pair = vr::game_hooks().wants_panel_pair;
+            const bool pair = g_vrcfg.theater_stereo && g_xr.swapchain_r != XR_NULL_HANDLE && batch &&
+                              (!wants_pair || wants_pair(*batch));
             XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             if (batch && XR_SUCCEEDED(xrAcquireSwapchainImage(g_xr.swapchain, &ai, &idx))) {
                 XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};

@@ -30,6 +30,11 @@ struct GameHooks {
     // the view is start_in_stereo's, for the whole run.
     bool (*wants_stereo)(const gx::Batch& b) = nullptr;
 
+    // Called once per game frame shown on the theater panel with theater_stereo on, from
+    // the render thread: false to draw that frame flat, the same image to both eyes, for a
+    // screen that reads badly as a stereo pair. Without this hook every panel frame is a pair.
+    bool (*wants_panel_pair)(const gx::Batch& b) = nullptr;
+
     // Turns the game's own alternative eye on or off (installing a gx::EyeHook and
     // calling gx::render_set_first_person, say). Called with on=false whenever the view
     // leaves stereo. Without this hook the right thumbstick click does nothing.

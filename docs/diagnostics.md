@@ -106,7 +106,10 @@ from the game's camera in metres (a step to the side is what tells near from far
 rotation shows no parallax), and `--first-person` with `--fp-window=a-b`
 calls the game's `set_first_person` hook. `GCN_EYE_GPU=1` times the eye passes,
 `GCN_EYE_MORPH=0,0.5,1` dumps the theater/stereo morph at those points beside the flat
-frame, and `GCN_STEREOLOG=1` prints the game's `wants_stereo` answer whenever it changes.
+frame, and `GCN_STEREOLOG=1` prints the game's `wants_stereo` answer whenever it changes,
+and in the harness its `wants_panel_pair` answer too (`panel pair` or `panel flat`), asked
+every frame even in `--eye`. A replay should be checked in `--eye`, because the game reads the
+eyes' poses there as it does in a headset: without them the replay parts from the recording.
 The desktop build honours `GCN_STEREOLOG` too, numbering frames as its dumps are, so a
 game's stereo hook can be checked against a replayed route without a device.
 `GCN_RAMSNAP=<dir>` (with `GCN_RAMSNAP_EVERY`, `GCN_RAMSNAP_RANGE=a-b`) writes the low 8 MB
