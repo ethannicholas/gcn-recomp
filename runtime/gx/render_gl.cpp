@@ -58,7 +58,7 @@ static inline void set_lod_bias(GLuint s, float bias) {
 struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
-    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d;
+    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
@@ -149,6 +149,12 @@ static std::vector<uint8_t> g_hide;
 // is applying, in an eye.
 static std::vector<uint8_t> g_flat3d;
 static bool g_cur_flat3d = false;
+// Likewise for an orthographic draw over the whole picture (EyeScreen), which an eye draws
+// across its whole field, fixed to the head: the game's frame mapped onto the eye's own clip
+// space, enlarged by this much so that its edges fall outside what the eye can see.
+static std::vector<uint8_t> g_screen;
+static bool g_cur_screen = false;
+static constexpr float kEyeScreenOverscan = 1.1f;
 // The morph between theater and stereo; see render_set_vr_morph. 1 is plain stereo.
 static float g_morph = 1.0f;
 // A flat frame drawn as one of a stereo pair (render_execute_stereo_pair): where the eye
@@ -1349,6 +1355,9 @@ static void apply_state(const PixelState& st, int prim) {
     // on the HUD frame instead, through its own projection and viewport -- exactly where the
     // flat frame has it -- and keeps the game's own depth to sort its parts by.
     const bool flat3d = g_vr_active && g_cur_flat3d && perspective;
+    // An orthographic draw over the whole picture the game asked to have across the eye
+    // (EyeScreen): on the HUD frame's path, but mapped onto the eye's clip space directly.
+    const bool screen = g_vr_active && g_cur_screen && !perspective;
     const bool view_space_3d = perspective && view_space && vs3d && !flat3d;
     const bool on_hud_frame = flat3d || ((!perspective || view_space) && !view_space_3d);
     if (perspective) {
@@ -1407,7 +1416,7 @@ static void apply_state(const PixelState& st, int prim) {
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
                            foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer &&
-                           flat3d == u.flat3d && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
+                           flat3d == u.flat3d && screen == u.screen && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -1465,13 +1474,27 @@ static void apply_state(const PixelState& st, int prim) {
             // Every term is constant for the draw, so the whole chain folds into one matrix
             // here and the shader is left with a single multiply.
             float a[16], b[16], M[16];
-            mat4_mul(g_vr_hud_eff, P, a);   // the game's 2D frame, placed in view space
-            mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
-            mat4_mul(g_vr_proj, b, M);
+            if (screen) {
+                // The game's frame is [-1,1] after its own projection, and so is the eye's
+                // field after the eye's: the one becomes the other, enlarged past the
+                // field's edges, with no view between them -- fixed to the head. Depth is
+                // the frame's own concern only (the HUD frame's draws are drawn without a
+                // depth test), so it is left at the middle of the range.
+                for (int c = 0; c < 4; c++) {
+                    M[c * 4 + 0] = kEyeScreenOverscan * P[c * 4 + 0];
+                    M[c * 4 + 1] = kEyeScreenOverscan * P[c * 4 + 1];
+                    M[c * 4 + 2] = 0.0f;
+                    M[c * 4 + 3] = P[c * 4 + 3];
+                }
+            } else {
+                mat4_mul(g_vr_hud_eff, P, a);   // the game's 2D frame, placed in view space
+                mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
+                mat4_mul(g_vr_proj, b, M);
+            }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
             if (flat3d) glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, flat_crop);
             glUniform1i(pr.u_vr, flat3d ? 5 : 2);
-            g_eye_layer_name = flat3d ? "hud-frame(3d)" : "hud-frame";
+            g_eye_layer_name = flat3d ? "hud-frame(3d)" : screen ? "eye-screen" : "hud-frame";
         } else if (g_flat_eye != 0.0f && perspective &&
                    !(g_panel_band > 0.0f && band_hi > band_lo && band_hi <= g_panel_band)) {
             // One of a stereo pair on the panel (a draw in the panel band falls through to
@@ -1504,6 +1527,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.fg_layer = fg_layer;
         u.hud_layer = hud_layer;
         u.flat3d = flat3d;
+        u.screen = screen;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
@@ -2352,6 +2376,7 @@ void render_set_vr_eye(const float proj[16], const float view[16], const float h
 static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_hide.clear();
     g_flat3d.clear();
+    g_screen.clear();
     g_eye_overridden = false;
     hud_upright();
     EyeOverride o;
@@ -2379,6 +2404,11 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         if (a == EyeFlat) {
             if (g_flat3d.empty()) g_flat3d.assign(b.states.size(), 0);
             g_flat3d[c.state] = 1;
+            continue;
+        }
+        if (a == EyeScreen) {
+            if (g_screen.empty()) g_screen.assign(b.states.size(), 0);
+            g_screen[c.state] = 1;
             continue;
         }
         if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
@@ -2962,8 +2992,10 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 glClear(GL_DEPTH_BUFFER_BIT);
                 gl_state_invalidate();
             }
+            g_cur_screen = !g_screen.empty() && g_screen[c.state];
             apply_state(b.states[c.state], c.prim);
             g_cur_flat3d = false;
+            g_cur_screen = false;
             // apply_state binds the EFB's scissor and viewport expectations; the eye
             // target overrides both.
             glViewport(0, 0, w, h);

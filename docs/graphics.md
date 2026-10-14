@@ -125,6 +125,15 @@ gives it, so its parts hide one another as on the screen. The eye's depth buffer
 before the first of them: they sort among themselves, in front of everything, as the HUD
 does. `EyeDrawFacts` carries the viewport's rectangle for a filter to tell them by.
 
+`EyeScreen` is for an orthographic draw over the whole picture: a film on a visor or a lens
+(steam, rain, a flash). On the HUD frame such a draw is a panel at the HUD's distance and
+size, and its edges show. An `EyeScreen` draw goes on the HUD frame's path (`u_vr` 2, no
+depth test), but its matrix maps the game's clip space straight onto the eye's, with no view
+or frame between them. It covers the eye's whole field, fixed to the head, enlarged by
+`kEyeScreenOverscan` (1.1) so that its edges are out of sight. The cost is magnification:
+the game's 4:3 picture is stretched over a field several times as wide, so a film's texture
+reads coarser than on a television. The draw log names its layer `eye-screen`.
+
 ## PC VR: OpenXR on desktop GL
 
 `openxr/xr_frontend.cpp` is the OpenXR frontend for every platform; `openxr/xr_desktop.cpp`

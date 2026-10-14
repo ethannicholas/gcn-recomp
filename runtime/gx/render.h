@@ -69,7 +69,11 @@ struct PixelState {
 // picture (a model shown in a window of the HUD, with a frustum and a viewport of its
 // own): painted on the HUD frame where the flat frame has it, sorted among the other such
 // draws by its own depth, rather than floating in the world at the depth of its private
-// little scene. The flat view is untouched; a hidden draw's textures are
+// little scene. EyeScreen is for an orthographic draw over the whole picture -- a film on
+// a visor or a lens, steam or rain or a flash -- which on the HUD frame is a panel whose
+// edges are plain to see: it is drawn across the whole of each eye instead, fixed to the
+// head and a little past the eye's field (kEyeScreenOverscan), with the HUD frame's lack
+// of depth. The flat view is untouched; a hidden draw's textures are
 // kept alive. For a game that hides a model's materials (by TexData::hash, the same in
 // every run) or an effect that cannot be re-projected (a screen-space refraction of part
 // of the frame).
@@ -82,7 +86,7 @@ struct EyeDrawFacts {
     float vp_x, vp_y, vp_w, vp_h; // the viewport on the screen, in EFB pixels from the top left
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3 };
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };
