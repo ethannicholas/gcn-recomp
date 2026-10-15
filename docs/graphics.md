@@ -139,6 +139,22 @@ such a film by `EyeDrawFacts`' clip box and `clip_area`. The box alone also catc
 outline drawn into a whole-screen viewport, and a mesh of letterbox bars whose box is the
 whole picture.
 
+`EyeRestore` is for a cut-away: a game copies part of the frame (no clear), draws
+something, then draws the copy back over the rect it came from, orthographically, at a
+chosen depth with a depth test, so that whatever it drew since nearer than that depth is
+replaced by the scene that was behind it. On the HUD frame that is a flat picture of the
+flat view hanging in the air. Instead the eye grabs its own target where the game copies
+(`g_restore_grab`, taken at the copy command itself, since the draws between the copy and
+the put-back are the ones to cut), and draws the quad across its whole field (its clip
+box stretched to the overscanned field, as `EyeScreen` does), sampling the grab at each
+fragment's own position. The grab is what lies under every fragment, so outside what was
+drawn since the copy the quad changes nothing, and the cut follows the thing cut wherever
+the eye sees it, not the rect the flat view copied. Its depth is the game's in its band,
+`b.x + b.y * z` folded into the matrix (an ortho clip w is 1), the same depth a foreground
+layer writes under `u_vr` 4, and it keeps the game's depth test and write. That comparison
+is only meaningful against draws in a foreground layer; mid-morph (`u_vr` 3 writes the
+eye's depth) the draw is left out. The draw log names its layer `eye-restore`.
+
 ## PC VR: OpenXR on desktop GL
 
 `openxr/xr_frontend.cpp` is the OpenXR frontend for every platform; `openxr/xr_desktop.cpp`

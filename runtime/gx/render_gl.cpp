@@ -7,6 +7,7 @@
 #include "render_gl.h"
 #include "shadergen.h"
 #include "gl.h"
+#include <algorithm>
 #include <chrono>
 #include <unordered_map>
 
@@ -58,7 +59,7 @@ static inline void set_lod_bias(GLuint s, float bias) {
 struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
-    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen;
+    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen, restore;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
@@ -155,6 +156,15 @@ static bool g_cur_flat3d = false;
 static std::vector<uint8_t> g_screen;
 static bool g_cur_screen = false;
 static constexpr float kEyeScreenOverscan = 1.1f;
+// And for a copy of part of the frame put back over itself with a depth test (EyeRestore):
+// per state, 1 for such a draw, with the box its draws cover in the game's clip space
+// (four floats a state), which an eye stretches over its whole field. g_restore_tex holds
+// the copies those draws sample, at which the eye takes its own grab (g_restore_grab).
+static std::vector<uint8_t> g_restore;
+static std::vector<float> g_restore_box;
+static std::vector<uint32_t> g_restore_tex;
+static bool g_cur_restore = false;
+static const float* g_cur_restore_box = nullptr;
 // The morph between theater and stereo; see render_set_vr_morph. 1 is plain stereo.
 static float g_morph = 1.0f;
 // A flat frame drawn as one of a stereo pair (render_execute_stereo_pair): where the eye
@@ -185,8 +195,10 @@ static void morph_chain(const float P[16], MorphKind kind, float chain[16], floa
 // included. One texture serving both would quietly re-point the water's lookup -- and the
 // game's own final composite, which samples the same whole-frame copy -- at whatever the
 // spray grabbed later. See grab_eye().
+// A third, g_restore_grab, is taken where the game copies part of the frame that an
+// EyeRestore draw later puts back.
 struct EyeGrab { GLuint tex; int w, h; bool srgb; };
-static EyeGrab g_eye_grab, g_spray_grab;
+static EyeGrab g_eye_grab, g_spray_grab, g_restore_grab;
 static int g_eye_w, g_eye_h;
 static bool is_fullscreen_tex(uint32_t id);
 static GLuint g_efb_fbo, g_efb_color, g_efb_depth;
@@ -667,7 +679,11 @@ void main() {
         c.rgb = vec3(y);
     }
     // Single-channel formats replicate into all components like the texture decoder does.
+    // R4 (0) is the red channel at 4 bits, read back as I4: a projected shadow draws its
+    // caster white into a corner of the frame and copies that as its mask, whose alpha
+    // is then the red, not whatever the frame's alpha held there.
     if (fmt == 7) c = vec4(c.a);              // A8
+    else if (fmt == 0 && !intensity) c = vec4(floor(c.r * 15.0 + 0.5) / 15.0);   // R4
     else if (fmt == 8) c = vec4(c.r);         // R8
     else if (fmt == 9) c = vec4(c.g);         // G8
     else if (fmt == 10) c = vec4(c.b);        // B8
@@ -1118,10 +1134,24 @@ static bool is_grab_tex(uint32_t id) {
     return it != g_textures.end() && it->second.grab;
 }
 
+// A copy an EyeRestore draw puts back, while an eye is drawing one (g_cur_restore): only
+// that draw's lookups are taken over, at the grab taken where the copy was made.
+static bool is_restore_tex(uint32_t id) {
+    if (!g_cur_restore || !g_restore_grab.tex || !id) return false;
+    for (uint32_t t : g_restore_tex)
+        if (t == id) return true;
+    return false;
+}
+
 // Whether an eye takes this texture's lookups over at all: a copy of the whole frame
-// (the water surface samples one) or one of the spray's grabs.
+// (the water surface samples one), one of the spray's grabs, or a copy put back by an
+// EyeRestore draw.
 static bool is_eye_screen_tex(uint32_t id) {
-    return (g_eye_grab.tex && is_fullscreen_tex(id)) || (g_spray_grab.tex && is_grab_tex(id));
+    return (g_eye_grab.tex && is_fullscreen_tex(id)) || (g_spray_grab.tex && is_grab_tex(id)) ||
+           is_restore_tex(id);
+}
+static const EyeGrab& eye_grab_for(uint32_t id) {
+    return is_restore_tex(id) ? g_restore_grab : is_grab_tex(id) ? g_spray_grab : g_eye_grab;
 }
 
 // What apply_state last put into GL, so that it can put in only what differs.
@@ -1368,6 +1398,9 @@ static void apply_state(const PixelState& st, int prim) {
     // An orthographic draw over the whole picture the game asked to have across the eye
     // (EyeScreen): on the HUD frame's path, but mapped onto the eye's clip space directly.
     const bool screen = g_vr_active && g_cur_screen && !perspective;
+    // A copy of part of the frame put back over itself with a depth test (EyeRestore):
+    // across the eye too, but at the game's depth and with its depth test.
+    const bool restore = g_vr_active && g_cur_restore && g_cur_restore_box && !perspective;
     const bool view_space_3d = perspective && view_space && vs3d && !flat3d;
     const bool on_hud_frame = flat3d || ((!perspective || view_space) && !view_space_3d);
     if (perspective) {
@@ -1426,7 +1459,7 @@ static void apply_state(const PixelState& st, int prim) {
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
                            foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer &&
-                           flat3d == u.flat3d && screen == u.screen && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
+                           flat3d == u.flat3d && screen == u.screen && !restore && !u.restore && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -1491,6 +1524,27 @@ static void apply_state(const PixelState& st, int prim) {
                 // the frame's own concern only (the HUD frame's draws are drawn without a
                 // depth test), so it is left at the middle of the range.
                 eye_screen_matrix(P, M);
+            } else if (restore) {
+                // The game puts its copy back over the rect it came from, which in the flat
+                // view is where what it cuts away is. In an eye that is somewhere else, so
+                // the quad is stretched from its box over the eye's whole field, past the
+                // edges as EyeScreen's is: the grab it samples is what lies under every
+                // fragment, so only what was drawn since the copy, nearer than the quad,
+                // changes. Its depth is what the game gives it in its band -- the depth the
+                // vertex shader writes for a foreground layer (u_vr 4), so the two compare
+                // as they do on the screen: z' = b.x + b.y * z for the game's clip z, whose
+                // w is 1 under an ortho projection.
+                const float* r = g_cur_restore_box;
+                const float sx = r[1] > r[0] ? 2.0f * kEyeScreenOverscan / (r[1] - r[0]) : 1.0f;
+                const float sy = r[3] > r[2] ? 2.0f * kEyeScreenOverscan / (r[3] - r[2]) : 1.0f;
+                const float cx = 0.5f * (r[0] + r[1]), cy = 0.5f * (r[2] + r[3]);
+                const float bx = 2.0f * st.viewport[5] / 16777215.0f - 1.0f, by = 2.0f * st.viewport[2] / 16777215.0f;
+                for (int c = 0; c < 4; c++) {
+                    M[c * 4 + 0] = sx * (P[c * 4 + 0] - cx * P[c * 4 + 3]);
+                    M[c * 4 + 1] = sy * (P[c * 4 + 1] - cy * P[c * 4 + 3]);
+                    M[c * 4 + 2] = by * P[c * 4 + 2] + bx * P[c * 4 + 3];
+                    M[c * 4 + 3] = P[c * 4 + 3];
+                }
             } else {
                 mat4_mul(g_vr_hud_eff, P, a);   // the game's 2D frame, placed in view space
                 mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
@@ -1499,7 +1553,7 @@ static void apply_state(const PixelState& st, int prim) {
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
             if (flat3d) glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, flat_crop);
             glUniform1i(pr.u_vr, flat3d ? 5 : 2);
-            g_eye_layer_name = flat3d ? "hud-frame(3d)" : screen ? "eye-screen" : "hud-frame";
+            g_eye_layer_name = flat3d ? "hud-frame(3d)" : screen ? "eye-screen" : restore ? "eye-restore" : "hud-frame";
         } else if (g_flat_eye != 0.0f && perspective &&
                    !(g_panel_band > 0.0f && band_hi > band_lo && band_hi <= g_panel_band)) {
             // One of a stereo pair on the panel (a draw in the panel band falls through to
@@ -1540,6 +1594,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.hud_layer = hud_layer;
         u.flat3d = flat3d;
         u.screen = screen;
+        u.restore = restore;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
@@ -1733,7 +1788,7 @@ static void apply_state(const PixelState& st, int prim) {
         GLuint sampler = 0;
         const GlTex* gt = nullptr;
         if (sub) {
-            const EyeGrab& g = is_grab_tex(id) ? g_spray_grab : g_eye_grab;
+            const EyeGrab& g = eye_grab_for(id);
             tsz[m * 2] = (float)g.w;
             tsz[m * 2 + 1] = (float)g.h;
         } else if (id) {
@@ -1758,7 +1813,7 @@ static void apply_state(const PixelState& st, int prim) {
         glActiveTexture(GL_TEXTURE0 + m);
         if (!tex_held) {
             g_astat.texbind++;
-            if (sub) glBindTexture(GL_TEXTURE_2D, (is_grab_tex(id) ? g_spray_grab : g_eye_grab).tex);
+            if (sub) glBindTexture(GL_TEXTURE_2D, eye_grab_for(id).tex);
             else glBindTexture(GL_TEXTURE_2D, gt ? gt->tex : 0);
             g_applied.tex_id[m] = id;
             g_applied.tex_sub[m] = sub;
@@ -1832,8 +1887,9 @@ static void apply_state(const PixelState& st, int prim) {
     // on one plane. It is submitted last, so submission order is the layering. A 3D draw
     // composed into the HUD (flat3d) keeps the game's depth state: the eye cleared its
     // depth before the first of them (render_execute_eye), so they sort only among
-    // themselves, by the game's own depth.
-    const bool hud_depth = g_vr_active && on_hud_frame && !flat3d;
+    // themselves, by the game's own depth. A cut-away (EyeRestore) keeps it too: the depth
+    // test is the whole of what it does.
+    const bool hud_depth = g_vr_active && on_hud_frame && !flat3d && !restore;
     if (!(g_applied.valid && bp[0x40] == abp[0x40] && hud_depth == g_applied.hud_depth)) {
         g_astat.depth++;
         uint32_t zm = bp[0x40];
@@ -2389,6 +2445,8 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_hide.clear();
     g_flat3d.clear();
     g_screen.clear();
+    g_restore.clear();
+    g_restore_tex.clear();
     g_eye_overridden = false;
     hud_upright();
     EyeOverride o;
@@ -2456,6 +2514,20 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         if (a == EyeScreen) {
             if (g_screen.empty()) g_screen.assign(b.states.size(), 0);
             g_screen[c.state] = 1;
+            continue;
+        }
+        if (a == EyeRestore) {
+            if (g_restore.empty()) {
+                g_restore.assign(b.states.size(), 0);
+                g_restore_box.assign(b.states.size() * 4, 0.0f);
+            }
+            if (!g_restore[c.state]) {
+                g_restore[c.state] = 1;
+                memcpy(&g_restore_box[c.state * 4], &box[c.state * 4], 4 * sizeof(float));
+                const PixelState& st = b.states[c.state];
+                for (int m = 0; m < 8; m++)
+                    if (st.tex_is_efb[m] && st.tex_id[m]) g_restore_tex.push_back(st.tex_id[m]);
+            }
             continue;
         }
         if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
@@ -2897,7 +2969,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     g_eye_h = h;
     memset(g_zplane, 0, sizeof(g_zplane));  // the flat pass's planes are the EFB's
     view_invalidate();   // this eye's matrices and target
-    bool grabbed = false, grabbed_spray = false;
+    bool grabbed = false, grabbed_spray = false, grabbed_restore = false;
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
     glViewport(0, 0, w, h);
     glDisable(GL_SCISSOR_TEST);
@@ -2983,12 +3055,25 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     const size_t eye_end = first_part_end(b, skip);
     for (size_t i = 0; i < eye_end; i++) {
         Cmd& c = b.cmds[i];
-        // Copies and the present are the first eye's business, done against the EFB.
+        // Copies and the present are the first eye's business, done against the EFB. A
+        // copy that an EyeRestore draw puts back is taken from the eye as well, at the
+        // same moment: what the eye has drawn so far is what the game's copy holds.
         if (c.type != CmdType::Draw) {
+            if (c.type == CmdType::EfbCopy && !morph && c.copy.tex_id &&
+                std::find(g_restore_tex.begin(), g_restore_tex.end(), c.copy.tex_id) != g_restore_tex.end())
+            {
+                grab_eye(g_restore_grab, w, h);
+                grabbed_restore = true;
+            }
             cur_state = UINT32_MAX;
             gl_state_invalidate();
             continue;
         }
+        // Mid-morph the foreground's depth is the eye's, not the game's (u_vr 3), so the
+        // depth a cut-away is drawn at means nothing against it: it is left out, and what it
+        // would have cut away stays for the length of the morph.
+        const bool restore_draw = !g_restore.empty() && g_restore[c.state];
+        if (restore_draw && (morph || !grabbed_restore)) { eye_draw_index++; continue; }
         if (skip[i]) { n_skipped++; eye_draw_index++; continue; }
         if (!g_hide.empty() && g_hide[i]) { eye_draw_index++; continue; }
         // GCN_EYE_SKIPCOMP drops the screen-space passes entirely, for comparing against
@@ -3055,9 +3140,13 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 gl_state_invalidate();
             }
             g_cur_screen = !g_screen.empty() && g_screen[c.state];
+            g_cur_restore = restore_draw;
+            g_cur_restore_box = restore_draw ? &g_restore_box[c.state * 4] : nullptr;
             apply_state(b.states[c.state], c.prim);
             g_cur_flat3d = false;
             g_cur_screen = false;
+            g_cur_restore = false;
+            g_cur_restore_box = nullptr;
             // apply_state binds the EFB's scissor and viewport expectations; the eye
             // target overrides both.
             glViewport(0, 0, w, h);

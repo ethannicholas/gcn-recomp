@@ -73,7 +73,15 @@ struct PixelState {
 // a visor or a lens, steam or rain or a flash -- which on the HUD frame is a panel whose
 // edges are plain to see: it is drawn across the whole of each eye instead, fixed to the
 // head and a little past the eye's field (kEyeScreenOverscan), with the HUD frame's lack
-// of depth. The flat view is untouched; a hidden draw's textures are
+// of depth. EyeRestore is for an orthographic draw that puts a copy of part of the frame,
+// taken earlier in it, back over the place it came from with a depth test: a cut-away,
+// which erases whatever was drawn since nearer than the draw's own depth and leaves the
+// scene that was behind it. In an eye the copy is of the flat view, so on the HUD frame it
+// is a picture of that view hanging in the air. Instead the eye grabs its own colour where
+// the game copies, draws the quad across its whole field at the depth the game gives it in
+// its band, with the game's depth test, and samples the grab at each fragment's own
+// position. That depth compares only with draws that keep the game's depth in their band,
+// a foreground layer's (render_set_depth_layers). The flat view is untouched; a hidden draw's textures are
 // kept alive. For a game that hides a model's materials (by TexData::hash, the same in
 // every run) or an effect that cannot be re-projected (a screen-space refraction of part
 // of the frame).
@@ -93,7 +101,7 @@ struct EyeDrawFacts {
     float clip_x0, clip_x1, clip_y0, clip_y1, clip_area;
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4 };
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };
