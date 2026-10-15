@@ -336,12 +336,20 @@ void publish(const Motion& in) {
     m.active = in.active;
     m.speed_kmh = out[kSpeed]; m.pitch = out[kPitch]; m.roll = out[kRoll]; m.yaw = out[kYaw];
     m.surge = out[kSurge]; m.sway = out[kSway]; m.heave = out[kHeave]; m.sway_velocity = out[kSlide];
+    // The engine eases to rest with the motion: the revs wind down to nothing and back up with
+    // the level, from the last active ones, rather than cutting out when a race ends or pauses
+    // and coming back at full revs. A shaker plays a step in the revs as a thump.
+    static float rpm_held, max_rpm_held;
+    static int gear_held = 1;
     if (in.active) {
-        m.rpm = in.rpm;
-        m.max_rpm = in.max_rpm;
-        m.gear = in.gear;
+        rpm_held = in.rpm;
+        max_rpm_held = in.max_rpm;
+        gear_held = in.gear;
         for (int w = 0; w < 4; w++) m.suspension[w] = in.suspension[w];
     }
+    m.rpm = rpm_held * level;
+    m.max_rpm = max_rpm_held;
+    m.gear = gear_held;
     send_srs(m);
 
     if (g_log) {

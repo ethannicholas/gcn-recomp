@@ -35,7 +35,8 @@ struct Motion {
     float heave = 0;       // acceleration up, m/s^2, without gravity: 0 at rest
     float sway_velocity = 0;  // m/s to the right: sliding sideways
     // The engine, for a shaker's engine effect: revolutions a minute, the most it reaches, and
-    // the gear. Sent as they are while active; zero at rest.
+    // the gear. Sent as they are while active; the revs wind down to zero and back up with the
+    // ease to rest, rather than cutting out.
     float rpm = 0;
     float max_rpm = 0;
     int gear = 1;

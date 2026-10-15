@@ -473,7 +473,9 @@ as the wheels met them; it goes into the packet's suspension fields too. A game 
 suspension to read gives `roughness` (0 to 1) instead, and gets bumps of random size ringing
 in a damped spring over a finer grain, growing with speed. Without either a platform sits
 dead still on a straight; with filtered noise alone it felt like noise, all one note. `rpm`, `max_rpm` and `gear` go to the packet for a shaker's engine
-effect. `telemetry::set_default` gives a key a game's own default, which `telemetry.txt` still
+effect: SimRacingStudio plays a recorded engine (an FMOD car-engine event, by rpm) on the
+shakers' sound card, so a step in the revs is a thump. The revs ease to rest with the motion,
+winding down when a race ends or pauses and back up after, rather than cutting out. `telemetry::set_default` gives a key a game's own default, which `telemetry.txt` still
 overrides: a vehicle's gains, or a faster `yaw_rate` for a spin.
 
 The packet is version 102 of SRS's "api" format. Its layout comes from SRS's own listener,
