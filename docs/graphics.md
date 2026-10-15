@@ -196,7 +196,10 @@ was at the depth `D = P00 * halfw`, where the frustum is as wide as the panel. S
 is a window: a point `D` out sits on it, nearer ones stand in front, and a point at infinity
 has the eyes' own separation, whatever the panel's distance or the draw's field of view.
 Each draw converges on its own `D`, which keeps a scene composed from several fields of view
-consistent with how the flat frame composes it.
+consistent with how the flat frame composes it. A draw in the game's background band
+(`render_set_depth_layers`) takes the shear alone, which gives every point the disparity of
+infinity, as the eyes draw that band. Before, a planet modelled tens of units out kept its
+modelled depth and looked short of infinity.
 
 Two settings shape it. `panel_band` puts a perspective draw the game confines to a band
 of the depth buffer no deeper than that on the panel itself, with no disparity, as a
