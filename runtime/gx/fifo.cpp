@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -207,9 +208,34 @@ static constexpr size_t kFeMaxFrames = 1;
 static std::deque<uint64_t> g_frame_ends;   // where each frame not yet processed ends
 static std::vector<uint8_t> g_skim_out;
 
+// View turns (gx::set_view_turn), each pinned to where the guest had got in the stream, in
+// g_fe_handed's terms, and applied by the front end as it reaches that point -- between
+// chunks, since the guest hands over what it has gathered first. Applied by the guest
+// thread when it set them, a turn landed on whichever batch the front end, up to a frame
+// behind, was building: in the headset, a frame of the world now and then drawn a frame's
+// turn off. Under g_fe_mutex.
+namespace gx { void view_turn_reached(const float q[4]); }
+struct PendingTurn { uint64_t at; float q[4]; };
+static std::deque<PendingTurn> g_turns;
+
+// On the front end, before it processes what starts at `at`: the turns set by then.
+static void turns_reached(uint64_t at) {
+    for (;;) {
+        PendingTurn t;
+        {
+            std::lock_guard<std::mutex> lk(g_fe_mutex);
+            if (g_turns.empty() || g_turns.front().at > at) return;
+            t = g_turns.front();
+            g_turns.pop_front();
+        }
+        gx::view_turn_reached(t.q);
+    }
+}
+
 static void fe_thread_main() {
     for (;;) {
         std::vector<uint8_t> chunk;
+        uint64_t start;
         {
             std::unique_lock<std::mutex> lk(g_fe_mutex);
             while (g_fe_queue.empty()) {
@@ -220,7 +246,9 @@ static void fe_thread_main() {
             chunk = std::move(g_fe_queue.front());
             g_fe_queue.pop_front();
             g_fe_busy = true;
+            start = g_fe_done;
         }
+        turns_reached(start);
         gx::process(chunk.data(), (uint32_t)chunk.size(), false);
         {
             std::lock_guard<std::mutex> lk(g_fe_mutex);
@@ -265,6 +293,21 @@ static void fe_submit() {
         g_fe_spare.pop_back();
     }
     if (g_fe_sleeping) g_fe_work_cv.notify_one();
+}
+
+// See g_turns. What the game wrote just before may still be in the gather pipe and come
+// after the turn; it is in the same frame, and a frame's batch has one turn, the last.
+void gx::set_view_turn(const float q[4]) {
+    if (!fe_threaded()) {
+        view_turn_reached(q);
+        return;
+    }
+    fe_submit();
+    PendingTurn t;
+    memcpy(t.q, q, sizeof(t.q));
+    std::lock_guard<std::mutex> lk(g_fe_mutex);
+    t.at = g_fe_handed;
+    g_turns.push_back(t);
 }
 
 // Waits until the front end has processed everything handed to it.

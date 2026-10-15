@@ -116,6 +116,9 @@ Batch::~Batch() {
     if (pool().size() < kMaxPooled) pool().push_back(std::move(b));
 }
 
+// set_view_turn's latest, set and read on the guest thread.
+static float g_view_turn[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
 static Batch& batch() {
     if (!g_batch) {
         g_batch = std::make_unique<Batch>();
@@ -125,8 +128,16 @@ static Batch& batch() {
             pool().pop_back();
             g_batch->pooled = false;
         }
+        memcpy(g_batch->view_turn, g_view_turn, sizeof(g_view_turn));
     }
     return *g_batch;
+}
+
+// set_view_turn, where the command stream has got to it (fifo.cpp): into the batch being
+// built as well as every one after it.
+void view_turn_reached(const float q[4]) {
+    memcpy(g_view_turn, q, sizeof(g_view_turn));
+    if (g_batch) memcpy(g_batch->view_turn, q, sizeof(g_view_turn));
 }
 
 // GCN_MTXLOG=<n> dumps the nth presented frame's draws; see draw_impl.
@@ -141,14 +152,9 @@ static void pack_all(Batch& b);
 static bool xf_sync();
 static std::unique_ptr<struct Pending> g_pending;
 
-// set_view_turn's latest, set and read on the guest thread.
-static float g_view_turn[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-void set_view_turn(const float q[4]) { memcpy(g_view_turn, q, sizeof(g_view_turn)); }
-
 static void flush_batch() {
     if (g_batch && !g_batch->cmds.empty()) {
         texture_take_dead(g_batch->dead_textures);
-        memcpy(g_batch->view_turn, g_view_turn, sizeof(g_view_turn));
         // Transformed already (see xf_sync), or by the worker before the renderer sees it.
         // A batch with nothing to transform -- a copy alone, which a game that clears
         // strips of the EFB with copies makes between its passes -- still goes through the

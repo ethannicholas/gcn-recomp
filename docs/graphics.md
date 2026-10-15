@@ -116,9 +116,16 @@ hook whether the eye will want it.
 viewer's gaze -- so that what the head looks at is on the game's screen, where its targeting
 and its 2D overlays reach -- would turn the world under the viewer by the same amount. It says
 how far it turned, from the guest thread, with `set_view_turn` (`render.h`): a quaternion in
-the eyes' frame, latched into each batch handed over after it (`Batch::view_turn`, at
-`flush_batch`), so the frame and its turn travel together however far behind the guest the
-renderer is. `render_execute_eye` draws each eye through the frontend's view times that
+the eyes' frame. The turn is pinned to where the guest has got in the command stream: the
+guest hands over what it has gathered, queues the turn at that position (`g_turns` in
+`fifo.cpp`), and the front end applies it as it reaches that chunk (`view_turn_reached` in
+`xf.cpp`), into the batch it is building and every one after (`Batch::view_turn`). The first
+version applied it on the guest thread, straight into the front end's batch; but the front
+end runs up to a frame behind on a thread of its own, so the turn landed on whichever batch
+it happened to be building, and now and then a frame of the world was drawn a frame's turn
+off -- a single-frame jolt of the world while the camera moved, the HUD unaffected. Found by
+replaying a headset session with the eye held still and measuring each frame's shift
+against the last. `render_execute_eye` draws each eye through the frontend's view times that
 turn (`apply_view_turn`): the world stays where the viewer saw it, and everything the game
 places about its camera -- the HUD frame, view-space draws, the sky -- turns with the camera.
 The frontends are untouched; the poses they publish (`vr::hand_pose`, `vr::eye_views`) stay

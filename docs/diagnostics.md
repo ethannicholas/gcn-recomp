@@ -56,7 +56,10 @@ guest makes them, and a change in what a read returned is logged against that co
 answers the Nth read of a kind with the state its log had at read N, so the hook sees
 exactly what it saw, in the harness as much as in the app. Reads from a frontend's own
 threads are not logged, since they never reach the game. A log without pose lines (version
-3 or earlier) or one that has run out replays with the live poses, as before.
+3 or earlier) or one that has run out replays with the live poses, as before. An eyes line
+is over 300 characters; until 2026-10-15 the reader took lines of 256, cut every one, and
+replayed the eyes as live without a word (the hands, shorter, were fine). It takes 2 KB
+now and refuses a log with a longer line rather than replaying it half-read.
 
 ## Scripted input
 

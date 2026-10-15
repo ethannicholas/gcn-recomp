@@ -142,10 +142,19 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         fprintf(stderr, "[input] no %s to replay\n", path.c_str());
         return false;
     }
-    char line[256];
+    // A line of the eyes' poses holds 22 floats, over 300 characters. With room for 256 those
+    // lines were cut, every record failed input_pose's size check, and a replay gave the game
+    // the live head instead of the recorded one. A line too long for this is refused outright.
+    char line[2048];
     int version = 1;
     uint32_t end_key = 0;
     while (fgets(line, sizeof(line), f)) {
+        if (!strchr(line, '\n') && !feof(f)) {
+            fprintf(stderr, "[input] a line of %s is longer than %zu characters; not replaying it\n", path.c_str(),
+                    sizeof(line) - 2);
+            fclose(f);
+            return false;
+        }
         if (line[0] == '#') {
             long long epoch;
             unsigned end_poll, end_frame;
