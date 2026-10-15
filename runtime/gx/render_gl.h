@@ -87,6 +87,14 @@ void render_set_world_pitch_hook(WorldPitchHook hook);
 // view space, is brought to arm's length without moving the weapon. 0 turns it off.
 void render_set_depth_layers(float background_from, float foreground_to, float foreground_scale,
                              float hud_to = 0.0f, float hud_scale = 1.0f);
+// A HUD element modelled far nearer than the rest of its layer -- a flat piece of the
+// visor a few units out where the rest is some tens -- is still scaled by `hud_scale`, and
+// lands a few tens of centimetres from the eyes, where it hurts to look at. A draw in the
+// HUD layer whose nearest vertex is nearer than `below` (view-space units, before the
+// layer's scale) is scaled about the camera on top of that, so that its nearest vertex is
+// at `to`: the same angular size, further off. The whole state goes together, judged by
+// its draws in the frame. 0 turns it off, which is the default.
+void render_set_hud_push(float below, float to);
 
 // What a perspective draw the game placed in view space itself is in an eye (PixelState::
 // view_space). Off, the default, it is held in front of the camera: drawn with the head's

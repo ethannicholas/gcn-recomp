@@ -60,6 +60,7 @@ struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
     uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen, restore;
+    float hud_push;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
@@ -116,6 +117,12 @@ static float g_vr_view_fg[16], g_vr_view_world_fg[16];
 // weapon's scale would put it. Takes precedence over the foreground. 0 is off.
 static float g_hud_to = 0.0f;
 static float g_hud_scale = 1.0f;
+// render_set_hud_push: below which distance a HUD-layer draw is pushed out, and to where.
+// g_hud_push holds each state's factor for the frame (1 for none), g_cur_hud_push the
+// current draw's, read by apply_state.
+static float g_hud_push_below = 0.0f, g_hud_push_to = 0.0f;
+static std::vector<float> g_hud_push;
+static float g_cur_hud_push = 1.0f;
 static float g_vr_view_hud[16], g_vr_view_world_hud[16];
 // Whether a perspective draw placed in view space is a billboard in the world rather than
 // something held before the camera (render_set_view_space_world). Off unless a game says.
@@ -1469,10 +1476,12 @@ static void apply_state(const PixelState& st, int prim) {
     // A foreground layer also keeps the game's own depth within its band (u_vr 4 in the
     // vertex shader), whether or not it is scaled.
     const bool fg_layer = g_fg_to > 0.0f && perspective && band_hi <= g_fg_to;
+    const float hud_push = g_vr_active && hud_layer ? g_cur_hud_push : 1.0f;
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
                            foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer &&
-                           flat3d == u.flat3d && screen == u.screen && !restore && !u.restore && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
+                           flat3d == u.flat3d && screen == u.screen && !restore && !u.restore &&
+                           hud_push == u.hud_push && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -1508,9 +1517,18 @@ static void apply_state(const PixelState& st, int prim) {
                         2.0f * atanf(1.0f / p[0]) * 57.2958f, 2.0f * atanf(1.0f / p[2]) * 57.2958f,
                         p[0], p[2]);
             }
+            // A HUD element pushed out (render_set_hud_push): scaled about the camera in the
+            // game's view space, before the layer's own scale.
+            float pushed[16];
+            if (hud_push != 1.0f) {
+                const float K[16] = {hud_push, 0, 0, 0, 0, hud_push, 0, 0, 0, 0, hud_push, 0, 0, 0, 0, 1};
+                mat4_mul(view, K, pushed);
+                view = pushed;
+            }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, game_proj ? P : g_vr_proj);
             glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, view);
-            g_eye_layer_name = background ? "sky" : hud_layer ? (view_space_3d ? "hud-band(view)" : "hud-band(world)")
+            g_eye_layer_name = background ? "sky" : hud_push != 1.0f ? "hud-band(pushed)"
+                             : hud_layer ? (view_space_3d ? "hud-band(view)" : "hud-band(world)")
                              : foreground ? (view_space_3d ? "foreground(view)" : "foreground(world)")
                              : view_space_3d ? "view-space-3d" : "world";
             static const bool game_depth = !(getenv("GCN_EYE_FGDEPTH") && atoi(getenv("GCN_EYE_FGDEPTH")) == 0);
@@ -1608,6 +1626,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.flat3d = flat3d;
         u.screen = screen;
         u.restore = restore;
+        u.hud_push = hud_push;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
@@ -2406,6 +2425,10 @@ void render_set_depth_layers(float background_from, float foreground_to, float f
 }
 
 void render_set_view_space_world(bool on) { g_view_space_world = on; }
+void render_set_hud_push(float below, float to) {
+    g_hud_push_below = below > 0.0f && to > 0.0f ? below : 0.0f;
+    g_hud_push_to = to;
+}
 
 void render_set_eye_hook(EyeHook hook) { g_eye_hook = hook; }
 void render_set_world_pitch_hook(WorldPitchHook hook) { g_pitch_hook = hook; }
@@ -2480,6 +2503,29 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_screen.clear();
     g_restore.clear();
     g_restore_tex.clear();
+    g_hud_push.clear();
+    if (g_hud_push_below > 0.0f && g_hud_to > 0.0f) {
+        // Each HUD-layer state's nearest vertex over the frame, in view space.
+        std::vector<float> nearest(b.states.size(), 1e30f);
+        bool any = false;
+        for (size_t i = 0; i < b.cmds.size(); i++) {
+            const Cmd& c = b.cmds[i];
+            if (c.type != CmdType::Draw || skip[i]) continue;
+            const PixelState& st = b.states[c.state];
+            if ((int)st.proj[6] != 0 || st.viewport[5] / 16777215.0f > g_hud_to) continue;
+            float& n = nearest[c.state];
+            for (uint32_t v = 0; v < c.count; v++) {
+                const float d = -b.verts[b.indices[c.first + v]].pos[2];
+                if (d > 0.0f && d < n) n = d;
+            }
+            any = true;
+        }
+        if (any) {
+            g_hud_push.assign(b.states.size(), 1.0f);
+            for (size_t s = 0; s < b.states.size(); s++)
+                if (nearest[s] < g_hud_push_below) g_hud_push[s] = g_hud_push_to / nearest[s];
+        }
+    }
     g_eye_overridden = false;
     hud_upright();
     EyeOverride o;
@@ -3183,11 +3229,13 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 gl_state_invalidate();
             }
             g_cur_screen = !g_screen.empty() && g_screen[c.state];
+            g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
             g_cur_restore = restore_draw;
             g_cur_restore_box = restore_draw ? &g_restore_box[c.state * 4] : nullptr;
             apply_state(b.states[c.state], c.prim);
             g_cur_flat3d = false;
             g_cur_screen = false;
+            g_cur_hud_push = 1.0f;
             g_cur_restore = false;
             g_cur_restore_box = nullptr;
             // apply_state binds the EFB's scissor and viewport expectations; the eye

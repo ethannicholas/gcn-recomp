@@ -66,6 +66,7 @@ static void eye_init() {
     const VrConfig& c = g_eye_cfg = vr::load_config(".");
     gx::render_set_world_pitch(c.world_pitch_deg * 3.14159265f / 180.0f);
     gx::render_set_depth_layers(c.background_band, c.foreground_band, c.foreground_scale, c.hud_band, c.hud_band_scale);
+    gx::render_set_hud_push(c.hud_push_below, c.hud_push_to);
     gx::render_set_view_space_world(c.view_space_world);
     gx::render_set_eye_filter(vr::game_hooks().eye_filter);
     gx::render_set_vr_morph(1.0f, nullptr);

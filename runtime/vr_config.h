@@ -65,6 +65,11 @@ struct VrConfig {
     // far out in view space that should read at arm's length. 0 turns it off.
     float hud_band = 0.0f;
     float hud_band_scale = 1.0f;
+    // A draw in that layer modelled nearer than `hud_push_below` (view-space units) is
+    // pushed out to `hud_push_to` at the same angular size. 0 turns it off. See
+    // gx::render_set_hud_push.
+    float hud_push_below = 0.0f;
+    float hud_push_to = 0.0f;
 
     // What a perspective draw the game placed in view space itself (a position matrix with
     // no tilt, in the camera's own frame) is in stereo. Off, it is something held in front

@@ -560,7 +560,13 @@ off by default.
 - **HUD** (a band ending at or before `hud_band`, inside the foreground's) is scaled by
   `hud_band_scale` instead, for a game whose HUD is geometry in a band of its own: modelled
   twenty units out, at the weapon's scale it stood ten metres off, a billboard; at a tenth
-  it is at arm's length, the same angular size, with the weapon where it was.
+  it is at arm's length, the same angular size, with the weapon where it was. One scale
+  does not suit a piece modelled far nearer than the rest: a flat element a few units out,
+  where the rest is some tens, came to a few tens of centimetres from the eyes, painful to
+  look at. `hud_push_below` and `hud_push_to` (`render_set_hud_push`, off by default) take a
+  state whose nearest vertex in the frame is nearer than the first and scale it about the
+  camera, on top of the layer's scale, until that vertex is at the second: the same angular
+  size, at the depth of the HUD around it. The draw log names its layer `hud-band(pushed)`.
 
 A perspective draw the game placed in view space itself -- a position matrix with no tilt,
 in the camera's own frame (`PixelState::view_space`) -- is by default something held in
