@@ -453,6 +453,12 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     glUseProgram(p);
     GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     glUniform1iv(pr.u_tex, 8, units);
+    // The palettes of EFB copies read as CI4 or CI8, on the eight units after the maps'.
+    const GLint u_pal = glGetUniformLocation(p, "u_pal");
+    if (u_pal >= 0) {
+        GLint pal_units[8] = {8, 9, 10, 11, 12, 13, 14, 15};
+        glUniform1iv(u_pal, 8, pal_units);
+    }
     return g_programs.emplace(k, pr).first->second;
 }
 
@@ -677,6 +683,12 @@ void main() {
     if (intensity) {
         float y = clamp(dot(c.rgb, vec3(0.257, 0.504, 0.098)) + 16.0 / 255.0, 0.0, 1.0);
         c.rgb = vec3(y);
+        // I4 and I8 hold the intensity alone, which a texture of either format reads back
+        // in all four components, the alpha too; IA4 and IA8 keep the frame's alpha. I4
+        // keeps the top four bits of the 8-bit value: a game that reads the copy back as
+        // CI4 indexes its palette with exactly those.
+        if (fmt == 0) c = vec4(floor(floor(y * 255.0 + 0.5) / 16.0) / 15.0);
+        else if (fmt == 1) c = vec4(y);
     }
     // Single-channel formats replicate into all components like the texture decoder does.
     // R4 (0) is the red channel at 4 bits, read back as I4: a projected shadow draws its
@@ -1193,6 +1205,7 @@ struct AppliedState {
     uint32_t tex_id[8];
     uint8_t tex_sub[8];       // the unit holds an eye grab, not the game's texture
     GLuint sampler[8];
+    uint32_t pal_id[8];       // unit 8+m: the palette map m's EFB copy is read through
     int prim;
     bool hud_depth;
 };
@@ -1825,6 +1838,26 @@ static void apply_state(const PixelState& st, int prim) {
             glBindSampler(m, sampler);
             g_applied.sampler[m] = sampler;
         }
+    }
+    // The palettes an EFB copy is read through (PixelState::tex_pal), fetched texel by
+    // texel, so whatever sampler the unit has does not matter.
+    for (int m = 0; m < 8; m++) {
+        uint32_t id = st.tex_is_efb[m] ? st.tex_pal[m] : 0;
+        GLuint tex = 0;
+        if (id) {
+            auto it = g_textures.find(id);
+            if (it != g_textures.end()) {
+                it->second.last_used = g_render_frame;
+                tex = it->second.tex;
+            } else {
+                id = 0;
+            }
+        }
+        if (g_applied.valid && g_applied.pal_id[m] == id) continue;
+        if (!id && !g_applied.valid) { g_applied.pal_id[m] = 0; continue; }
+        glActiveTexture(GL_TEXTURE8 + m);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        g_applied.pal_id[m] = id;
     }
     if (!(held && memcmp(tsz, u.tsz, sizeof(tsz)) == 0)) {
         g_astat.tsz++;
@@ -3053,6 +3086,8 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     int eye_draw_index = 0;   // the flat draw log's numbering: every draw command, in order
     bool flat3d_cleared = false;
     const size_t eye_end = first_part_end(b, skip);
+    uint32_t disp_w, disp_h;
+    display_size(b, disp_w, disp_h);
     for (size_t i = 0; i < eye_end; i++) {
         Cmd& c = b.cmds[i];
         // Copies and the present are the first eye's business, done against the EFB. A
@@ -3065,6 +3100,14 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 grab_eye(g_restore_grab, w, h);
                 grabbed_restore = true;
             }
+            // A second copy of the whole frame in one frame is a later state of it: a
+            // pass that copies the frame, draws over it, and copies it again to post-
+            // process what it drew (a false-colour filter, then the hot things over it
+            // and a second filter on those). The first grab is of the frame before the
+            // second pass drew anything, so the next draw that samples the copy grabs
+            // again.
+            if (c.type == CmdType::EfbCopy && grabbed && c.copy.tex_id && is_fullscreen_copy(c.copy, disp_w, disp_h))
+                grabbed = false;
             cur_state = UINT32_MAX;
             gl_state_invalidate();
             continue;
@@ -3442,6 +3485,15 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     fprintf(stderr, "\n       ");
                     for (int i = 0; i < 8; i++)
                         if (st.tex_id[i]) fprintf(stderr, " mode%d=%06X", i, bp[i < 4 ? 0x80 + i : 0xA0 + (i - 4)]);
+                    // Each map's image format (BP 0x88-0x8B, 0xA8-0xAB), and for an EFB copy
+                    // the format it was copied in and the palette it is read through.
+                    for (int i = 0; i < 8; i++) {
+                        if (!st.tex_id[i]) continue;
+                        fprintf(stderr, " fmt%d=%u", i, (bp[i < 4 ? 0x88 + i : 0xA8 + (i - 4)] >> 20) & 15);
+                        if (st.tex_is_efb[i])
+                            fprintf(stderr, "(copy %02X%s)", st.tex_efb_fmt[i],
+                                    st.tex_pal[i] ? (st.tex_pal_bits[i] == 8 ? " pal8" : " pal4") : "");
+                    }
                     for (int r = 0; r < 4; r++)
                         fprintf(stderr, "\n        reg%d=%08X %08X  konst%d=%08X %08X", r, st.tev_reg[r][0], st.tev_reg[r][1],
                                 r, st.tev_konst[r][0], st.tev_konst[r][1]);

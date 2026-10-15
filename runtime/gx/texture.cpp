@@ -347,6 +347,54 @@ static void scan_used_indices(const uint8_t* src, uint32_t total, uint32_t fmt, 
     }
 }
 
+// An EFB copy read back through a palette. A game can copy the frame as intensity and then
+// bind the same memory as CI4 or CI8 with a TLUT loaded: each texel's intensity becomes an
+// index, and the palette turns the picture into false colour -- a heat map, say. On
+// hardware this is just memory read under another format. Here a copy stays on the GPU in
+// the shape it was copied in, so the renderer does the lookup itself: the palette is
+// decoded into a 16x1 or 256x1 texture beside the copy, and the shader turns the copy's
+// value into the index (shadergen's efb_pal_mask). Only a copy with as many bits a texel
+// as the index is read this way (a 4-bit copy as CI4, an 8-bit one as CI8); any other
+// pairing reorders texels within a block and is left as the copy.
+struct PalEntry {
+    std::shared_ptr<TexData> tex;
+    uint32_t last_frame;
+};
+static std::unordered_map<uint64_t, PalEntry> g_efb_palettes;  // by palette contents
+
+static uint32_t copy_bits(uint32_t fmt) {
+    switch (fmt & 15) {
+    case 0: return 4;                                    // I4, R4
+    case 1: case 7: case 8: case 9: case 10: return 8;   // I8, A8, R8, G8, B8
+    default: return 0;
+    }
+}
+
+static void efb_copy_palette(const TexParams& p, uint32_t copy_fmt, TexLookup& r,
+                             std::vector<std::shared_ptr<TexData>>& new_textures) {
+    const uint32_t bits = p.fmt == TF_CI4 ? 4 : p.fmt == TF_CI8 ? 8 : 0;
+    if (!bits || copy_bits(copy_fmt) != bits) return;
+    const uint32_t entries = 1u << bits;
+    if (p.tlut_off + entries * 2 > sizeof(g_tlut_mem)) return;
+    const uint8_t* pal = g_tlut_mem + p.tlut_off;
+    const uint64_t key = hash_bytes(pal, entries * 2, (uint64_t)p.tlut_fmt << 8 | bits);
+    PalEntry& e = g_efb_palettes[key];
+    if (!e.tex) {
+        e.tex = std::make_shared<TexData>();
+        e.tex->id = g_next_tex_id++;
+        e.tex->width = entries;
+        e.tex->height = 1;
+        e.tex->hash = key;
+        std::vector<uint32_t> px(entries);
+        for (uint32_t i = 0; i < entries; i++) px[i] = decode_tlut(pal, i, p.tlut_fmt);
+        e.tex->levels.push_back(std::move(px));
+        new_textures.push_back(e.tex);
+    }
+    e.last_frame = g_frame_counter;
+    r.pal_id = e.tex->id;
+    r.pal_bits = bits;
+}
+
 TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData>>& new_textures) {
     uint32_t addr = p.addr & 0x03FFFFFF;
     // EFB copies at this address take priority (the copy isn't written back to RAM),
@@ -364,7 +412,10 @@ TexLookup texture_lookup(const TexParams& p, std::vector<std::shared_ptr<TexData
         }
         if (eit != g_efb_copies.end()) {
             c.last_frame = g_frame_counter;
-            return {c.tex->id, true};
+            TexLookup r{c.tex->id, true};
+            r.efb_fmt = c.fmt;
+            efb_copy_palette(p, c.fmt, r, new_textures);
+            return r;
         }
     }
     uint32_t tlut_entries = 0;
@@ -479,6 +530,14 @@ void texture_evict() {
         if (g_frame_counter - it->second.last_frame > kIdleFrames) {
             drop_variants(it->second);
             it = g_cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = g_efb_palettes.begin(); it != g_efb_palettes.end();) {
+        if (g_frame_counter - it->second.last_frame > kIdleFrames) {
+            g_dead.push_back(it->second.tex->id);
+            it = g_efb_palettes.erase(it);
         } else {
             ++it;
         }

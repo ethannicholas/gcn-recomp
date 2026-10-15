@@ -46,6 +46,11 @@ struct PixelState {
     float viewport[6];         // XF 0x101A..0x101F
     uint32_t tex_id[8];        // texture per texmap (0 = none)
     uint8_t tex_is_efb[8];     // texmap is an EFB copy (sampled from render target copy)
+    // For an EFB copy: the format it was copied in (EfbCopyCmd::format), and the palette
+    // the game reads it through, if it binds the copy as CI4 or CI8 (TexLookup).
+    uint8_t tex_efb_fmt[8];
+    uint8_t tex_pal_bits[8];
+    uint32_t tex_pal[8];
     uint8_t num_texgens;
     uint8_t num_colors;
     // The draw's position matrix was the identity, so the game placed this geometry in

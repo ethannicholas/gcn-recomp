@@ -791,6 +791,9 @@ static void resolve_texture(PixelState& st, int map) {
     if (g_frametime) g_tex_ms += ms_since(t0);
     st.tex_id[map] = r.id;
     st.tex_is_efb[map] = r.efb;
+    st.tex_efb_fmt[map] = (uint8_t)r.efb_fmt;
+    st.tex_pal[map] = r.pal_id;
+    st.tex_pal_bits[map] = (uint8_t)r.pal_bits;
 }
 
 static PixelState g_last_state;

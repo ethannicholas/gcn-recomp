@@ -46,9 +46,23 @@ ShaderKey make_shader_key(const PixelState& st) {
         if (order & 0x40) used |= 1u << (order & 7);
     }
     for (uint32_t i = 0; i < nind; i++) used |= 1u << ((bp[0x27] >> (6 * i)) & 7);
-    for (int m = 0; m < 8; m++)
-        if ((used & (1u << m)) && st.tex_is_efb[m]) k.efb_tex_mask |= 1u << m;
+    for (int m = 0; m < 8; m++) {
+        if (!(used & (1u << m)) || !st.tex_is_efb[m]) continue;
+        k.efb_tex_mask |= 1u << m;
+        if (st.tex_pal[m]) k.efb_pal_mask |= 1u << (st.tex_pal_bits[m] == 8 ? 8 + m : m);
+        k.efb_conv |= (uint32_t)efb_conv_for(st.tex_efb_fmt[m]) << (4 * m);
+    }
     return k;
+}
+
+EfbConv efb_conv_for(uint32_t copy_fmt) {
+    if (!(copy_fmt & 0x10)) return EfbConvNone;
+    switch (copy_fmt & 15) {
+    case 0: return EfbConvI4;
+    case 1: return EfbConvI8;
+    case 2: case 3: return EfbConvIA;
+    default: return EfbConvNone;
+    }
 }
 
 static const char* kColorIn[16] = {
@@ -309,6 +323,8 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     // Only the shaders that fog read it, so every other one is generated exactly as before.
     if ((k.fog & 7) >= 2) s += "in vec2 v_fogz;\n";
     s += "uniform sampler2D u_tex[8];\n";
+    // The palettes EFB copies are read through (efb_pal_mask), on units 8-15.
+    if (k.efb_pal_mask) s += "uniform sampler2D u_pal[8];\n";
     s += "uniform ivec4 u_reg[4];\nuniform ivec4 u_konst[4];\n";
     s += "uniform vec2 u_texsize[8];\n";
     s += "uniform ivec3 u_indmtx[6];\n";  // 3 matrices x 2 rows (11-bit signed entries)
@@ -457,7 +473,30 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         if (fb) W("    tc += tc_prev;\n");
         W("    tc_prev = tc;\n");
         // ---- texture ----
-        if (tex_en && !tex_white) {
+        // An EFB copy the game reads through a palette, or one an eye may replace with
+        // its own grab when the copy was converted from the frame's colour: the texel is
+        // worked on as a float before it becomes the TEV's integer texel. The grab is the
+        // eye's colour, so it is converted as the copy was (kCopyFS in render_gl.cpp,
+        // with the same 4-bit truncation, which the palette's index depends on), and
+        // then, like the copy, it indexes the palette by its intensity.
+        const uint32_t pal_bits = ((k.efb_pal_mask >> (8 + map)) & 1) ? 8 : ((k.efb_pal_mask >> map) & 1) ? 4 : 0;
+        const uint32_t conv = subst ? (k.efb_conv >> (4 * map)) & 15 : EfbConvNone;
+        if (tex_en && !tex_white && (pal_bits || conv != EfbConvNone)) {
+            uint32_t tswap = (aenv >> 2) & 3;
+            W("    vec4 tf = texture(u_tex[%u], snap_tex(%u, tc) / u_texsize[%u]);\n", map, map, map);
+            if (conv != EfbConvNone) {
+                W("    if ((u_screen_uv & %u) != 0) {\n", cbit);
+                W("      float y = clamp(dot(tf.rgb, vec3(0.257, 0.504, 0.098)) + 16.0 / 255.0, 0.0, 1.0);\n");
+                if (conv == EfbConvI4) W("      tf = vec4(floor(floor(y * 255.0 + 0.5) / 16.0) / 15.0);\n");
+                else if (conv == EfbConvI8) W("      tf = vec4(y);\n");
+                else W("      tf = vec4(vec3(y), tf.a);\n");
+                W("    }\n");
+            }
+            if (pal_bits)
+                W("    tf = texelFetch(u_pal[%u], ivec2(int(round(tf.r * %.1f)), 0), 0);\n", map,
+                  pal_bits == 8 ? 255.0 : 15.0);
+            W("    tex = ivec4(round(tf * 255.0)).%s;\n", swizzle(k, tswap).c_str());
+        } else if (tex_en && !tex_white) {
             uint32_t tswap = (aenv >> 2) & 3;
             W("    tex = sample_tex(%u, snap_tex(%u, tc) / u_texsize[%u]).%s;\n", map, map, map, swizzle(k, tswap).c_str());
         } else {

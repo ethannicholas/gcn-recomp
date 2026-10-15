@@ -155,6 +155,24 @@ layer writes under `u_vr` 4, and it keeps the game's depth test and write. That 
 is only meaningful against draws in a foreground layer; mid-morph (`u_vr` 3 writes the
 eye's depth) the draw is left out. The draw log names its layer `eye-restore`.
 
+**Post-process passes over the whole frame.** A game can copy the whole frame and draw it
+straight back over the screen through a filter, orthographically: false colour, say. In an
+eye the copy's lookups are taken over by the eye's grab as for any whole-frame copy, but on
+the HUD frame the quad is a smaller picture hanging in front of the view. A game's filter
+calls such a draw `EyeScreen`, which puts it across the eye; since the grab is sampled at
+each fragment's own position, what it filters is this eye's frame. Two more things follow
+from such a pass:
+
+- A frame can copy the whole frame more than once, each copy a later state of it (a filter,
+  then more drawn over the filtered frame, then a second copy and filter). The eye grabs at
+  the first draw that samples a whole-frame copy, and again at the first such draw after
+  every later whole-frame copy. With one grab a frame, the second filter read the frame as
+  it was before the second pass drew.
+- The grab is the eye's colour, while the game's copy was converted from it, as intensity
+  for one. A substituted lookup is converted the same way in the shader (`EfbConv` in
+  `shadergen.h`: I4 with its truncation to four bits, I8, IA), so a filter that indexes a
+  palette by the copy's intensity gets the index the copy would have given.
+
 ## PC VR: OpenXR on desktop GL
 
 `openxr/xr_frontend.cpp` is the OpenXR frontend for every platform; `openxr/xr_desktop.cpp`
@@ -363,6 +381,22 @@ rounding `z * 16777215 + 0.5` lands on 16777216 in single precision, whose top b
 so a cleared depth buffer copied as Z8 read as the nearest depth. A game that renders its
 shadow casters into a cleared region from above, copies the depth as Z8 and then darkens
 its ground wherever the copy is below 1.0 shadowed the whole ground.
+
+**Copies read through a palette.** A game can copy the frame as intensity and then bind the
+same memory as CI4 or CI8 with a TLUT loaded: each texel becomes an index and the palette
+turns the picture into false colour. On hardware this is only memory read under another
+format; here a copy stays on the GPU in the format it was copied in, and was sampled as it
+was, grey. Now `texture_lookup`, finding a copy bound as CI4 over a 4-bit copy (I4, R4) or
+CI8 over an 8-bit one, decodes the palette into a 16x1 or 256x1 texture
+(`PixelState::tex_pal`), and the shader turns the copy's value into the index and fetches
+the palette on unit 8+m (`ShaderKey::efb_pal_mask`). Any other pairing reorders texels
+within a block and is still sampled as the copy. Palettes live by their contents and go
+when idle, like decoded textures. With this, an I4 or I8 copy also reads back its intensity
+in all four components, alpha included, as the formats do: the copy shader used to leave the
+frame's alpha in it. The I4 copy also keeps only the top four bits of the 8-bit intensity,
+which is the index a CI4 read takes. The verbose draw log prints each map's format, and for
+a copy the format it was copied in and whether it is read through a palette
+(`fmt7=8(copy 10 pal4)`).
 
 **A copy lives as long as its memory.** A copy is never written to RAM, so one the texture
 cache lets go of cannot be had again: the address decodes as whatever RAM holds there. The

@@ -20,6 +20,13 @@ struct TexParams {
 struct TexLookup {
     uint32_t id;
     bool efb;
+    // For an EFB copy: the format it was copied in (EfbCopyCmd::format, +0x10 when an
+    // intensity copy), and, when the game reads it back through a palette (bound as CI4
+    // or CI8 over a copy of as many bits a texel), that palette decoded as a 16x1 or
+    // 256x1 texture and the index's width in bits. 0 otherwise.
+    uint32_t efb_fmt = 0;
+    uint32_t pal_id = 0;
+    uint32_t pal_bits = 0;
 };
 
 extern uint32_t g_frame_counter;
