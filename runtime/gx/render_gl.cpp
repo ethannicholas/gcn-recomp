@@ -1359,6 +1359,16 @@ static void apply_state(const PixelState& st, int prim) {
     const uint32_t* bp = st.bp;
     const uint32_t* abp = g_applied.bp;
     ShaderKey key = make_shader_key(st);
+    {
+        // A draw an eye will give a foreground layer's game depth (u_vr 4, below) gets the
+        // program that works that depth out per fragment; the shader still checks u_vr, so
+        // a draw that ends up elsewhere keeps its own depth.
+        static const bool game_depth = !(getenv("GCN_EYE_FGDEPTH") && atoi(getenv("GCN_EYE_FGDEPTH")) == 0);
+        static const bool frag_depth = !(getenv("GCN_EYE_FGFRAGDEPTH") && atoi(getenv("GCN_EYE_FGFRAGDEPTH")) == 0);
+        if (g_vr_active && game_depth && frag_depth && g_morph >= 1.0f && (int)st.proj[6] == 0 && g_fg_to > 0.0f &&
+            st.viewport[5] / 16777215.0f <= g_fg_to && !g_cur_flat3d)
+            key.fg_depth = 1;
+    }
     g_astat.applies++;
     // `same` means the previous application is still in GL and the program is unchanged.
     const bool same = g_applied.valid && key == g_applied.key;

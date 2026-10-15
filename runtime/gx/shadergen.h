@@ -26,6 +26,9 @@ struct ShaderKey {
     uint32_t efb_conv;
     uint32_t ztex;  // bp[0xF5]: the Z texture's format (bits 0-1) and operation (bits 2-3); 0 when off
     uint32_t dst_alpha;  // dst_alpha_mode(): 0 off, 1 the constant alpha, 2 that and the TEV's as source 1
+    // Set by the renderer, not make_shader_key: a draw an eye gives a foreground layer's game
+    // depth (u_vr 4), whose depth is then worked out per fragment (see the vertex shader).
+    uint32_t fg_depth;
     bool operator==(const ShaderKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
 };
 

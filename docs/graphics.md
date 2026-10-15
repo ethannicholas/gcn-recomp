@@ -603,6 +603,17 @@ stripes in two frames of every six. The game's projection was made for that band
 order between layers is the bands' either way, and within one layer the camera's depth and
 an eye's differ only by the eye's offset. `GCN_EYE_FGDEPTH=0` writes the eye's depth again.
 
+That depth is worked out per fragment, not per vertex (`ShaderKey::fg_depth`). The game's
+z/w is linear in the camera's screen, not in an eye's: interpolated between the vertices in
+an eye turned away from the camera, it is wrong across a face, the more so the wider the
+face and the nearer the camera. A weapon held in the hand and looked at from the side, a few
+tens of centimetres out, has large faces at exactly that angle, and the error let the parts
+inside it win the depth test against its shell, which opened. The vertex shader passes the
+game's clip z and w, both linear in the vertex, so their perspective-correct interpolation
+is exact, and the fragment shader writes their ratio into the band. Only the programs of
+draws an eye gives such a layer write `gl_FragDepth`, so every other draw keeps early depth
+testing. `GCN_EYE_FGFRAGDEPTH=0` interpolates the vertices' depth again, for comparing.
+
 `GCN_DRAWLOG=<frame>` prints each draw's band and view-space box, which is how a game's
 layers are found. In stereo the flat pass is trimmed (see above) and logs only what it
 draws; `GCN_EYE_FULLFLAT=1` makes it list the whole frame.

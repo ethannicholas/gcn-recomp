@@ -174,6 +174,9 @@ out vec3 v_tex[8];
 // vertex position, so perspective-correct interpolation delivers them exactly and the
 // ratio is the real value at the fragment -- which a single interpolated z/w would not be.
 out vec2 v_fogz;
+// The game's clip z and w at the vertex, for a foreground layer's depth (u_vr 4), which is
+// worked out from their ratio per fragment for the same reason.
+out vec2 v_gdepth;
 void main() {
 )";
     // Fog is a curve over the 24-bit depth GX writes, and in an eye gl_FragCoord.z is
@@ -191,6 +194,7 @@ void main() {
     // which fogs exactly as the flat view does whatever the head is doing.
     static const bool eye_fog_z = !(getenv("GCN_EYE_FOGZ") && atoi(getenv("GCN_EYE_FOGZ")) == 0);
     s += "    vec2 gx_clip = vec2(1.0);\n";
+    s += "    v_gdepth = vec2(-1.0, 1.0);\n";
     s += eye_fog_z ? "    float fz = (u_vr == 1 || u_vr == 3 || u_vr == 4) ? (u_view * vec4(a_pos, 1.0)).z : a_pos.z;\n"
                    : "    float fz = a_pos.z;\n";
     s += R"(    float gz = u_zproj.x * fz + u_zproj.y;
@@ -214,9 +218,12 @@ void main() {
         // distances a game models a HUD at, and they fight. The game's own projection was
         // made for that band, so the depth it would have written goes in instead, from the
         // camera's position: what the flat view writes.
+        // The vertex's depth decides only clipping where the fragment shader works the depth
+        // out per fragment from v_gdepth (ShaderKey::fg_depth).
         if (u_vr == 4) {
             float cz = u_zproj.x * a_pos.z + u_zproj.y;
             float cw = u_zproj.z * a_pos.z + u_zproj.w;
+            v_gdepth = vec2(cz, cw);
             gl_Position.z = (u_vp_b.x + u_vp_b.y * cz / cw) * gl_Position.w;
         }
     } else if (u_vr == 2) {
@@ -322,6 +329,7 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     s += "in vec4 v_col0;\nin vec4 v_col1;\nin vec3 v_tex[8];\n";
     // Only the shaders that fog read it, so every other one is generated exactly as before.
     if ((k.fog & 7) >= 2) s += "in vec2 v_fogz;\n";
+    if (k.fg_depth) s += "in vec2 v_gdepth;\nuniform int u_vr;\nuniform vec4 u_vp_b;\n";
     s += "uniform sampler2D u_tex[8];\n";
     // The palettes EFB copies are read through (efb_pal_mask), on units 8-15.
     if (k.efb_pal_mask) s += "uniform sampler2D u_pal[8];\n";
@@ -674,6 +682,20 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         s += "  float zfrag = u_zplane.w != 0.0 ? clamp(u_zplane.x * gl_FragCoord.x + u_zplane.y * gl_FragCoord.y + u_zplane.z, 0.0, 1.0) : gl_FragCoord.z;\n";
         if (!k.ztex) s += "  gl_FragDepth = zfrag;\n";
         fragz = "zfrag";
+    }
+    // A foreground layer's game depth (u_vr 4), per fragment. Interpolated from the vertices
+    // in the eye's screen, the game's depth is right only where the eye looks the way the
+    // game's camera does: it is linear in the camera's screen, not in an eye turned away
+    // from it. A weapon held in the hand and looked at sideways spans a wide angle close to
+    // the camera, and across its large faces the error let the parts inside it win the
+    // depth test against its shell. The game's clip z and w are linear in the vertex, so
+    // their perspective-correct interpolation is exact, and the ratio is the depth the game
+    // would give this point, put in the band as the vertex shader puts it. (The flat view
+    // interpolates the game's z/w in the game's own screen, which is what makes it right
+    // there.)
+    if (k.fg_depth && !zfreeze && !k.ztex) {
+        s += "  float gdr = v_gdepth.y > 0.0 ? clamp(v_gdepth.x / v_gdepth.y, -1.0, 0.0) : -1.0;\n";
+        s += "  gl_FragDepth = u_vr == 4 ? 0.5 * (u_vp_b.x + u_vp_b.y * gdr) + 0.5 : gl_FragCoord.z;\n";
     }
     if (k.ztex) {
         static const char* kZTexel[4] = {"tex.a", "tex.a << 8 | tex.r", "tex.r << 16 | tex.g << 8 | tex.b",
