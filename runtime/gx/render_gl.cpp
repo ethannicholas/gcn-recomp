@@ -93,6 +93,10 @@ static int g_scale = 2;
 // game's camera -- see render_hud_frame.
 static bool g_vr_active = false;
 static float g_vr_proj[16], g_vr_view[16];
+// The eye's view as the frontend gave it (render_set_vr_eye). g_vr_view is this times the
+// batch's view turn (Batch::view_turn, set_view_turn), from the camera the game turned to
+// the one the viewer stands at, so that the turn leaves the world where it was.
+static float g_vr_view_head[16];
 // The eye's view with the world's pitch taken out, for world geometry. The HUD frame uses
 // g_vr_view untouched -- it is placed in the headset's space, not the game's.
 static float g_vr_view_world[16];
@@ -2497,8 +2501,23 @@ void render_set_first_person(bool on) {
 
 void render_set_vr_eye(const float proj[16], const float view[16], const float hud[16]) {
     memcpy(g_vr_proj, proj, sizeof(g_vr_proj));
+    memcpy(g_vr_view_head, view, sizeof(g_vr_view_head));
     memcpy(g_vr_view, view, sizeof(g_vr_view));
     memcpy(g_vr_hud, hud, sizeof(g_vr_hud));
+    compose_world_view();
+}
+
+// g_vr_view for `b`: the head's view times the batch's view turn, a rotation taking what
+// the game placed about its turned camera back to where the viewer's frame has it.
+static void apply_view_turn(const Batch& b) {
+    const float x = b.view_turn[0], y = b.view_turn[1], z = b.view_turn[2], w = b.view_turn[3];
+    const float R[16] = {
+        1 - 2 * (y * y + z * z), 2 * (x * y + w * z),     2 * (x * z - w * y),     0,
+        2 * (x * y - w * z),     1 - 2 * (x * x + z * z), 2 * (y * z + w * x),     0,
+        2 * (x * z + w * y),     2 * (y * z - w * x),     1 - 2 * (x * x + y * y), 0,
+        0,                       0,                       0,                       1,
+    };
+    mat4_mul(g_vr_view_head, R, g_vr_view);
     compose_world_view();
 }
 
@@ -3012,6 +3031,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     // flat into the EFB exactly as the hardware would, minus the scanout, and the eyes
     // then re-project only the main scene on top of correct textures.
     static std::vector<uint8_t> skip, trim;
+    apply_view_turn(b);
     mark_offscreen_passes(b, skip);
     const auto t_start = std::chrono::steady_clock::now();
     double ms_flat = 0.0;

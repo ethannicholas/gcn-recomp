@@ -112,6 +112,20 @@ for motion telemetry -- does its finding there, and its eye hook can then hand b
 frame hook already worked out for the same batch. `render_first_person()` tells the frame
 hook whether the eye will want it.
 
+**A camera the game turns after the head.** A game that turns its own camera to follow the
+viewer's gaze -- so that what the head looks at is on the game's screen, where its targeting
+and its 2D overlays reach -- would turn the world under the viewer by the same amount. It says
+how far it turned, from the guest thread, with `set_view_turn` (`render.h`): a quaternion in
+the eyes' frame, latched into each batch handed over after it (`Batch::view_turn`, at
+`flush_batch`), so the frame and its turn travel together however far behind the guest the
+renderer is. `render_execute_eye` draws each eye through the frontend's view times that
+turn (`apply_view_turn`): the world stays where the viewer saw it, and everything the game
+places about its camera -- the HUD frame, view-space draws, the sky -- turns with the camera.
+The frontends are untouched; the poses they publish (`vr::hand_pose`, `vr::eye_views`) stay
+in the unturned frame, and a game takes the turn off them before setting them against its
+camera. The morph between the panel and the eyes takes the turn at its panel end too, so a
+game keeps it at the identity outside the view it turns.
+
 A game's eye filter (`render_set_eye_filter`, `EyeFilter` in `render.h`) can call a draw
 `EyeFlat`: a 3D model the game composes into its 2D picture -- a character's face in a
 window of the HUD -- drawn with a frustum of its own into a viewport the size of that

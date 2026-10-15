@@ -185,6 +185,10 @@ struct Batch {
     // its own clock, one the game still referenced could go from the renderer while the
     // front end, believing it sent, never sent it again, and drew black from then on.
     std::vector<uint32_t> dead_textures;
+    // How far the game turned its camera for this frame beyond where the viewer stands, as
+    // set_view_turn last said when the frame was handed over: a unit quaternion (x, y, z, w)
+    // in the eyes' frame (x right, y up, z back). The eyes undo it -- see set_view_turn.
+    float view_turn[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
     // A race frame's batch is eight megabytes or so, and a fresh one grew into that
     // from nothing every frame -- reallocating and copying the vertex array a dozen
@@ -203,6 +207,19 @@ struct Batch {
 // Submission queue (guest thread -> render thread)
 void submit_batch(std::unique_ptr<Batch> b);
 std::unique_ptr<Batch> take_batch(int timeout_ms);
+
+// A game that turns its own camera after the viewer's head -- so that what the head looks
+// at is on the game's screen, where its targeting and its 2D overlays work -- says by how
+// much, from the guest thread, before it draws the frame that camera sees. Every batch
+// handed over from then on carries it (Batch::view_turn), and each eye is drawn through
+// its own view times the turn: the world stays where the viewer saw it, while everything
+// the game places relative to its camera -- the HUD frame, what it holds in view space --
+// turns with the camera. A pose the game reads (vr::hand_pose, vr::eye_views) is in the
+// unturned frame; the game takes the turn back off before using it against its camera.
+// It should stay the identity wherever the game is not drawing from the camera it turns:
+// a frame morphing between the panel and the eyes takes the turn at its panel end too.
+// The identity until a game says otherwise.
+void set_view_turn(const float q[4]);
 
 // Frame pacing / stats
 extern std::atomic<uint32_t> g_frames_submitted;

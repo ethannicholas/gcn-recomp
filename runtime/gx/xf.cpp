@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
@@ -140,9 +141,14 @@ static void pack_all(Batch& b);
 static bool xf_sync();
 static std::unique_ptr<struct Pending> g_pending;
 
+// set_view_turn's latest, set and read on the guest thread.
+static float g_view_turn[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+void set_view_turn(const float q[4]) { memcpy(g_view_turn, q, sizeof(g_view_turn)); }
+
 static void flush_batch() {
     if (g_batch && !g_batch->cmds.empty()) {
         texture_take_dead(g_batch->dead_textures);
+        memcpy(g_batch->view_turn, g_view_turn, sizeof(g_view_turn));
         // Transformed already (see xf_sync), or by the worker before the renderer sees it.
         // A batch with nothing to transform -- a copy alone, which a game that clears
         // strips of the EFB with copies makes between its passes -- still goes through the
