@@ -213,7 +213,12 @@ void main() {
         // constant for the draw, so there is nothing left to do per vertex.
         gl_Position = u_proj * vec4(a_pos, 1.0);
     } else if (u_vr == 3) {
+        // Part way between theater and stereo (morph_chain). The depth bands are kept as
+        // the eye keeps them (u_vr 1, above): without them a sky modelled a few tens of
+        // units out had its modelled depth for the whole transition and hid the world
+        // behind it, which reappeared only as the morph finished.
         gl_Position = u_proj * vec4(a_pos, 1.0);
+        gl_Position.z = (u_vp_b.x - 0.5 * u_vp_b.y) * gl_Position.w + 0.5 * u_vp_b.y * gl_Position.z;
     } else if (u_vr == 5) {
         // A 3D draw composed into the 2D picture, on the HUD frame like a 2D element (the
         // chain on the CPU includes its viewport), but with the depth the game's own

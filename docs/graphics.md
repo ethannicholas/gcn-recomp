@@ -132,7 +132,12 @@ depth test), but its matrix maps the game's clip space straight onto the eye's, 
 or frame between them. It covers the eye's whole field, fixed to the head, enlarged by
 `kEyeScreenOverscan` (1.1) so that its edges are out of sight. The cost is magnification:
 the game's 4:3 picture is stretched over a field several times as wide, so a film's texture
-reads coarser than on a television. The draw log names its layer `eye-screen`.
+reads coarser than on a television. The draw log names its layer `eye-screen`. In the morph
+between theater and stereo it goes from the panel to that placement, blended in the eye's clip
+space (`MorphKind::Screen`), and not to the HUD frame like other 2D draws. A filter can tell
+such a film by `EyeDrawFacts`' clip box and `clip_area`. The box alone also catches an
+outline drawn into a whole-screen viewport, and a mesh of letterbox bars whose box is the
+whole picture.
 
 ## PC VR: OpenXR on desktop GL
 
@@ -485,6 +490,9 @@ GX has no depth-range call, but a viewport carries a z range, and a game can con
 to a band of the depth buffer with it, layer by layer. The flat path has always applied the
 viewport's z terms; an eye now maps its own depth into the draw's band too, which keeps the
 game's layering and the eye's depth within each layer. A full-range viewport maps to itself.
+The morph between theater and stereo (`u_vr` 3) maps depth the same way. Until 2026-10-14 it
+did not, so for the whole transition a sky modelled tens of units out kept its modelled depth
+and hid the world behind it, and pillars and ships came back only as the morph finished.
 
 Two layers can also be placed differently in stereo, keyed on their band, for a game that
 names them (`render_set_depth_layers`; `background_band`, `foreground_band` and

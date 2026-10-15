@@ -166,7 +166,17 @@ static float g_panel[16];
 // Whether the vertex shader can write clip distances, which is what crops the morph.
 static bool g_clip_ok = false;
 // What a draw is to the morph: where it ends up in stereo decides what it is folded from.
-enum class MorphKind { World, CameraHeld, Hud };
+enum class MorphKind { World, CameraHeld, Hud, Screen };
+// An EyeScreen draw's matrix: the game's frame mapped onto the eye's own clip space,
+// enlarged past the field's edges, with no view between them.
+static void eye_screen_matrix(const float P[16], float M[16]) {
+    for (int c = 0; c < 4; c++) {
+        M[c * 4 + 0] = kEyeScreenOverscan * P[c * 4 + 0];
+        M[c * 4 + 1] = kEyeScreenOverscan * P[c * 4 + 1];
+        M[c * 4 + 2] = 0.0f;
+        M[c * 4 + 3] = P[c * 4 + 3];
+    }
+}
 static void morph_chain(const float P[16], MorphKind kind, float chain[16], float fog[16],
                         float crop[16]);
 // What the eye has drawn so far, standing in for the game's copy of the finished frame.
@@ -1427,7 +1437,7 @@ static void apply_state(const PixelState& st, int prim) {
         if (g_vr_active && g_morph < 1.0f) {
             // Part way between theater and stereo: see morph_chain.
             float M[16], F[16], C[16];
-            morph_chain(P, on_hud_frame ? MorphKind::Hud
+            morph_chain(P, screen ? MorphKind::Screen : on_hud_frame ? MorphKind::Hud
                            : view_space_3d ? MorphKind::CameraHeld : MorphKind::World,
                         M, F, C);
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
@@ -1480,12 +1490,7 @@ static void apply_state(const PixelState& st, int prim) {
                 // field's edges, with no view between them -- fixed to the head. Depth is
                 // the frame's own concern only (the HUD frame's draws are drawn without a
                 // depth test), so it is left at the middle of the range.
-                for (int c = 0; c < 4; c++) {
-                    M[c * 4 + 0] = kEyeScreenOverscan * P[c * 4 + 0];
-                    M[c * 4 + 1] = kEyeScreenOverscan * P[c * 4 + 1];
-                    M[c * 4 + 2] = 0.0f;
-                    M[c * 4 + 3] = P[c * 4 + 3];
-                }
+                eye_screen_matrix(P, M);
             } else {
                 mat4_mul(g_vr_hud_eff, P, a);   // the game's 2D frame, placed in view space
                 mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
@@ -2402,7 +2407,7 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     note_fullscreen_copies(b);
     // What each orthographic state's draws cover together, in its clip space (x = p0*x + p1,
     // y = p2*y + p3 for GX's orthographic projection), for EyeDrawFacts' box.
-    std::vector<float> box(b.states.size() * 4, 0.0f);
+    std::vector<float> box(b.states.size() * 4, 0.0f), area(b.states.size(), 0.0f);
     std::vector<uint8_t> boxed(b.states.size(), 0);
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
@@ -2417,6 +2422,17 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
             r[0] = std::min(r[0], x); r[1] = std::max(r[1], x);
             r[2] = std::min(r[2], y); r[3] = std::max(r[3], y);
         }
+        if (c.prim != 0) continue;  // lines and points cover nothing
+        auto clip = [&](uint32_t v, float& x, float& y) {
+            const float* pos = b.verts[b.indices[c.first + v]].pos;
+            x = st.proj[0] * pos[0] + st.proj[1];
+            y = st.proj[2] * pos[1] + st.proj[3];
+        };
+        for (uint32_t t = 0; t + 2 < c.count; t += 3) {
+            float x0, y0, x1, y1, x2, y2;
+            clip(t, x0, y0); clip(t + 1, x1, y1); clip(t + 2, x2, y2);
+            area[c.state] += 0.5f * fabsf((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+        }
     }
     std::vector<int8_t> answer(b.states.size(), -1);
     std::vector<uint8_t> hidden_mtx;   // EyeHideObject: the position matrices to clear of draws
@@ -2428,6 +2444,7 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
             EyeDrawFacts f = draw_facts(b.states[c.state]);
             const float* r = &box[c.state * 4];
             f.clip_x0 = r[0]; f.clip_x1 = r[1]; f.clip_y0 = r[2]; f.clip_y1 = r[3];
+            f.clip_area = area[c.state];
             a = (int8_t)g_eye_filter(b.states[c.state], f);
         }
         if (a == EyeKeep) continue;
@@ -2500,6 +2517,21 @@ static void morph_chain(const float P[16], MorphKind kind, float chain[16], floa
     mat4_mul(g_panel, P, T);
     memset(fog, 0, 16 * sizeof(float));
     fog[0] = fog[5] = fog[10] = fog[15] = 1.0f;
+    if (kind == MorphKind::Screen) {
+        // An EyeScreen draw ends across the whole eye, in the eye's clip space, so the two
+        // ends are blended there: the panel's chain, whose w is the panel's distance, and
+        // the screen's, whose w is 1 and is scaled by that distance to match. It leaves the
+        // panel for the eye's edges rather than for the HUD frame, where a film with dark
+        // borders showed them as bands across the HUD for the whole transition.
+        float VT[16], PVT[16], Ms[16];
+        mat4_mul(g_vr_view, T, VT);
+        mat4_mul(g_vr_proj, VT, PVT);
+        eye_screen_matrix(P, Ms);
+        for (int i = 0; i < 16; i++) chain[i] = (1.0f - k) * PVT[i] + k * D * Ms[i];
+        memset(crop, 0, 16 * sizeof(float));
+        for (int i = 0; i < 4; i++) crop[12 + i] = 1.0f;
+        return;
+    }
     switch (kind) {
     case MorphKind::World:
         memcpy(S, g_world_xform, sizeof(S));

@@ -87,8 +87,10 @@ struct EyeDrawFacts {
     // For an orthographic state, what its draws in this frame cover together, in its
     // projection's clip space: -1..1 on both axes is the whole picture. A state's viewport
     // says nothing of that (an outline drawn into a whole-screen viewport is still an
-    // outline). Zero for a perspective state.
-    float clip_x0, clip_x1, clip_y0, clip_y1;
+    // outline). Zero for a perspective state. clip_area is the area of its triangles in the
+    // same space, overlaps counted each time: 4 is the whole picture once, and a frame or a
+    // pair of letterbox bars, whose box is the whole picture too, comes to a fraction of it.
+    float clip_x0, clip_x1, clip_y0, clip_y1, clip_area;
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
 enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4 };
