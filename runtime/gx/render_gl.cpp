@@ -1505,9 +1505,16 @@ static void apply_state(const PixelState& st, int prim) {
             // panel in both eyes, and the disparity of one at depth z is e * (1 - D/z) of
             // the panel's half-width -- the eyes' own separation at infinity. In the
             // vertex shader clip x is P00*x + P[8]*z + P[12], so both terms are in P.
+            //
+            // The game's background band (render_set_depth_layers) is the exception: a sky
+            // modelled some tens of units out -- a planet, the stars -- is at infinity, as
+            // the eyes draw it. The shear alone gives every point the disparity of one at
+            // infinity, so the move to the side is left out. With it, the planet of a
+            // cinematic stood a few metres behind the panel while hiding nothing it should
+            // not: its band kept its occlusion right and its depth wrong.
             float Q[16];
             memcpy(Q, P, sizeof(Q));
-            Q[12] = -P[0] * g_flat_eye;
+            Q[12] = background ? 0.0f : -P[0] * g_flat_eye;
             Q[8] -= g_flat_eye / g_flat_halfw;
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, Q);
             glUniform1i(pr.u_vr, 0);
@@ -2393,13 +2400,36 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     // the state's, so each state is asked once and its answer stands for its draws.
     if (!g_eye_filter) return;
     note_fullscreen_copies(b);
+    // What each orthographic state's draws cover together, in its clip space (x = p0*x + p1,
+    // y = p2*y + p3 for GX's orthographic projection), for EyeDrawFacts' box.
+    std::vector<float> box(b.states.size() * 4, 0.0f);
+    std::vector<uint8_t> boxed(b.states.size(), 0);
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || skip[i]) continue;
+        const PixelState& st = b.states[c.state];
+        if ((int)st.proj[6] == 0) continue;
+        float* r = &box[c.state * 4];
+        for (uint32_t v = 0; v < c.count; v++) {
+            const float* pos = b.verts[b.indices[c.first + v]].pos;
+            const float x = st.proj[0] * pos[0] + st.proj[1], y = st.proj[2] * pos[1] + st.proj[3];
+            if (!boxed[c.state]) { r[0] = r[1] = x; r[2] = r[3] = y; boxed[c.state] = 1; }
+            r[0] = std::min(r[0], x); r[1] = std::max(r[1], x);
+            r[2] = std::min(r[2], y); r[3] = std::max(r[3], y);
+        }
+    }
     std::vector<int8_t> answer(b.states.size(), -1);
     std::vector<uint8_t> hidden_mtx;   // EyeHideObject: the position matrices to clear of draws
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
         if (c.type != CmdType::Draw || skip[i]) continue;
         int8_t& a = answer[c.state];
-        if (a < 0) a = (int8_t)g_eye_filter(b.states[c.state], draw_facts(b.states[c.state]));
+        if (a < 0) {
+            EyeDrawFacts f = draw_facts(b.states[c.state]);
+            const float* r = &box[c.state * 4];
+            f.clip_x0 = r[0]; f.clip_x1 = r[1]; f.clip_y0 = r[2]; f.clip_y1 = r[3];
+            a = (int8_t)g_eye_filter(b.states[c.state], f);
+        }
         if (a == EyeKeep) continue;
         if (a == EyeFlat) {
             if (g_flat3d.empty()) g_flat3d.assign(b.states.size(), 0);

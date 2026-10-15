@@ -466,6 +466,13 @@ int main(int argc, char** argv) {
 
     gx::render_set_shader_cache("shaders.bin");
     gx::render_init(scale);
+    // The app sets the game's depth layers and panel band whatever it is showing, and the
+    // stereo pair (GCN_THEATER_STEREO) uses both: its HUD sits on the panel and its sky at
+    // infinity.
+    if (!g_eye_mode && getenv("GCN_THEATER_STEREO")) {
+        gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale, g_vrcfg.hud_band, g_vrcfg.hud_band_scale);
+        gx::render_set_panel_band(g_vrcfg.panel_band);
+    }
     if (g_eye_mode) {
         eye_init();
         gpu_timer_init();

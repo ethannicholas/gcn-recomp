@@ -84,6 +84,11 @@ struct EyeDrawFacts {
     bool samples_fullscreen_copy; // ... of the whole frame, which an eye substitutes its own grab for
     float band_lo, band_hi;       // the viewport's depth band
     float vp_x, vp_y, vp_w, vp_h; // the viewport on the screen, in EFB pixels from the top left
+    // For an orthographic state, what its draws in this frame cover together, in its
+    // projection's clip space: -1..1 on both axes is the whole picture. A state's viewport
+    // says nothing of that (an outline drawn into a whole-screen viewport is still an
+    // outline). Zero for a perspective state.
+    float clip_x0, clip_x1, clip_y0, clip_y1;
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
 enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4 };
