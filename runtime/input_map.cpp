@@ -1,5 +1,6 @@
 // See input_map.h.
 #include "input_map.h"
+#include "ffb.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -58,6 +59,9 @@ struct Binding {
 
 std::string g_path;
 std::vector<Binding> g_bindings;
+FfbSettings g_ffb;
+std::string g_ffb_device;  // ffb_device, "#n" removed; empty for the stick_x binding's
+int g_ffb_nth = 1;
 std::vector<SDL_Joystick*> g_open;  // every joystick present, in the order it arrived
 
 bool same_name(const char* a, const std::string& b) {
@@ -100,9 +104,57 @@ SDL_Joystick* find_device(const std::string& name, int nth) {
     return nullptr;
 }
 
+// The wheel: ffb_device, or the device of the first whole axis bound to stick_x. Its
+// lock is where that binding's gain and dead zone put the stick at full deflection.
+void attach_wheel() {
+    const Binding* steer = nullptr;
+    for (const auto& b : g_bindings)
+        if (b.target == Target::StickX && b.kind == Kind::Axis && b.half == Half::Whole &&
+            (g_ffb_device.empty() || (same_name(g_ffb_device.c_str(), b.device) && b.nth == g_ffb_nth))) {
+            steer = &b;
+            break;
+        }
+    SDL_Joystick* j = !g_ffb_device.empty() ? find_device(g_ffb_device, g_ffb_nth) : steer ? steer->joy : nullptr;
+    float lock = 1.0f;
+    if (steer && steer->gain > 1.0f) lock = steer->deadzone + (1.0f - steer->deadzone) / steer->gain;
+    ffb_attach(j, steer ? steer->index : 0, lock);
+}
+
 void resolve() {
     for (auto& b : g_bindings)
         if (b.kind != Kind::Key) b.joy = find_device(b.device, b.nth);
+    attach_wheel();
+}
+
+bool parse_float(const std::string& s, float& v);
+
+// ffb settings: `ffb = on|off`, `ffb_device = "<device>"`, `ffb_<name> = <number>`.
+bool parse_ffb(const std::vector<std::string>& w, std::string& err) {
+    if (w.size() != 3 || w[1] != "=") { err = "expected " + w[0] + " = <value>"; return false; }
+    if (w[0] == "ffb") {
+        if (w[2] == "on") g_ffb.on = true;
+        else if (w[2] == "off") g_ffb.on = false;
+        else { err = "ffb is on or off"; return false; }
+        return true;
+    }
+    if (w[0] == "ffb_device") { split_nth(w[2], g_ffb_device, g_ffb_nth); return true; }
+    static const struct { const char* name; float FfbSettings::*f; } kKeys[] = {
+        {"ffb_gain", &FfbSettings::gain}, {"ffb_stop", &FfbSettings::stop},
+        {"ffb_stop_stiffness", &FfbSettings::stop_stiffness}, {"ffb_stop_damper", &FfbSettings::stop_damper}, {"ffb_centre_rest", &FfbSettings::centre_rest},
+        {"ffb_centre", &FfbSettings::centre}, {"ffb_speed_kmh", &FfbSettings::speed_kmh},
+        {"ffb_load", &FfbSettings::load}, {"ffb_slide", &FfbSettings::slide},
+        {"ffb_damper", &FfbSettings::damper}, {"ffb_road", &FfbSettings::road},
+        {"ffb_jolt", &FfbSettings::jolt}, {"ffb_rumble", &FfbSettings::rumble},
+    };
+    for (const auto& k : kKeys)
+        if (w[0] == k.name) {
+            float v;
+            if (!parse_float(w[2], v) || v < 0.0f) { err = w[0] + " needs a number, 0 or more"; return false; }
+            g_ffb.*k.f = v;
+            return true;
+        }
+    err = "unknown setting \"" + w[0] + "\"";
+    return false;
 }
 
 // Splits a line into words: "quoted strings" are one word, '=' is a word of its own, and
@@ -230,6 +282,8 @@ void print_targets() {
 bool input_map_load(const char* path) {
     g_path = path;
     g_bindings.clear();
+    g_ffb = FfbSettings();
+    g_ffb_device.clear();
     FILE* f = fopen(path, "rb");
     if (!f) return true;
     char line[512];
@@ -241,9 +295,12 @@ bool input_map_load(const char* path) {
         std::string err;
         Binding b;
         b.line = n;
-        if (tokenize(line, w, err) && (w.empty() || parse_line(w, b, err))) {
-            if (!w.empty()) g_bindings.push_back(b);
-            continue;
+        if (tokenize(line, w, err)) {
+            if (w.empty()) continue;
+            if (w[0].compare(0, 3, "ffb") == 0 ? parse_ffb(w, err) : parse_line(w, b, err)) {
+                if (w[0].compare(0, 3, "ffb") != 0) g_bindings.push_back(b);
+                continue;
+            }
         }
         fprintf(stderr, "%s:%d: %s; line ignored\n", path, n, err.c_str());
         ok = false;
@@ -251,6 +308,7 @@ bool input_map_load(const char* path) {
     fclose(f);
     fprintf(stderr, "%s: %zu binding%s\n", path, g_bindings.size(), g_bindings.size() == 1 ? "" : "s");
     if (!ok) print_targets();
+    ffb_configure(g_ffb);
     resolve();
     return ok;
 }
@@ -284,6 +342,7 @@ void input_map_event(const SDL_Event& e) {
 }
 
 void input_map_apply(PadState& p) {
+    ffb_update(pad_motor(0));
     if (g_bindings.empty()) return;
     const uint8_t* keys = SDL_GetKeyboardState(nullptr);
     float v[(int)Target::Count] = {};
@@ -320,8 +379,10 @@ void input_map_apply(PadState& p) {
     stick(Target::CStickY, Target::CStickDown, Target::CStickUp, p.cstick_y);
 }
 
+void input_map_shutdown() { ffb_shutdown(); }
+
 // ---------------------------------------------------------------------------
-// --list-controls
+// --list-controls and --test-ffb
 
 namespace {
 
@@ -346,7 +407,7 @@ std::string quoted_key(SDL_Scancode sc) {
 
 int input_map_probe() {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -381,8 +442,9 @@ int input_map_probe() {
                 if (!j || std::find(g_open.begin(), g_open.end(), j) != g_open.end()) break;
                 g_open.push_back(j);
                 settling.push_back({SDL_JoystickInstanceID(j), SDL_GetTicks() + kSettleMs});
-                printf("device \"%s\": %d axes, %d buttons, %d hats\n", device_label(j).c_str(),
-                       SDL_JoystickNumAxes(j), SDL_JoystickNumButtons(j), SDL_JoystickNumHats(j));
+                printf("device \"%s\": %d axes, %d buttons, %d hats%s\n", device_label(j).c_str(),
+                       SDL_JoystickNumAxes(j), SDL_JoystickNumButtons(j), SDL_JoystickNumHats(j),
+                       SDL_JoystickIsHaptic(j) == 1 ? ", force feedback" : "");
                 for (int a = 0; a < SDL_JoystickNumAxes(j); a++) {
                     int16_t rest = 0;
                     if (!SDL_JoystickGetAxisInitialState(j, a, &rest)) rest = SDL_JoystickGetAxis(j, a);
@@ -442,6 +504,53 @@ int input_map_probe() {
         fflush(stdout);
         SDL_Delay(10);
     }
+    if (win) SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 0;
+}
+
+int input_map_test_ffb(const char* path) {
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) != 0) {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_Window* win = SDL_CreateWindow("Force feedback test (Escape quits)", SDL_WINDOWPOS_CENTERED,
+                                       SDL_WINDOWPOS_CENTERED, 560, 120, 0);
+    input_map_load(path);
+    printf("The wheel as in a menu: the stop at full lock, light centring, the damper, and the\n"
+           "rumble for half a second in every four. Escape, with this window in front, or\n"
+           "closing it quits.\n\n");
+    fflush(stdout);
+    const Binding* steer = nullptr;
+    for (const auto& b : g_bindings)
+        if (b.target == Target::StickX && b.kind == Kind::Axis) { steer = &b; break; }
+    if (!steer) printf("controls.txt binds no axis to stick_x.\n");
+    bool running = true;
+    uint32_t shown = 0;
+    while (running) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            input_map_event(e);
+            if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE))
+                running = false;
+        }
+        const uint32_t now = SDL_GetTicks();
+        ffb_update(now % 4000 < 500);
+        if (steer && steer->joy && now - shown >= 100) {
+            shown = now;
+            const float v = value(*steer, SDL_GetKeyboardState(nullptr));
+            const int at = (int)std::lround((v + 1.0f) * 20.0f);
+            char bar[42];
+            for (int i = 0; i < 41; i++) bar[i] = i == at ? '#' : i == 20 ? '|' : '-';
+            bar[41] = 0;
+            printf("\rstick_x [%s] %+.2f%s", bar, v, std::fabs(v) >= 1.0f ? " full lock" : "          ");
+            fflush(stdout);
+        }
+        SDL_Delay(2);
+    }
+    printf("\n");
+    input_map_shutdown();
     if (win) SDL_DestroyWindow(win);
     SDL_Quit();
     return 0;

@@ -33,6 +33,11 @@ enum { CSR_TSTART = 1u, CSR_RDSTINTMSK = 1u << 27, CSR_RDSTINT = 1u << 28, CSR_C
 static inline uint32_t sisr_shift(int chan) { return 24 - 8 * chan; }
 enum { SR_NOREP = 0x08, SR_RDST = 0x20 };
 
+bool pad_motor(int chan) {
+    const uint32_t out = g_outbuf[chan];
+    return (out >> 16) == 0x40 && (out & 3) == 1;
+}
+
 static void si_update_irq() {
     bool rdst = false;
     for (int i = 0; i < 4; i++) if ((g_sisr >> sisr_shift(i)) & SR_RDST) rdst = true;

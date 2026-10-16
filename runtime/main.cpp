@@ -118,6 +118,7 @@ static void on_interrupt() {
     }
     plat_watchdog(2, 2);  // never hang in here (stdio locks may be held by other threads)
     input_log_end();
+    input_map_shutdown();  // a wheel left pushing is a wheel pushing at nobody
     debug_dump_threads();
     plat_exit_now(1);
 }
@@ -133,6 +134,7 @@ static void on_fault(const void* fault_addr, int code) {
         fprintf(stderr, "\nFAULT: host address %p (code %d)\n", fault_addr, code);
     plat_watchdog(2, 2);
     input_log_end();
+    input_map_shutdown();
     plat_backtrace_print();
     debug_dump_threads();
     plat_exit_now(1);
@@ -202,6 +204,11 @@ static void merge_desktop_pad(PadState& p) {
         if (rt > 1000) { p.trig_r = std::max(p.trig_r, (uint8_t)(rt * 255 / 32767)); if (rt > 30000) p.buttons |= PAD_R; }
     }
     input_map_apply(p);
+    // The pad's rumble motor on the gamepad, renewed while it runs.
+    static bool rumbling = false;
+    const bool motor = pad_motor(0);
+    if (g_ctrl && (motor || rumbling)) SDL_GameControllerRumble(g_ctrl, motor ? 0x6000 : 0, motor ? 0xA000 : 0, motor ? 200 : 0);
+    rumbling = motor;
 }
 
 static void update_pad() {
@@ -247,6 +254,7 @@ int main(int argc, char** argv) {
     const char* record_to = nullptr;
     int record_w = 2560, record_h = 1440;
     const char* controls = "controls.txt";
+    bool test_ffb = false;
     // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
     const char* telemetry_to = getenv("GCN_TELEMETRY");
     int scale = 2;
@@ -258,6 +266,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--eye")) g_eye_mode = true;
         else if (!strcmp(argv[i], "--vr")) vr = true;
         else if (!strcmp(argv[i], "--list-controls")) return input_map_probe();
+        else if (!strcmp(argv[i], "--test-ffb")) test_ffb = true;
         else if (!strncmp(argv[i], "--controls=", 11)) controls = argv[i] + 11;
         else if (!strcmp(argv[i], "--telemetry")) telemetry_to = "";
         else if (!strncmp(argv[i], "--telemetry=", 12)) telemetry_to = argv[i] + 12;
@@ -278,6 +287,7 @@ int main(int argc, char** argv) {
         else if (!strncmp(argv[i], "--dump-every=", 13)) gx::g_dump_every = atoi(argv[i] + 13);
         else if (argv[i][0] != '-') iso = argv[i];
     }
+    if (test_ffb) return input_map_test_ffb(controls);
     plat_install_crash_handlers(on_interrupt, on_fault);
     if (record_to && !record::start(record_to, record_w, record_h, 60)) return 1;
     if (telemetry_to && !telemetry::configure(telemetry_to)) {
@@ -339,7 +349,7 @@ int main(int argc, char** argv) {
     // Joysticks are read without the window's focus: in --vr the headset has it, and a
     // wheel or pedals have no reason to stop when another window is clicked.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) fatal("SDL_Init: %s", SDL_GetError());
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC) != 0) fatal("SDL_Init: %s", SDL_GetError());
     input_map_load(controls);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     const bool gl_debug = getenv("GCN_GL_DEBUG") != nullptr;
@@ -391,6 +401,7 @@ int main(int argc, char** argv) {
         const int rc = xr_desktop_main({win, pump_events, merge_desktop_pad}, iso);
         record::finish();
         input_log_end();
+        input_map_shutdown();
         threads_request_quit();
         plat_exit_now(rc);
     }
@@ -480,6 +491,7 @@ int main(int argc, char** argv) {
     }
     record::finish();
     input_log_end();
+    input_map_shutdown();
     threads_request_quit();
     plat_exit_now(0);
 }

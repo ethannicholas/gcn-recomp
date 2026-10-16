@@ -17,3 +17,6 @@ struct PadState {
 };
 
 void pad_set_state(int chan, const PadState& s);
+// Whether the game has the pad's rumble motor running: the low bits of the poll command
+// in the channel's output buffer (PADControlMotor).
+bool pad_motor(int chan);

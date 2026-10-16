@@ -123,7 +123,10 @@ bool configure(const char* spec) {
     return true;
 }
 
-bool enabled() { return g_sock != kNoSocket; }
+static void (*g_listener)(const Motion&);
+void set_listener(void (*fn)(const Motion&)) { g_listener = fn; }
+
+bool enabled() { return g_sock != kNoSocket || g_listener; }
 
 float get(const char* k, float fallback) { return key(k, fallback); }
 
@@ -191,7 +194,8 @@ float smoothstep(float t) {
 }  // namespace
 
 void publish(const Motion& in) {
-    if (!enabled()) return;
+    if (g_listener) g_listener(in);
+    if (g_sock == kNoSocket) return;
     static auto t_prev = std::chrono::steady_clock::now();
     const auto now = std::chrono::steady_clock::now();
     const float dt = fminf(0.1f, std::chrono::duration<float>(now - t_prev).count());

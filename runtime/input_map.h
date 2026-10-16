@@ -41,6 +41,12 @@
 //
 // --list-controls runs input_map_probe() instead of the game: it prints the devices and,
 // for each control pressed or moved, the source to paste into the file.
+//
+// Force feedback (ffb.h) goes to the device stick_x is bound to, unless the file says
+// otherwise:
+//   ffb = off                     none
+//   ffb_device = "<device>"       another device
+//   ffb_<setting> = <number>      FfbSettings without its prefix: ffb_gain = 0.5
 #pragma once
 #include "hw/pad.h"
 
@@ -56,5 +62,10 @@ void input_map_event(const SDL_Event& e);
 bool input_map_binds_index(int device_index);
 // The file's bindings, merged into `p`.
 void input_map_apply(PadState& p);
+// Stops the wheel's force feedback (ffb.h), before the program exits.
+void input_map_shutdown();
 // The --list-controls loop. SDL must not be initialised yet. Returns the exit code.
 int input_map_probe();
+// --test-ffb: the file's wheel with its force feedback and no game, showing where the
+// steering is. SDL must not be initialised yet. Returns the exit code.
+int input_map_test_ffb(const char* path);

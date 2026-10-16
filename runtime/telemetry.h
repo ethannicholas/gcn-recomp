@@ -55,8 +55,12 @@ struct Motion {
 // "host:port", "" or null for the default. Reads telemetry.txt. Returns false if the
 // destination does not parse or the socket cannot be made.
 bool configure(const char* spec);
+// Whether anything takes the game's Motion: the packets, or a listener.
 bool enabled();
 void publish(const Motion& m);
+// Another taker of every Motion published, as the game sent it, before the fades: the
+// wheel's force feedback (ffb.h). Called on the game's thread. Null for none.
+void set_listener(void (*fn)(const Motion&));
 
 // A key from telemetry.txt that this module does not know, for the game's own use.
 float get(const char* key, float fallback);
