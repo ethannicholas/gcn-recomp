@@ -144,7 +144,11 @@ own projection and then its viewport, which is exactly where the flat frame puts
 target has no viewport to bound it), and depth-tested by the depth the game's own projection
 gives it, so its parts hide one another as on the screen. The eye's depth buffer is cleared
 before the first of them: they sort among themselves, in front of everything, as the HUD
-does. `EyeDrawFacts` carries the viewport's rectangle for a filter to tell them by.
+does. `EyeDrawFacts` carries the viewport's rectangle for a filter to tell them by. A model
+the game draws through an orthographic projection instead -- a face reflected on a visor --
+can be called `EyeFlat` too. It went on the HUD frame anyway, as every ortho draw does, but
+there with no depth test, so its parts lay in the order they were drawn: eyes drawn after a
+face showed through it. Until 2026-10-15 `EyeFlat` applied only to a perspective draw.
 
 `EyeScreen` is for an orthographic draw over the whole picture: a film on a visor or a lens
 (steam, rain, a flash). On the HUD frame such a draw is a panel at the HUD's distance and
@@ -447,6 +451,18 @@ The filter's `dest` is the physical address the copy register holds, not the gam
 pointer to it. The guest's draw-done
 waits for the front end, so the CPU then finds the bytes there. Each one is a round trip
 through the transform and the renderer, which is why it is opt-in and per copy.
+
+## Fog's type
+
+BP 0xF1 holds the fog's C in its low 20 bits, then the projection bit (20: set for an
+orthographic fog) and the function, fsel, in bits 21-23 -- as `GXSetFog` packs its
+`GXFogType`, `fsel = type & 7` and `proj = type >> 3`. The shader key reads the two back
+into that type. Until 2026-10-16 it took bits 20-23 as the type, so the projection bit
+landed as the function's lowest bit and the function was read one bit up: exponential fog
+(4) came out as no fog at all, linear (2) as exponential and exp2 (5) as an orthographic
+linear one. A game that fogs a room with linear fog was drawn too dense, and one whose fog
+is exponential (water, say) was clear. `GCN_DRAWLOG_VERBOSE` prints each fogged draw's
+type, registers, colour and, for a perspective fog, the start and end distances they make.
 
 ## Constant destination alpha
 

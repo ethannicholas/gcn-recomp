@@ -35,7 +35,11 @@ ShaderKey make_shader_key(const PixelState& st) {
     for (int i = 0; i < 8; i++) k.ksel[i] = bp[0xF6 + i];
     k.alpha_func = (bp[0xF3] >> 16) & 0xFF;
     k.iref = nind ? bp[0x27] & ((1u << (6 * nind)) - 1) : 0;
-    k.fog = (bp[0xF1] >> 20) & 0xF;  // proj bit + fsel
+    // The fog's type as GXSetFog takes it: fsel (bits 21-23) in the low three bits, and the
+    // projection bit (20, set for an orthographic one) on top. Until 2026-10-16 this read
+    // bits 20-23 as the type, the projection bit as its lowest: exponential fog (4) came out
+    // as none, linear (2) as exponential and exp2 (5) as an orthographic linear one.
+    k.fog = ((bp[0xF1] >> 21) & 7) | (((bp[0xF1] >> 20) & 1) << 3);
     k.num_texgens = st.num_texgens;
     k.efb_has_alpha = (bp[0x43] & 7) == 1;
     if ((bp[0xF5] >> 2) & 3) k.ztex = bp[0xF5] & 0xF;

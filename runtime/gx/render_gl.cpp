@@ -1427,8 +1427,10 @@ static void apply_state(const PixelState& st, int prim) {
     // positions are in a little scene of its own, so in the world it floats at whatever
     // depth that scene happens to put it, which matches nothing the HUD frame shows. It goes
     // on the HUD frame instead, through its own projection and viewport -- exactly where the
-    // flat frame has it -- and keeps the game's own depth to sort its parts by.
-    const bool flat3d = g_vr_active && g_cur_flat3d && perspective;
+    // flat frame has it -- and keeps the game's own depth to sort its parts by. A model
+    // drawn orthographically is the same thing: on the HUD frame either way, but without
+    // this it had no depth test there, and its parts lay in the order they were drawn.
+    const bool flat3d = g_vr_active && g_cur_flat3d;
     // An orthographic draw over the whole picture the game asked to have across the eye
     // (EyeScreen): on the HUD frame's path, but mapped onto the eye's clip space directly.
     const bool screen = g_vr_active && g_cur_screen && !perspective;
@@ -3571,6 +3573,22 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         if (st.tex_is_efb[i])
                             fprintf(stderr, "(copy %02X%s)", st.tex_efb_fmt[i],
                                     st.tex_pal[i] ? (st.tex_pal_bits[i] == 8 ? " pal8" : " pal4") : "");
+                    }
+                    // Fog (BP 0xEE-0xF2): the type as GXSetFog takes it (2 linear, 4 exp, 5
+                    // exp2, 6-7 the reverse ones; 8 on top for an orthographic one), the
+                    // registers, and for a perspective fog the start and end distances they
+                    // come from -- GXSetFog makes A = n*f / ((f - n)(end - start)) and
+                    // C = start / (end - start), and n*f / (f - n) is minus the projection's
+                    // z offset.
+                    const uint32_t fogsel = ((bp[0xF1] >> 21) & 7) | (((bp[0xF1] >> 20) & 1) << 3);
+                    if ((fogsel & 7) >= 2) {
+                        const float fa = fog_float(bp[0xEE]), fc = fog_float(bp[0xF1]);
+                        fprintf(stderr, "\n        fog type=%u a=%g bmag=%u bshift=%u c=%g color=%06X", fogsel, fa,
+                                bp[0xEF] & 0xFFFFFF, bp[0xF0] & 0x1F, fc, bp[0xF2] & 0xFFFFFF);
+                        if (!(fogsel & 8) && fa != 0.0f) {
+                            const float range = -st.proj[5] / fa;
+                            fprintf(stderr, " (start %g end %g)", fc * range, fc * range + range);
+                        }
                     }
                     for (int r = 0; r < 4; r++)
                         fprintf(stderr, "\n        reg%d=%08X %08X  konst%d=%08X %08X", r, st.tev_reg[r][0], st.tev_reg[r][1],
