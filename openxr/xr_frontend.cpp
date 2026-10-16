@@ -46,6 +46,7 @@ constexpr float kQuadW = 3.2f, kQuadH = 2.4f;
 // many texels as the headset can actually resolve across it -- see create_swapchains.
 // Starts at what it used to be fixed at, in case the sizing finds nothing to work from.
 int g_swap_w = 1024, g_swap_h = 768;
+int64_t g_panel_format = 0;   // the swapchains' format, which the mirror's view matches
 
 bool xr_ok(XrResult r, const char* what) {
     if (XR_SUCCEEDED(r)) return true;
@@ -191,6 +192,215 @@ void mat_view(const XrPosef& pose, const VrConfig& c, const float zero[3], float
     m[15] = 1;
 }
 
+// ---------------------------------------------------------------------------
+// The viewer's view of the theater panel, for the mirror (Platform::mirror_view). The
+// compositor draws the quad layer itself, so nothing the app holds shows it; this draws
+// it again the same way -- the panel's last image on a quad kQuadDist ahead in the
+// reference space, seen through the left eye's pose and field of view, on black -- into
+// an eye-sized target of its own. The panel's image is copied out as it is drawn
+// (keep_panel), since a swapchain image is the runtime's once released.
+// ---------------------------------------------------------------------------
+struct ViewMirror {
+    GLuint panel_tex = 0, panel_fbo = 0;   // the panel's last image
+    GLuint view_tex = 0, view_fbo = 0;     // what the eye sees
+    int view_w = 0, view_h = 0;
+    GLuint prog = 0, vao = 0, vbo = 0;
+    bool failed = false;
+    bool have_panel = false;
+} g_vm;
+
+void vm_target(GLuint& tex, GLuint& fbo, int w, int h) {
+    if (!tex) {
+        glGenTextures(1, &tex);
+        glGenFramebuffers(1, &fbo);
+    }
+    // Stored as the swapchain stores it, so copying between them changes no value, and
+    // the panel is filtered as the compositor filters it: in linear light.
+    const GLenum fmt = g_panel_format == GL_SRGB8_ALPHA8 ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, fmt, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+bool wants_view_mirror() {
+    return g_xr.plat.mirror && g_xr.plat.mirror_view && !g_vm.failed && g_xr.plat.mirror_view();
+}
+
+// The panel was just drawn into `fbo`: keep a copy for compose_view.
+void keep_panel(GLuint fbo) {
+    if (!g_vm.panel_tex) vm_target(g_vm.panel_tex, g_vm.panel_fbo, g_swap_w, g_swap_h);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_vm.panel_fbo);
+    glDisable(GL_SCISSOR_TEST);
+    glBlitFramebuffer(0, 0, g_swap_w, g_swap_h, 0, 0, g_swap_w, g_swap_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    g_vm.have_panel = true;
+}
+
+GLuint vm_shader(GLenum type, const char* body) {
+    const std::string src = std::string(GCN_GLSL_VERSION) + body;
+    const char* p = src.c_str();
+    GLuint sh = glCreateShader(type);
+    glShaderSource(sh, 1, &p, nullptr);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+        LOGE("mirror view shader: %s", log);
+    }
+    return sh;
+}
+
+bool vm_program() {
+    if (g_vm.prog) return true;
+    const GLuint v = vm_shader(GL_VERTEX_SHADER, R"(
+layout(location = 0) in vec4 a_pos;
+layout(location = 1) in vec2 a_uv;
+out vec2 v_uv;
+void main() { v_uv = a_uv; gl_Position = a_pos; }
+)");
+    const GLuint f = vm_shader(GL_FRAGMENT_SHADER, R"(
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 o_color;
+void main() { o_color = texture(u_tex, v_uv); }
+)");
+    g_vm.prog = glCreateProgram();
+    glAttachShader(g_vm.prog, v);
+    glAttachShader(g_vm.prog, f);
+    glLinkProgram(g_vm.prog);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    GLint ok = 0;
+    glGetProgramiv(g_vm.prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        LOGE("mirror view shader did not link; the mirror shows the panel's own image");
+        glDeleteProgram(g_vm.prog);
+        g_vm.prog = 0;
+        g_vm.failed = true;
+        return false;
+    }
+    glGenVertexArrays(1, &g_vm.vao);
+    glGenBuffers(1, &g_vm.vbo);
+    glBindVertexArray(g_vm.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vm.vbo);
+    glBufferData(GL_ARRAY_BUFFER, 4 * 6 * sizeof(float), nullptr, GL_STREAM_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(4 * sizeof(float)));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return true;
+}
+
+// Draws the viewer's view at display time `t` and hands it to the mirror.
+void compose_view(XrTime t) {
+    if (!g_vm.have_panel || !vm_program()) return;
+    XrViewState vs{XR_TYPE_VIEW_STATE};
+    uint32_t nv = 0;
+    XrView views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+    XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    li.displayTime = t;
+    li.space = g_xr.space;
+    if (XR_FAILED(xrLocateViews(g_xr.session, &li, &vs, 2, &nv, views)) || nv != 2 ||
+        !(vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
+        return;
+    const int w = g_xr.eyes[0].w, h = g_xr.eyes[0].h;
+    if (w <= 0 || h <= 0) return;
+    if (w != g_vm.view_w || h != g_vm.view_h) {
+        vm_target(g_vm.view_tex, g_vm.view_fbo, w, h);
+        g_vm.view_w = w;
+        g_vm.view_h = h;
+    }
+
+    // In metres in the reference space, as the layer is handed to the compositor.
+    VrConfig plain = g_vrcfg;
+    plain.units_per_metre = 1.0f;
+    plain.offset_x = plain.offset_y = plain.offset_z = 0.0f;
+    const float zero[3] = {0, 0, 0};
+    float P[16], V[16], M[16];
+    mat_proj(views[0].fov, 0.05f, 100.0f, P);
+    mat_view(views[0].pose, plain, zero, V);
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) {
+            float sum = 0;
+            for (int k = 0; k < 4; k++) sum += P[k * 4 + r] * V[c * 4 + k];
+            M[c * 4 + r] = sum;
+        }
+    // The quad's corners in clip space, with where each falls on the panel's image (whose
+    // first row is its bottom, as GL keeps it). The GPU clips what is behind the eye.
+    const float hx = 0.5f * kQuadW, hy = 0.5f * kQuadH;
+    const float corner[4][4] = {{-hx, -hy, 0, 0}, {hx, -hy, 1, 0}, {-hx, hy, 0, 1}, {hx, hy, 1, 1}};
+    float vtx[4][6];
+    for (int i = 0; i < 4; i++) {
+        const float p[4] = {corner[i][0], corner[i][1], -kQuadDist, 1.0f};
+        for (int r = 0; r < 4; r++)
+            vtx[i][r] = M[r] * p[0] + M[4 + r] * p[1] + M[8 + r] * p[2] + M[12 + r] * p[3];
+        vtx[i][4] = corner[i][2];
+        vtx[i][5] = corner[i][3];
+    }
+
+    // The renderer sets what each of its passes needs; this puts back what it changes.
+    GLint prev_prog = 0, prev_vao = 0, prev_vp[4];
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
+    glGetIntegerv(GL_VIEWPORT, prev_vp);
+    const GLboolean depth = glIsEnabled(GL_DEPTH_TEST), blend = glIsEnabled(GL_BLEND),
+                    cull = glIsEnabled(GL_CULL_FACE), scissor = glIsEnabled(GL_SCISSOR_TEST),
+                    stencil = glIsEnabled(GL_STENCIL_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, g_vm.view_fbo);
+    glViewport(0, 0, w, h);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+#ifndef GCN_GL_ES
+    // Decoded as it is sampled, encoded again as it is written: what the compositor does
+    // with an sRGB swapchain. Both are no-ops on a linear one.
+    glEnable(GL_FRAMEBUFFER_SRGB);
+#endif
+    glUseProgram(g_vm.prog);
+    glUniform1i(glGetUniformLocation(g_vm.prog, "u_tex"), 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_vm.panel_tex);
+    glBindVertexArray(g_vm.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vm.vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vtx), vtx);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+#ifndef GCN_GL_ES
+    glDisable(GL_FRAMEBUFFER_SRGB);
+#endif
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(prev_vao);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(prev_prog);
+    glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+    if (depth) glEnable(GL_DEPTH_TEST);
+    if (blend) glEnable(GL_BLEND);
+    if (cull) glEnable(GL_CULL_FACE);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    if (stencil) glEnable(GL_STENCIL_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    g_xr.plat.mirror(g_vm.view_fbo, w, h);
+}
+
 bool create_instance() {
     std::vector<const char*> exts = g_xr.plat.extensions;
     // Optional ones, enabled only where the runtime has them.
@@ -317,6 +527,7 @@ bool create_swapchains() {
         }
     }
 #endif
+    g_panel_format = chosen;
     LOGI("swapchain format 0x%llx", (unsigned long long)chosen);
 
     // What the runtime recommends per eye. Needed before the panel as well as after it:
@@ -1382,7 +1593,8 @@ void run() {
                         drew = gx::render_execute(*batch);
                         gx::render_set_output_fbo(0);
                     }
-                    if (drew && g_xr.plat.mirror) g_xr.plat.mirror(g_xr.fbos[idx], g_swap_w, g_swap_h);
+                    if (drew && wants_view_mirror()) keep_panel(g_xr.fbos[idx]);
+                    else if (drew && g_xr.plat.mirror) g_xr.plat.mirror(g_xr.fbos[idx], g_swap_w, g_swap_h);
                     // `log_frames 1` in vr.txt traces the theater path one display frame
                     // at a time: which swapchain image was written, whether it got a new
                     // game frame or a repaint, and which game frame it is showing. The
@@ -1443,6 +1655,8 @@ void run() {
                 quad_r.subImage.swapchain = g_xr.swapchain_r;
                 layers.push_back((XrCompositionLayerBaseHeader*)&quad_r);
             }
+            // Every display frame, not every game frame: the head moves at this rate.
+            if (fs.shouldRender && wants_view_mirror()) compose_view(fs.predictedDisplayTime);
         }
 
         XrFrameEndInfo fe{XR_TYPE_FRAME_END_INFO};

@@ -9,6 +9,7 @@
 #include "xr_frontend.h"
 #include "runtime.h"
 #include "platform.h"
+#include "record.h"
 #include "gx/render_gl.h"
 #include "gx/gl.h"
 
@@ -140,6 +141,7 @@ const void* graphics_binding(XrInstance instance, XrSystemId system) {
 // The window shows what the headset was just given: the left eye, or the panel. Cropped to
 // the window's shape about the image's centre rather than squeezed into it.
 void mirror(GLuint fbo, int w, int h) {
+    record::frame(fbo, w, h);
     int dw, dh;
     SDL_GL_GetDrawableSize(g_host.window, &dw, &dh);
     if (dw <= 0 || dh <= 0) return;
@@ -186,6 +188,8 @@ int xr_desktop_main(const XrDesktopHost& host, const char* iso) {
     plat.pump = host.pump;
     plat.merge_input = host.merge_input;
     plat.mirror = mirror;
+    // A movie is of what the viewer saw; the window follows it while one is being made.
+    plat.mirror_view = record::active;
     if (!xrf::init(plat)) {
         fprintf(stderr,
                 "Could not start VR. Check that a headset is connected and that the OpenXR runtime\n"

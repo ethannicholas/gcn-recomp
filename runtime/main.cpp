@@ -9,6 +9,7 @@
 #include "hw/pad.h"
 #include "vr_game.h"
 #include "telemetry.h"
+#include "record.h"
 #ifdef GCN_OPENXR
 #include "xr_desktop.h"
 #endif
@@ -237,6 +238,9 @@ int main(int argc, char** argv) {
     const char* iso = iso_default.c_str();
     bool headless = false, hidden = false, input_log = true, first_person = false, fast = false, vr = false;
     std::string input_log_dir, replay_dir;
+    // --record=<file>[ --record-size=WxH]: a movie of the window with the game's audio (record.h).
+    const char* record_to = nullptr;
+    int record_w = 2560, record_h = 1440;
     // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
     const char* telemetry_to = getenv("GCN_TELEMETRY");
     int scale = 2;
@@ -255,6 +259,8 @@ int main(int argc, char** argv) {
         else if (!strncmp(argv[i], "--replay=", 9)) replay_dir = argv[i] + 9;
         else if (!strcmp(argv[i], "--sample")) debug_sampler_start();
         else if (!strcmp(argv[i], "--no-music")) { void audio_mute_music(bool); audio_mute_music(true); }
+        else if (!strncmp(argv[i], "--record=", 9)) record_to = argv[i] + 9;
+        else if (!strncmp(argv[i], "--record-size=", 14)) sscanf(argv[i] + 14, "%dx%d", &record_w, &record_h);
         else if (!strcmp(argv[i], "--headless")) headless = true;
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
         else if (!strcmp(argv[i], "--fast")) fast = true;
@@ -265,6 +271,7 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') iso = argv[i];
     }
     plat_install_crash_handlers(on_interrupt, on_fault);
+    if (record_to && !record::start(record_to, record_w, record_h, 60)) return 1;
     if (telemetry_to && !telemetry::configure(telemetry_to)) {
         fprintf(stderr, "--telemetry: could not set up the telemetry socket\n");
         return 1;
@@ -370,6 +377,7 @@ int main(int argc, char** argv) {
     // --vr: the headset takes over from here, the window staying up as a mirror.
     if (vr) {
         const int rc = xr_desktop_main({win, pump_events, merge_desktop_pad}, iso);
+        record::finish();
         input_log_end();
         threads_request_quit();
         plat_exit_now(rc);
@@ -440,6 +448,11 @@ int main(int argc, char** argv) {
         if (presented) {
             // macOS (GL on Metal) only presents correctly with the window framebuffer bound.
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            if (record::active()) {
+                int rw, rh;
+                SDL_GL_GetDrawableSize(win, &rw, &rh);
+                record::frame(0, rw, rh);
+            }
             SDL_GL_SwapWindow(win);
             frames++;
             auto now = std::chrono::steady_clock::now();
@@ -453,6 +466,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+    record::finish();
     input_log_end();
     threads_request_quit();
     plat_exit_now(0);

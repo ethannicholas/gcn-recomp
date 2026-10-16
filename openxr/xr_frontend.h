@@ -45,6 +45,11 @@ struct Platform {
     // Shows what was just drawn somewhere besides the headset, a desktop window say:
     // `fbo` is readable, w x h, until this returns. Called only when there is a new image.
     void (*mirror)(GLuint fbo, int w, int h) = nullptr;
+    // True while the mirror should show what the viewer sees rather than what the game
+    // drew: in theater, the panel where the compositor places it, through the left eye as
+    // the head moves, on black, redrawn every display frame. In stereo the eye already
+    // is that. Unset, theater mirrors the panel's own image.
+    bool (*mirror_view)() = nullptr;
 };
 
 // The game's defaults with `config_dir`/vr.txt read over them, applied to the renderer.

@@ -283,7 +283,7 @@ function(gcn_add_game)
   # front end, including the batch queue in gx/xf.cpp -- is free of both GL and SDL.
   set(CORE_SOURCES ${RUNTIME_SOURCES})
   list(REMOVE_ITEM CORE_SOURCES
-    ${RT}/main.cpp ${RT}/audio.cpp ${RT}/audio_sdl.cpp ${RT}/png.cpp
+    ${RT}/main.cpp ${RT}/audio.cpp ${RT}/audio_sdl.cpp ${RT}/png.cpp ${RT}/record.cpp
     ${RT}/gx/render_gl.cpp ${RT}/gx/gl_load.cpp ${RT}/gx/shadergen.cpp)
   list(APPEND CORE_SOURCES ${RT}/audio_stub.cpp)
   # The benchmark compiles the game's SOURCES too (gcn_add_game), and a game's eye hook

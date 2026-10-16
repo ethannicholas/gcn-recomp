@@ -94,6 +94,44 @@ a log.
 presented frame as a PNG. `GCN_DUMP_RANGE=a-b` restricts that to a window of frames.
 `--headless` runs the guest with no renderer at all.
 
+## Recording a movie
+
+`--record=<file>` makes a movie of what the window shows -- in a headset (`--vr`) that is
+the left eye, or the screen while the game is flat -- with exactly what went to the audio
+device (`runtime/record.cpp`). The frames are read back at the source's own resolution
+into a `--record-size=WxH` movie (2560x1440 by default): a picture about as tall as it is
+wide, an eye, fills it, cropped about its centre (a Quest 3's eye at 1.4x is 2889x3180, so
+2889x1625 of it); a wider one, a 4:3 screen, is fitted with bars. They are placed on a 60
+fps timeline by the clock, repeated or skipped to keep to it whatever rate they arrive at
+(the compositor runs at 72 or 90 Hz), and piped to ffmpeg, which must be on the PATH
+(`GCN_FFMPEG` names another). The audio is written beside the movie from the first frame
+on, and muxed in when the game quits, offset by when its first block came after the first
+frame. Quitting normally matters: a killed process leaves `<file>.video.mkv` and
+`<file>.audio.wav` unmuxed, and a game's reset (a relaunch) loses them.
+
+In theater the left eye is not something the app has: the panel is a quad layer, and the
+compositor draws it. The first version recorded the panel's own image, so a theater
+stretch played back as a flat game filling the frame, while the viewer had seen a screen
+hanging on black that moved as they did. Now, while a recording runs
+(`Platform::mirror_view`), the frontend draws the quad again itself, every display frame:
+the panel's latest image (copied out as it is drawn, since a released swapchain image is
+the runtime's) at the layer's pose and size, through the left eye's located pose and field
+of view, on black, in an eye-sized target (`compose_view` in `openxr/xr_frontend.cpp`).
+The window shows the same view during a recording. What it lacks is the compositor's own
+work: lens distortion, which a flat movie wants left out anyway, and the timewarp between
+the predicted pose and the one at display.
+
+The encoder is the first of `h264_nvenc`, `h264_amf` and `libx264` (superfast) that a
+one-frame trial can open, or `GCN_RECORD_VCODEC`'s ffmpeg arguments as they are. A
+`h264_nvenc` newer than the NVIDIA driver fails that trial (the ffmpeg of 2026-10 wants
+driver 610, and Quest Link holds this machine's at 591), and AMD's encoder on a Ryzen's
+own graphics, idle while the NVIDIA card drives the headset, takes it at no cost to the
+game. The readback is asynchronous (pixel buffers, fenced and mapped three frames later),
+and a writer thread pipes the frames; when ffmpeg falls behind, a frame is not kept and
+the next one is repeated for it, so the movie keeps time. The count is printed at the end:
+on a 35-second flat run through AMF with four frame buffers, 39 of 2,103 frames, hence
+eight.
+
 ## The eye preview
 
 `--eye` renders through the stereo path into an offscreen target and shows that in the

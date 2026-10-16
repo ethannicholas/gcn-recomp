@@ -18,6 +18,8 @@ uint32_t ai_stream_rate();
 void ai_stream_advance(uint32_t samples);
 
 static constexpr int OUT_RATE = 48000;
+// Handed every block that goes to the device, when set: the movie recorder (record.h).
+void (*g_audio_tap)(const int16_t* samples, int frames) = nullptr;
 void audio_wav_capture(const int16_t* s, int frames);
 
 // ---- AI DMA ring buffer (stereo L,R at 32 kHz) ----
@@ -177,6 +179,7 @@ void audio_render(int16_t* out, int frames) {
         ai_stream_advance(elapsed);
     }
     audio_wav_capture(out, frames);
+    if (g_audio_tap) g_audio_tap(out, frames);
 }
 
 static FILE* g_wav;
