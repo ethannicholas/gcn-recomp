@@ -4,6 +4,7 @@
 #include "gx/render.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -40,8 +41,12 @@ void input_script_init(const char* spec) {
             else if (b == "R") p.buttons |= PAD_R; else if (b == "START") p.buttons |= PAD_START;
             else if (b == "UP") p.buttons |= PAD_UP; else if (b == "DOWN") p.buttons |= PAD_DOWN;
             else if (b == "LEFT") p.buttons |= PAD_LEFT; else if (b == "RIGHT") p.buttons |= PAD_RIGHT;
-            else if (b == "SL") p.sx = -100; else if (b == "SR") p.sx = 100;
-            else if (b == "SU") p.sy = 100; else if (b == "SD") p.sy = -100;
+            // SL SR SU SD push the stick all the way (100); SR19 and the like push it that far.
+            else if (b.size() >= 2 && b[0] == 'S' && strchr("LRUD", b[1])) {
+                const int amount = b.size() > 2 ? atoi(b.c_str() + 2) : 100;
+                if (b[1] == 'L') p.sx = -amount; else if (b[1] == 'R') p.sx = amount;
+                else if (b[1] == 'U') p.sy = amount; else p.sy = -amount;
+            }
         }
         g_script.push_back(p);
     }

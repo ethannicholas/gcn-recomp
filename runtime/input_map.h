@@ -47,6 +47,13 @@
 //   ffb = off                     none
 //   ffb_device = "<device>"       another device
 //   ffb_<setting> = <number>      FfbSettings without its prefix: ffb_gain = 0.5
+//
+// Stick ranges: `stick_x_min = 19`, `stick_x_max = 75` and the same for stick_y, cstick_x
+// and cstick_y, in the pad's units from the centre. A bound stick axis is spread from min,
+// the first offset the game responds to, to max, where it is at full, so that the moment
+// the binding leaves its own dead zone the game reacts. A whole axis on a stick axis has a
+// dead zone of 0.005 unless the line gives one. A game supplies its own ranges
+// (input_defaults.h); by default they are 0 and 100.
 #pragma once
 #include "hw/pad.h"
 

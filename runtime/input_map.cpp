@@ -1,6 +1,7 @@
 // See input_map.h.
 #include "input_map.h"
 #include "ffb.h"
+#include "input_defaults.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -53,7 +54,7 @@ struct Binding {
     uint8_t hat_dir = 0;
     Half half = Half::Whole;
     bool invert = false;
-    float deadzone = 0.0f, gain = 1.0f, threshold = -1.0f;
+    float deadzone = -1.0f, gain = 1.0f, threshold = -1.0f;
     SDL_Joystick* joy = nullptr;  // resolved whenever a device comes or goes
 };
 
@@ -127,6 +128,32 @@ void resolve() {
 }
 
 bool parse_float(const std::string& s, float& v);
+
+// Where along each stick axis the game's own handling of the pad puts its response, in
+// the pad's units from the centre (127 the most): the smallest offset it does anything
+// with, and the one where it is at full. A bound value is spread between the two, so the
+// first movement out of the binding's own dead zone is already past the game's, and full
+// deflection is where the game is at full. A game sets its own (input_defaults.h); the
+// file can override them. By default 0 and 100, the pad's whole travel.
+const char* const kRangeKeys[4][2] = {
+    {"stick_x_min", "stick_x_max"}, {"stick_y_min", "stick_y_max"},
+    {"cstick_x_min", "cstick_x_max"}, {"cstick_y_min", "cstick_y_max"}};
+float g_range[4][2];
+
+bool parse_range(const std::vector<std::string>& w, std::string& err) {
+    for (int a = 0; a < 4; a++)
+        for (int e = 0; e < 2; e++)
+            if (w[0] == kRangeKeys[a][e]) {
+                float v;
+                if (w.size() != 3 || w[1] != "=" || !parse_float(w[2], v) || v < 0.0f || v > 127.0f) {
+                    err = w[0] + " = <0 to 127>";
+                    return false;
+                }
+                g_range[a][e] = v;
+                return true;
+            }
+    return false;
+}
 
 // ffb settings: `ffb = on|off`, `ffb_device = "<device>"`, `ffb_<name> = <number>`.
 bool parse_ffb(const std::vector<std::string>& w, std::string& err) {
@@ -240,7 +267,11 @@ bool parse_line(const std::vector<std::string>& w, Binding& b, std::string& err)
         if (i >= w.size() || !parse_float(w[i], *dst)) { err = o + " needs a number"; return false; }
         i++;
     }
-    if (b.deadzone < 0.0f || b.deadzone >= 1.0f) { err = "deadzone must be from 0 to below 1"; return false; }
+    // A whole axis onto a stick axis has a sliver of a dead zone unless the line gives one:
+    // the stick's range starts where the game's response does (g_range), so the slightest
+    // jitter at the centre would otherwise already be a step.
+    if (b.deadzone < 0.0f) b.deadzone = b.kind == Kind::Axis && b.half == Half::Whole && bipolar(b.target) ? 0.005f : 0.0f;
+    if (b.deadzone >= 1.0f) { err = "deadzone must be from 0 to below 1"; return false; }
     if (b.threshold < 0.0f) b.threshold = (b.target == Target::L || b.target == Target::R) ? 0.85f : 0.5f;
     return true;
 }
@@ -269,7 +300,14 @@ float value(const Binding& b, const uint8_t* keys) {
     return std::copysign(std::min(s, 1.0f), v);
 }
 
-uint8_t stick_byte(float v) { return (uint8_t)std::clamp(128 + (int)std::lround(v * 100.0f), 0, 255); }
+// -1 to 1 onto axis `a`'s range (g_range). Truncated, not rounded: a game that divides
+// the offset into steps then reaches each one where the value says, not half a unit early.
+uint8_t stick_byte(int a, float v) {
+    const float lo = g_range[a][0], hi = g_range[a][1];
+    // A thousandth over, so that full deflection computed a hair short still makes `hi`.
+    const int off = (int)(lo + (hi - lo) * std::fabs(v) + 0.001f);
+    return (uint8_t)std::clamp(128 + (v < 0.0f ? -off : off), 0, 255);
+}
 
 void print_targets() {
     fprintf(stderr, "Pad controls:");
@@ -284,6 +322,8 @@ bool input_map_load(const char* path) {
     g_bindings.clear();
     g_ffb = FfbSettings();
     g_ffb_device.clear();
+    for (int a = 0; a < 4; a++)
+        for (int e = 0; e < 2; e++) g_range[a][e] = input_default(kRangeKeys[a][e], e ? 100.0f : 0.0f);
     FILE* f = fopen(path, "rb");
     if (!f) return true;
     char line[512];
@@ -297,7 +337,8 @@ bool input_map_load(const char* path) {
         b.line = n;
         if (tokenize(line, w, err)) {
             if (w.empty()) continue;
-            if (w[0].compare(0, 3, "ffb") == 0 ? parse_ffb(w, err) : parse_line(w, b, err)) {
+            if (parse_range(w, err)) continue;
+            if (err.empty() && (w[0].compare(0, 3, "ffb") == 0 ? parse_ffb(w, err) : parse_line(w, b, err))) {
                 if (w[0].compare(0, 3, "ffb") != 0) g_bindings.push_back(b);
                 continue;
             }
@@ -306,7 +347,11 @@ bool input_map_load(const char* path) {
         ok = false;
     }
     fclose(f);
-    fprintf(stderr, "%s: %zu binding%s\n", path, g_bindings.size(), g_bindings.size() == 1 ? "" : "s");
+    fprintf(stderr, "%s: %zu binding%s", path, g_bindings.size(), g_bindings.size() == 1 ? "" : "s");
+    for (int a = 0; a < 4; a++)
+        if (g_range[a][0] != 0.0f || g_range[a][1] != 100.0f)
+            fprintf(stderr, ", %.*s %g to %g", (int)strlen(kRangeKeys[a][0]) - 4, kRangeKeys[a][0], g_range[a][0], g_range[a][1]);
+    fprintf(stderr, "\n");
     if (!ok) print_targets();
     ffb_configure(g_ffb);
     resolve();
@@ -369,14 +414,14 @@ void input_map_apply(PadState& p) {
     trig(Target::L, p.trig_l);
     trig(Target::R, p.trig_r);
     // A stick is the file's only while the file pushes it, as the default mapping's is.
-    auto stick = [&](Target ax, Target neg, Target pos, uint8_t& out) {
+    auto stick = [&](int a, Target ax, Target neg, Target pos, uint8_t& out) {
         const float x = std::clamp(v[(int)ax] + v[(int)pos] - v[(int)neg], -1.0f, 1.0f);
-        if (x != 0.0f) out = stick_byte(x);
+        if (x != 0.0f) out = stick_byte(a, x);
     };
-    stick(Target::StickX, Target::StickLeft, Target::StickRight, p.stick_x);
-    stick(Target::StickY, Target::StickDown, Target::StickUp, p.stick_y);
-    stick(Target::CStickX, Target::CStickLeft, Target::CStickRight, p.cstick_x);
-    stick(Target::CStickY, Target::CStickDown, Target::CStickUp, p.cstick_y);
+    stick(0, Target::StickX, Target::StickLeft, Target::StickRight, p.stick_x);
+    stick(1, Target::StickY, Target::StickDown, Target::StickUp, p.stick_y);
+    stick(2, Target::CStickX, Target::CStickLeft, Target::CStickRight, p.cstick_x);
+    stick(3, Target::CStickY, Target::CStickDown, Target::CStickUp, p.cstick_y);
 }
 
 void input_map_shutdown() { ffb_shutdown(); }
