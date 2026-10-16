@@ -61,7 +61,11 @@ uint32_t replay_key() { return g_replay_by_frame ? gx_frames_submitted() : g_pol
 // The clock's jumps, in the order recorded (see input_log_jump). Only the guest thread
 // takes them, but clock_update_limit asks for the next one from any thread that
 // schedules an event, so the next count is kept in an atomic.
-struct Jump { uint64_t at, edges; };
+// A jump and a pose record also carry the polls of the pad lines either side of them in the
+// log (lo, hi): the log is written as things happen, so the recording made that jump, or
+// that read, between those two polls. A replay that makes it outside them has parted from
+// its recording -- the guest executed something else -- and says so (parted, below).
+struct Jump { uint64_t at, edges; uint32_t lo, hi; };
 std::vector<Jump> g_jumps;
 size_t g_jump_pos;
 std::atomic<uint64_t> g_next_jump_at{UINT64_MAX};
@@ -69,7 +73,7 @@ std::atomic<uint64_t> g_next_jump_at{UINT64_MAX};
 // ---- poses (input_pose) ----
 // A kind's reads are counted from 1; a record is the state from that read on. The same
 // channel serves recording and replay, since every read is counted whichever it is.
-struct PoseRecord { uint32_t read; bool valid; std::vector<float> v; };
+struct PoseRecord { uint32_t read; bool valid; std::vector<float> v; uint32_t lo, hi; };
 struct PoseChannel {
     std::string kind;
     uint32_t reads = 0;                // reads made so far, this run
@@ -80,6 +84,17 @@ struct PoseChannel {
     std::vector<float> v;              // the state in force
 };
 std::vector<PoseChannel> g_poses;
+
+// The first time the replay makes a jump or a pose read outside the polls the recording
+// made it between: where the replay parted from its recording. Said once; the replay goes on.
+void parted(const char* what, uint32_t lo, uint32_t hi) {
+    static bool said;
+    if (said || g_replay_by_frame) return;
+    if (g_poll_seq >= lo && g_poll_seq <= hi) return;
+    said = true;
+    fprintf(stderr, "[input] the replay has parted from its recording: %s at poll %u (frame %u), recorded between polls %u and %u\n",
+            what, g_poll_seq, gx_frames_submitted(), lo, hi);
+}
 
 PoseChannel& pose_channel(const char* kind) {
     for (auto& c : g_poses) if (c.kind == kind) return c;
@@ -148,6 +163,11 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     char line[2048];
     int version = 1;
     uint32_t end_key = 0;
+    // The poll of the last pad line read, and the jumps and pose records since it, which
+    // take the next pad line's poll as the end of their bracket (Jump).
+    uint32_t last_key = 0;
+    std::vector<size_t> open_jumps;
+    std::vector<std::pair<std::string, size_t>> open_poses;
     while (fgets(line, sizeof(line), f)) {
         if (!strchr(line, '\n') && !feof(f)) {
             fprintf(stderr, "[input] a line of %s is longer than %zu characters; not replaying it\n", path.c_str(),
@@ -166,7 +186,8 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         if (line[0] == '\n') continue;
         unsigned long long jat, jedges;
         if (sscanf(line, "jump %llu %llu", &jat, &jedges) == 2) {
-            g_jumps.push_back(Jump{(uint64_t)jat, (uint64_t)jedges});
+            g_jumps.push_back(Jump{(uint64_t)jat, (uint64_t)jedges, last_key, UINT32_MAX});
+            open_jumps.push_back(g_jumps.size() - 1);
             continue;
         }
         char kind[32];
@@ -176,6 +197,8 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
             PoseRecord r;
             r.read = read;
             r.valid = valid != 0;
+            r.lo = last_key;
+            r.hi = UINT32_MAX;
             for (const char* p = line + used; r.valid;) {
                 char* end;
                 const float f = strtof(p, &end);
@@ -183,7 +206,9 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
                 r.v.push_back(f);
                 p = end;
             }
-            pose_channel(kind).replay.push_back(r);
+            PoseChannel& ch = pose_channel(kind);
+            ch.replay.push_back(r);
+            open_poses.emplace_back(ch.kind, ch.replay.size() - 1);
             continue;
         }
         unsigned key, frame, chan, conn, buttons, sx, sy, cx, cy, l, r;
@@ -202,6 +227,11 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         e.s.cstick_x = (uint8_t)cx; e.s.cstick_y = (uint8_t)cy;
         e.s.trig_l = (uint8_t)l; e.s.trig_r = (uint8_t)r;
         g_replay.push_back(e);
+        last_key = key;
+        for (size_t j : open_jumps) g_jumps[j].hi = key;
+        for (auto& p : open_poses) pose_channel(p.first.c_str()).replay[p.second].hi = key;
+        open_jumps.clear();
+        open_poses.clear();
     }
     fclose(f);
     if (g_replay.empty()) {
@@ -243,6 +273,10 @@ uint64_t input_replay_next_jump_at() { return g_next_jump_at.load(); }
 
 uint64_t input_replay_take_jump(uint64_t count) {
     if (g_jump_pos >= g_jumps.size() || g_jumps[g_jump_pos].at > count) return 0;
+    {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        parted("a clock jump", g_jumps[g_jump_pos].lo, g_jumps[g_jump_pos].hi);
+    }
     const uint64_t edges = g_jumps[g_jump_pos++].edges;
     g_next_jump_at = g_jump_pos < g_jumps.size() ? g_jumps[g_jump_pos].at : UINT64_MAX;
     return edges;
@@ -261,13 +295,20 @@ bool input_pose(const char* kind, bool* valid, float* v, int n) {
     if (g_replay_loaded && replay_key() <= g_replay_last_key) {
         while (ch.pos < ch.replay.size() && ch.replay[ch.pos].read <= ch.reads) {
             const PoseRecord& r = ch.replay[ch.pos++];
+            if (r.read == ch.reads) parted(ch.kind == "eyes" ? "a read of the eyes" : "a read of a hand", r.lo, r.hi);
             ch.have = true;
             ch.valid = r.valid;
             ch.v = r.v;
         }
-        if (ch.have && (int)ch.v.size() == n) {
+        // An invalid record carries no values, and is replayed as invalid: the pose was
+        // lost then. Requiring n values of every record once let each such stretch through
+        // to the live pose -- a harness's stand-in eyes, valid and level -- and a session
+        // whose headset lost tracking now and then parted from its recording at the first
+        // loss that the game's hooks acted on.
+        if (ch.have && (!ch.valid || (int)ch.v.size() == n)) {
             *valid = ch.valid;
-            for (int i = 0; i < n; i++) v[i] = ch.v[i];
+            if (ch.valid)
+                for (int i = 0; i < n; i++) v[i] = ch.v[i];
             replayed = true;
         }
     }

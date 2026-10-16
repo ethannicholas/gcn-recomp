@@ -59,7 +59,23 @@ threads are not logged, since they never reach the game. A log without pose line
 3 or earlier) or one that has run out replays with the live poses, as before. An eyes line
 is over 300 characters; until 2026-10-15 the reader took lines of 256, cut every one, and
 replayed the eyes as live without a word (the hands, shorter, were fine). It takes 2 KB
-now and refuses a log with a longer line rather than replaying it half-read.
+now and refuses a log with a longer line rather than replaying it half-read. Until the
+same day a pose logged as lost (`pose eyes 17116 0`, no values) was not replayed at all: the
+replay answered only records with a full set of values, so every stretch of lost tracking
+went to the live pose -- in the harness its stand-in eyes, tracked and level -- and an hour's
+session, with 123 such stretches, parted from its recording within minutes. A lost pose now
+replays as lost.
+
+A replay that parts from its recording says so, once: `[input] the replay has parted from its
+recording: <what> at poll <n> (frame <f>), recorded between polls <a> and <b>`. Each jump and
+each pose record carries the polls of the pad lines either side of it in the log, so when the
+replay makes a recorded jump, or answers a pose read with the record logged at that read, at a
+poll outside that span, the guest has done a different amount of work, or read the poses a
+different number of times, than it did when recording. Before it the only sign was a
+replay that went somewhere its player never went, minutes after the cause. The usual causes
+are the game's own: a hook steering the simulation by something a replay does not
+reproduce (the render thread's progress, say), or a diagnostic that reads a pose itself, so
+that a run recorded with it on replays only with it on.
 
 ## Scripted input
 
