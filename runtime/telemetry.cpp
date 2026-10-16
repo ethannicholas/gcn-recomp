@@ -129,7 +129,7 @@ float get(const char* k, float fallback) { return key(k, fallback); }
 
 void set_default(const char* k, float value) { g_defaults[k] = value; }
 
-// What goes to the platform is built in four stages, each of which on its own would stop a
+// What goes to the platform is built in three stages, each of which on its own would stop a
 // class of jerk, so that no single mistake upstream reaches the rider:
 //
 // 1. Rest and back. A race starting or ending, a pause, the vehicle lost: the motion eases
@@ -139,30 +139,29 @@ void set_default(const char* k, float value) { g_defaults[k] = value; }
 // 2. Discontinuities. A respawn puts the vehicle somewhere else in one frame, so whatever
 //    was being sent is crossfaded, over `fade_s` and eased the same way, into the new values
 //    rather than stepped to them.
-// 3. Yaw washout. A heading is not a position a platform can hold: it runs on for ever and
-//    wraps from +180 to -180. What is sent is how far the heading has turned from where it
-//    was `yaw_washout_s` ago, more or less -- the turn itself, returning to centre once it is
-//    over -- unwrapped, so a wrap is not a turn. A game that sends the platform's own yaw
-//    instead (yaw_heading false: a slide's angle, a spin) has it sent as it is.
-// 4. Limits. Last of all, after the gains, every channel is clamped to a range and to a rate
-//    of change: angles to `max_angle` degrees, pitch and roll to `angle_rate` degrees a
-//    second and yaw to `yaw_rate`, accelerations to `max_accel` m/s^2 and `accel_rate`
-//    m/s^2 a second. However a value got there -- a crash into a wall reads 7 g for a
-//    frame -- this is the most the platform is asked to do. The step between two packets
-//    is bounded too, by bounding the time between them, so a stall in the game does not
-//    let a step through either.
-//
-//    The rates are the last guard, not the smoothing. At 60 degrees and 60 m/s^2 a second
-//    they were both, and a rider found the motion tame: a wave's chop held the
-//    accelerations at the limit four frames in five, slewing back and forth, so that a
-//    collision reached the platform as a few m/s^2 and sometimes the wrong way, and a dive
+// 3. Limits, off unless asked for. A key sets a range or a rate of change on the motion
+//    channels: `max_angle` degrees for pitch, roll and yaw, `angle_rate` degrees a second
+//    for pitch and roll and `yaw_rate` for yaw, `max_accel` m/s^2 and `accel_rate` m/s^2 a
+//    second for the accelerations; 0, the default, is no limit. They used to be on (25
+//    degrees, 120 and 60 a second, 15 m/s^2 and 300 a second), and were taken off when a
+//    rider found them unnecessary: a platform has its own travel and its own speed, and the
+//    jerks a limit would catch are the discontinuities stages 1 and 2 already take out. At
+//    60 degrees and 60 m/s^2 a second, before that, they had been smoothing as well, and the
+//    motion was tame: a wave's chop held the accelerations at the limit four frames in five,
+//    a collision reached the platform as a few m/s^2 and sometimes the wrong way, and a dive
 //    off a ramp (the hull pitching at some 300 degrees a second) as a slow lean. Smoothing
-//    belongs upstream, where the game knows what is noise; the jerks the limits are here
-//    for are the discontinuities stages 1 and 2 already take out. Yaw keeps the slow rate:
-//    a heading that swings is the one jerk on a start line that is not yet explained. (A
-//    game that sends its own yaw can raise it with set_default.)
+//    belongs upstream, where the game knows what is noise. The speed and the slide keep
+//    their bounds; they are not motion.
 //
-// Between the gains and the limits, a road texture (5), eased in and out with the rest of the
+// There used to be a fourth, ahead of the limits: a yaw washout, for a game that sent its
+// vehicle's heading. The heading was unwrapped and what went out was how far it had turned
+// from where it was `yaw_washout_s` ago, so every turn turned the platform and let it drift
+// back. Game after game had to be moved off it onto the slip: a platform turning with
+// every corner was jarring, while the slip, which a rider feels through the seat, holds
+// still on a clean line. A heading is the wrong input, not one to wash out, so the option
+// is gone and `yaw` is only ever the platform's own angle.
+//
+// Between the gains and the limits, a road texture (4), eased in and out with the rest of the
 // motion and scaled by `texture_gain`. A platform that sat dead still on a straight felt like
 // no road at all; one that hummed with band-limited noise felt like noise, all one note.
 // - From the suspension, when the game has it: each wheel's compression less its own
@@ -200,29 +199,8 @@ void publish(const Motion& in) {
     const float fade = key("fade_s", 1.0f);
     const float fade_step = fade > 0.0f ? dt / fade : 1.0f;
 
-    // The input, with its heading washed out (3).
     static float held[kChannels];        // the last active input: what rest fades away from
-    static bool have_heading = false;
-    static float heading_prev, unwrapped, reference;
-    if (in.active && !in.yaw_heading) {
-        have_heading = false;
-        to_array(in, held);
-    } else if (in.active) {
-        if (!have_heading || in.discontinuity) {
-            unwrapped = reference = in.yaw;
-            have_heading = true;
-        } else {
-            float d = in.yaw - heading_prev;
-            while (d > 180.0f) d -= 360.0f;
-            while (d < -180.0f) d += 360.0f;
-            unwrapped += d;
-            const float washout = key("yaw_washout_s", 1.5f);
-            reference += (unwrapped - reference) * (washout > 0.0f ? 1.0f - expf(-dt / washout) : 1.0f);
-        }
-        heading_prev = in.yaw;
-        to_array(in, held);
-        held[kYaw] = unwrapped - reference;
-    }
+    if (in.active) to_array(in, held);
 
     // Rest and back (1).
     static float rest_t = 0.0f;   // 0 at rest, 1 following the input
@@ -245,7 +223,7 @@ void publish(const Motion& in) {
         for (int c = 0; c < kChannels; c++) want[c] = cross_from[c] + (want[c] - cross_from[c]) * s;
     }
 
-    // Gains, then limits (4).
+    // Gains, then limits (3).
     want[kPitch] *= key("pitch_gain", 1.0f);
     want[kRoll] *= key("roll_gain", 1.0f);
     want[kYaw] *= key("yaw_gain", 1.0f);
@@ -253,7 +231,7 @@ void publish(const Motion& in) {
     want[kSway] *= key("sway_gain", 1.0f);
     want[kHeave] *= key("heave_gain", 1.0f);
 
-    // Road texture (5).
+    // Road texture (4).
     {
         static uint32_t seed = 0x2545F491u;
         auto noise = [] {
@@ -313,23 +291,33 @@ void publish(const Motion& in) {
         const float a = 1.0f - expf(-dt * 6.2831853f * 12.0f);
         for (float& g : grain) g += (noise() - g) * a;
         const float amp = rough * at_speed;
-        const float grain_size = key("texture_grain", 0.25f) / sqrtf(a / (2.0f - a) / 3.0f);   // unit RMS
-        for (int c = 0; c < 3; c++) tex[c] += amp * size[c] * (ring[c] * w + grain[c] * grain_size);
+        // Skipped with no time passed (the first packet, two in one clock tick): `a` is then
+        // 0 and the grain's normalisation infinite, and 0 times it is NaN. While the limits
+        // were on, the rate limit's fmaxf hid that NaN by taking its other operand; with them
+        // off it reached the platform on the first packet of every run.
+        if (amp > 0.0f && a > 0.0f) {
+            const float grain_size = key("texture_grain", 0.25f) / sqrtf(a / (2.0f - a) / 3.0f);   // unit RMS
+            for (int c = 0; c < 3; c++) tex[c] += amp * size[c] * (ring[c] * w + grain[c] * grain_size);
+        }
 
         want[kHeave] += tex[0] * gain;
         want[kPitch] += tex[1] * gain;
         want[kRoll] += tex[2] * gain;
     }
 
-    const float max_angle = key("max_angle", 25.0f), angle_rate = key("angle_rate", 120.0f);
-    const float yaw_rate = key("yaw_rate", 60.0f);
-    const float max_accel = key("max_accel", 15.0f), accel_rate = key("accel_rate", 300.0f);
+    // Limits (3): 0 is none.
+    const float max_angle = key("max_angle", 0.0f), angle_rate = key("angle_rate", 0.0f);
+    const float yaw_rate = key("yaw_rate", 0.0f);
+    const float max_accel = key("max_accel", 0.0f), accel_rate = key("accel_rate", 0.0f);
     const float range[kChannels] = {1000.0f, max_angle, max_angle, max_angle, max_accel, max_accel, max_accel, 10.0f};
     const float rate[kChannels] = {200.0f, angle_rate, angle_rate, yaw_rate, accel_rate, accel_rate, accel_rate, 20.0f};
     for (int c = 0; c < kChannels; c++) {
-        const float v = fminf(range[c], fmaxf(-range[c], want[c]));
+        // A value that is not a number holds the last one sent: whatever produced it, upstream
+        // or in a game's own arithmetic, a platform must not be handed it.
+        if (!std::isfinite(want[c])) want[c] = out[c];
+        const float v = range[c] > 0.0f ? fminf(range[c], fmaxf(-range[c], want[c])) : want[c];
         const float step = rate[c] * dt;
-        out[c] = fminf(out[c] + step, fmaxf(out[c] - step, v));
+        out[c] = rate[c] > 0.0f ? fminf(out[c] + step, fmaxf(out[c] - step, v)) : v;
     }
 
     Motion m;

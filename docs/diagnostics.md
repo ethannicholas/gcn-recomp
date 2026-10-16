@@ -509,18 +509,24 @@ as SimRacingStudio's custom-game API packet to `127.0.0.1:33001`. `GCN_TELEMETRY
 `log 1` in `telemetry.txt`, prints what is sent twice a second, plus every ease to or from rest
 and every crossfade.
 
-What is sent can never step, whatever the game publishes. A motion platform moves a person.
-The output eases to and from rest, crossfades across anything the game marks
-`Motion::discontinuity`, sends yaw washed out, and is clamped in range and rate per channel last
-of all. The reasons are in `publish()`. A game still has to mark its own discontinuities and
-must not difference across a pause: a frozen vehicle reads as a dead stop. Nor are the
-limits the game's smoothing: they are fast enough to let a collision through, so noise the
-game sends arrives as noise.
+The motion never steps where the game did not: a motion platform moves a person. The output
+eases to and from rest and crossfades across anything the game marks
+`Motion::discontinuity`. It is not limited in range or rate unless a `telemetry.txt` key
+asks (`max_angle`, `angle_rate`, `yaw_rate`, `max_accel`, `accel_rate`; 0, the default, is
+none): a platform has its own travel and speed, and the limits, which used to be on, only
+made the motion tamer than the game's. The reasons are in `publish()`. A game still has to
+mark its own discontinuities and must not difference across a pause: a frozen vehicle reads
+as a dead stop. Noise the game sends arrives as noise; smoothing is the game's.
 
-Three things are the game's to choose. `yaw_heading` false sends `yaw` as the platform's own
-angle rather than a heading to wash out, for a game that yaws the platform only for what a
-driver feels through the seat (a slide, a spin) and not for every turn, which on a platform
-that cannot turn all the way round is jarring. `suspension` (each wheel's compression, with
+`yaw` is the angle the platform itself turns to, never the vehicle's heading: a platform
+turns a couple of dozen degrees at most, so yaw is always relative, and the game decides
+when there is any -- the nose against the way the vehicle is moving in a slide, a spin --
+from what a driver feels through the seat. There used to be a `yaw_heading` flag that took
+a heading and washed it out instead (`yaw_washout_s`). It turned the platform with every
+corner, which was jarring, and game after game had to be moved off it onto the slip; it is
+gone, so that a new game does not start from it.
+
+Two things more are the game's to choose. `suspension` (each wheel's compression, with
 `has_suspension`) is the road texture: the springs' movement about their running mean, on
 heave, pitch (front against rear) and roll (left against right), so the bumps come through
 as the wheels met them; it goes into the packet's suspension fields too. A game without

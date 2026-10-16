@@ -13,10 +13,9 @@ namespace telemetry {
 
 // How the vehicle is moving, in the vehicle's own frame and in SI units. Angles are degrees.
 //
-// Nothing a game sends can jerk the platform: what goes out eases in and out of rest, fades
-// across anything marked a discontinuity, and is limited in how far and how fast each channel
-// moves -- see publish() in telemetry.cpp. A motion platform moves a person, and a step in the
-// data is a blow to them, however brief.
+// Nothing a game sends can jerk the platform: what goes out eases in and out of rest and fades
+// across anything marked a discontinuity -- see publish() in telemetry.cpp. A motion platform
+// moves a person, and a step in the data is a blow to them, however brief.
 struct Motion {
     bool active = false;   // false in menus, between races and paused: the platform settles to rest
     // The motion jumped -- a respawn, the vehicle lost and found again: fade across to it
@@ -25,11 +24,11 @@ struct Motion {
     float speed_kmh = 0;
     float pitch = 0;       // nose up is positive
     float roll = 0;        // right side down is positive
-    // A heading, any range, sent washed out (see telemetry.cpp) -- or, with yaw_heading false,
-    // the angle the platform itself should be turned to, right positive: the game decides
-    // when the platform yaws (a slide, a spin) and it is sent as it is, still faded and limited.
+    // The angle the platform itself should be turned to, right positive: never the vehicle's
+    // heading. A platform turns a couple of dozen degrees at most, so yaw is always relative
+    // -- the nose against the way the vehicle is moving in a slide, a spin -- and the game
+    // decides when there is any. Sent as it is, eased to rest and faded like the rest.
     float yaw = 0;
-    bool yaw_heading = true;
     float surge = 0;       // acceleration forward, m/s^2
     float sway = 0;        // acceleration to the right, m/s^2
     float heave = 0;       // acceleration up, m/s^2, without gravity: 0 at rest
