@@ -4,6 +4,7 @@
 #include "platform.h"
 #include "input_script.h"
 #include "input_log.h"
+#include "input_map.h"
 #include "gx/render_gl.h"
 #include "gx/gl.h"
 #include "hw/pad.h"
@@ -140,7 +141,7 @@ static void on_fault(const void* fault_addr, int code) {
 bool audio_open();
 
 // ---------------------------------------------------------------------------
-// Input: keyboard + first game controller -> GC pad 1
+// Input: keyboard + first game controller -> GC pad 1, and controls.txt (input_map.h)
 // ---------------------------------------------------------------------------
 static SDL_GameController* g_ctrl;
 
@@ -151,9 +152,9 @@ static uint8_t axis_to_u8(int v, bool invert) {
     return (uint8_t)std::clamp(r, 0, 255);
 }
 
-// The keyboard and the first game controller, merged into `p`: buttons are added, and a
-// stick or trigger is taken over only while it is pushed, so that they can share the pad
-// with a headset's controllers (xr_desktop.cpp).
+// The keyboard, the first game controller and controls.txt, merged into `p`: buttons are
+// added, and a stick or trigger is taken over only while it is pushed, so that they can
+// share the pad with a headset's controllers (xr_desktop.cpp).
 static void merge_desktop_pad(PadState& p) {
     const uint8_t* k = SDL_GetKeyboardState(nullptr);
     if (k[SDL_SCANCODE_RETURN]) p.buttons |= PAD_START;
@@ -200,6 +201,7 @@ static void merge_desktop_pad(PadState& p) {
         if (lt > 1000) { p.trig_l = std::max(p.trig_l, (uint8_t)(lt * 255 / 32767)); if (lt > 30000) p.buttons |= PAD_L; }
         if (rt > 1000) { p.trig_r = std::max(p.trig_r, (uint8_t)(rt * 255 / 32767)); if (rt > 30000) p.buttons |= PAD_R; }
     }
+    input_map_apply(p);
 }
 
 static void update_pad() {
@@ -215,8 +217,11 @@ static bool pump_events() {
     SDL_Event e;
     bool running = true;
     while (SDL_PollEvent(&e)) {
+        input_map_event(e);
         if (e.type == SDL_QUIT) running = false;
-        else if (e.type == SDL_CONTROLLERDEVICEADDED && !g_ctrl) g_ctrl = SDL_GameControllerOpen(e.cdevice.which);
+        // A device controls.txt binds is the file's alone.
+        else if (e.type == SDL_CONTROLLERDEVICEADDED && !g_ctrl && !input_map_binds_index(e.cdevice.which))
+            g_ctrl = SDL_GameControllerOpen(e.cdevice.which);
         else if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
     }
     return running;
@@ -241,6 +246,7 @@ int main(int argc, char** argv) {
     // --record=<file>[ --record-size=WxH]: a movie of the window with the game's audio (record.h).
     const char* record_to = nullptr;
     int record_w = 2560, record_h = 1440;
+    const char* controls = "controls.txt";
     // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
     const char* telemetry_to = getenv("GCN_TELEMETRY");
     int scale = 2;
@@ -251,6 +257,8 @@ int main(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--eye")) g_eye_mode = true;
         else if (!strcmp(argv[i], "--vr")) vr = true;
+        else if (!strcmp(argv[i], "--list-controls")) return input_map_probe();
+        else if (!strncmp(argv[i], "--controls=", 11)) controls = argv[i] + 11;
         else if (!strcmp(argv[i], "--telemetry")) telemetry_to = "";
         else if (!strncmp(argv[i], "--telemetry=", 12)) telemetry_to = argv[i] + 12;
         else if (!strcmp(argv[i], "--first-person")) first_person = true;
@@ -328,7 +336,11 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     SDL_SetMainReady();
 #endif
+    // Joysticks are read without the window's focus: in --vr the headset has it, and a
+    // wheel or pedals have no reason to stop when another window is clicked.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) fatal("SDL_Init: %s", SDL_GetError());
+    input_map_load(controls);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     const bool gl_debug = getenv("GCN_GL_DEBUG") != nullptr;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG |
