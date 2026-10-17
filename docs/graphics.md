@@ -180,6 +180,37 @@ layer writes under `u_vr` 4, and it keeps the game's depth test and write. That 
 is only meaningful against draws in a foreground layer; mid-morph (`u_vr` 3 writes the
 eye's depth) the draw is left out. The draw log names its layer `eye-restore`.
 
+`EyeFacing` is for an orthographic panel a game moves about its picture by translating
+its projection: a window that follows a pointer or, in a headset, the gaze. The HUD frame
+is a flat plane fixed to the camera, so such a panel well off the frame's centre is seen
+at a slant, a trapezoid. An `EyeFacing` draw goes back to the frame's centre (the
+projection's translation, which is where it puts the panel's origin in clip space, is
+taken off) and is painted on the HUD frame turned about the camera, yaw then pitch with no
+roll, from the direction of the frame's centre to the direction of that point
+(`facing_frame`): the same place, as far off as the frame's centre, square on to the
+viewer. The draw log names its layer `hud-frame(facing)`.
+
+`EyeLateObject` is for a marker a game draws into its world and then covers with a 2D
+window that magnifies a copy of the picture around it, as a scanner's or a scope's window
+does. On the screen the copy holds the marker, magnified. In an eye the window, on the HUD
+frame and drawn without a depth test, covers the eye's own marker, and the copy is of the
+flat view, magnified about a point the flat view chose, so the marker in it is somewhere
+else or out of the window altogether. Every draw sharing a position matrix with one so
+called (as `EyeHideObject` finds a model's other parts) is left out of the flat pass that
+feeds the copies, through `g_hide`, and drawn by each eye after everything else in the
+frame (`g_late`), with its own depth state against the depth the eye has written: still
+hidden behind what stands in front of it, over the window. A frame that also has an
+`EyeFlat` draw has had its depth cleared by then, so there the markers lose their
+occlusion by the world.
+
+`EyeTrueScale` is for a perspective draw in a scaled layer's band (the foreground's or
+the HUD's, "Depth bands in an eye") that is placed in the world all the same: a reticle
+out where the aim is, a marker on a target, put in a near band only so that nothing in the
+world hides it. The layer's scale towards the camera brought it to a fraction of its
+distance, in front of what it marks, and the eyes could not fuse the two. It is drawn at
+its modelled distance and keeps the band's depth. The draw log names its layer
+`true-scale`.
+
 **Post-process passes over the whole frame.** A game can copy the whole frame and draw it
 straight back over the screen through a filter, orthographically: false colour, say. In an
 eye the copy's lookups are taken over by the eye's grab as for any whole-frame copy, but on

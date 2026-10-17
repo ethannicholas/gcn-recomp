@@ -59,7 +59,7 @@ static inline void set_lod_bias(GLuint s, float bias) {
 struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
-    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen, restore;
+    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen, restore, facing;
     float hud_push;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
@@ -155,6 +155,9 @@ static bool g_eye_overridden = false;
 // Per command of the batch being drawn: 1 for a draw the game's eye leaves out (the
 // player's own model, say). Empty when nothing is hidden.
 static std::vector<uint8_t> g_hide;
+// Per command: 1 for a draw of an object the game's eye filter asked for last
+// (EyeLateObject), which g_hide also leaves out of its place. Empty when there is none.
+static std::vector<uint8_t> g_late;
 // Per pixel state of the batch being drawn: 1 for one the game's eye filter called a 3D
 // draw composed into the 2D picture (EyeFlat), which an eye paints on the HUD frame where
 // the flat frame puts it. Empty when there is none. g_cur_flat3d is the state apply_state
@@ -176,6 +179,14 @@ static std::vector<float> g_restore_box;
 static std::vector<uint32_t> g_restore_tex;
 static bool g_cur_restore = false;
 static const float* g_cur_restore_box = nullptr;
+// And for an orthographic panel the game moves about its picture by its projection's
+// translation (EyeFacing): 1 per such state, drawn on the HUD frame turned to face it.
+static std::vector<uint8_t> g_facing;
+static bool g_cur_facing = false;
+// And for a perspective draw in a scaled layer's band that is drawn at its modelled
+// distance all the same (EyeTrueScale).
+static std::vector<uint8_t> g_true_scale;
+static bool g_cur_true_scale = false;
 // The morph between theater and stereo; see render_set_vr_morph. 1 is plain stereo.
 static float g_morph = 1.0f;
 // A flat frame drawn as one of a stereo pair (render_execute_stereo_pair): where the eye
@@ -1064,6 +1075,38 @@ static void mat4_mul(const float* a, const float* b, float* c) {
         }
 }
 
+// The turn yaw(y) then pitch(x), column-major: one that takes -z, the way ahead, to the
+// direction `yaw` left and `pitch` up of it.
+static void yaw_pitch_matrix(float yaw, float pitch, float m[16]) {
+    const float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
+    const float R[16] = {cy, 0, -sy, 0, sy * sp, cp, cy * sp, 0, sy * cp, -sp, cy * cp, 0, 0, 0, 0, 1};
+    memcpy(m, R, sizeof(R));
+}
+
+// An EyeFacing draw's frame. The game centred its panel on the point (cx, cy) of its clip
+// space by translating its orthographic projection, so on the HUD frame (g_vr_hud_eff,
+// clip to view space) the panel lies off the frame's centre and is seen at a slant. Here
+// the panel goes back to the centre, and the frame is turned about the camera -- yaw, then
+// pitch, no roll -- from the direction of its centre to that of the point: the panel is
+// where it was, as far away as the frame's centre, square on to the camera.
+static void facing_frame(const float P[16], float out[16]) {
+    const float* F = g_vr_hud_eff;
+    const float cx = P[12], cy = P[13];   // the panel's origin in clip space, w being 1
+    const float C[3] = {F[12], F[13], F[14]};
+    const float Q[3] = {F[0] * cx + F[4] * cy + F[12], F[1] * cx + F[5] * cy + F[13], F[2] * cx + F[6] * cy + F[14]};
+    auto yaw = [](const float* v) { return atan2f(-v[0], -v[2]); };
+    auto pitch = [](const float* v) { return atan2f(v[1], sqrtf(v[0] * v[0] + v[2] * v[2])); };
+    float to[16], from[16], back[16], R[16], RF[16];
+    yaw_pitch_matrix(yaw(Q), pitch(Q), to);
+    yaw_pitch_matrix(yaw(C), pitch(C), from);
+    for (int k = 0; k < 4; k++)
+        for (int r = 0; r < 4; r++) back[k * 4 + r] = from[r * 4 + k];   // a rotation's inverse
+    mat4_mul(to, back, R);
+    mat4_mul(R, F, RF);
+    const float T[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -cx, -cy, 0, 1};
+    mat4_mul(RF, T, out);
+}
+
 // The water surface refracts by looking the finished frame up at the screen position the
 // game computed for each of its vertices. In an eye those positions are the flat view's,
 // and the copy is the flat view's too, so water the eye can see beyond the game's own
@@ -1437,6 +1480,9 @@ static void apply_state(const PixelState& st, int prim) {
     // A copy of part of the frame put back over itself with a depth test (EyeRestore):
     // across the eye too, but at the game's depth and with its depth test.
     const bool restore = g_vr_active && g_cur_restore && g_cur_restore_box && !perspective;
+    // A panel the game moved about its picture by its projection (EyeFacing): on the HUD
+    // frame, turned to face the viewer.
+    const bool facing = g_vr_active && g_cur_facing && !perspective && !screen && !restore;
     const bool view_space_3d = perspective && view_space && vs3d && !flat3d;
     const bool on_hud_frame = flat3d || ((!perspective || view_space) && !view_space_3d);
     if (perspective) {
@@ -1486,9 +1532,13 @@ static void apply_state(const PixelState& st, int prim) {
     const float band_hi = st.viewport[5] / 16777215.0f;
     const bool background = sky_at_infinity && g_bg_from > 0.0f && perspective && !view_space &&
                             band_lo >= g_bg_from;
-    // The HUD layer takes precedence over the foreground, whose band it sits inside.
-    const bool hud_layer = g_hud_to > 0.0f && g_hud_scale != 1.0f && perspective && band_hi <= g_hud_to;
-    const bool foreground = !hud_layer && g_fg_to > 0.0f && g_fg_scale != 1.0f && perspective && band_hi <= g_fg_to;
+    // The HUD layer takes precedence over the foreground, whose band it sits inside. A
+    // draw the game's filter called EyeTrueScale -- something placed in the world, a
+    // marker at a target, drawn in a near band only to be drawn over everything -- is in
+    // neither: it stays where it was modelled, and keeps its band's depth.
+    const bool true_scale = g_vr_active && g_cur_true_scale;
+    const bool hud_layer = !true_scale && g_hud_to > 0.0f && g_hud_scale != 1.0f && perspective && band_hi <= g_hud_to;
+    const bool foreground = !true_scale && !hud_layer && g_fg_to > 0.0f && g_fg_scale != 1.0f && perspective && band_hi <= g_fg_to;
     // A foreground layer also keeps the game's own depth within its band (u_vr 4 in the
     // vertex shader), whether or not it is scaled.
     const bool fg_layer = g_fg_to > 0.0f && perspective && band_hi <= g_fg_to;
@@ -1496,7 +1546,7 @@ static void apply_state(const PixelState& st, int prim) {
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
                            foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer &&
-                           flat3d == u.flat3d && screen == u.screen && !restore && !u.restore &&
+                           flat3d == u.flat3d && screen == u.screen && facing == u.facing && !restore && !u.restore &&
                            hud_push == u.hud_push && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
@@ -1546,7 +1596,7 @@ static void apply_state(const PixelState& st, int prim) {
             g_eye_layer_name = background ? "sky" : hud_push != 1.0f ? "hud-band(pushed)"
                              : hud_layer ? (view_space_3d ? "hud-band(view)" : "hud-band(world)")
                              : foreground ? (view_space_3d ? "foreground(view)" : "foreground(world)")
-                             : view_space_3d ? "view-space-3d" : "world";
+                             : view_space_3d ? "view-space-3d" : true_scale ? "true-scale" : "world";
             static const bool game_depth = !(getenv("GCN_EYE_FGDEPTH") && atoi(getenv("GCN_EYE_FGDEPTH")) == 0);
             glUniform1i(pr.u_vr, fg_layer && game_depth ? 4 : 1);
         } else if (g_vr_active) {
@@ -1593,14 +1643,17 @@ static void apply_state(const PixelState& st, int prim) {
                     M[c * 4 + 3] = P[c * 4 + 3];
                 }
             } else {
-                mat4_mul(g_vr_hud_eff, P, a);   // the game's 2D frame, placed in view space
+                float faced[16];
+                if (facing) facing_frame(P, faced);
+                mat4_mul(facing ? faced : g_vr_hud_eff, P, a);   // the game's 2D frame, placed in view space
                 mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
                 mat4_mul(g_vr_proj, b, M);
             }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
             if (flat3d) glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, flat_crop);
             glUniform1i(pr.u_vr, flat3d ? 5 : 2);
-            g_eye_layer_name = flat3d ? "hud-frame(3d)" : screen ? "eye-screen" : restore ? "eye-restore" : "hud-frame";
+            g_eye_layer_name = flat3d ? "hud-frame(3d)" : screen ? "eye-screen" : restore ? "eye-restore"
+                             : facing ? "hud-frame(facing)" : "hud-frame";
         } else if (g_flat_eye != 0.0f && perspective &&
                    !(g_panel_band > 0.0f && band_hi > band_lo && band_hi <= g_panel_band)) {
             // One of a stereo pair on the panel (a draw in the panel band falls through to
@@ -1642,6 +1695,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.flat3d = flat3d;
         u.screen = screen;
         u.restore = restore;
+        u.facing = facing;
         u.hud_push = hud_push;
     }
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
@@ -2530,10 +2584,13 @@ static void apply_view_turn(const Batch& b) {
 // mark_offscreen_passes leaves it.
 static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_hide.clear();
+    g_late.clear();
     g_flat3d.clear();
     g_screen.clear();
     g_restore.clear();
     g_restore_tex.clear();
+    g_facing.clear();
+    g_true_scale.clear();
     g_hud_push.clear();
     if (g_hud_push_below > 0.0f && g_hud_to > 0.0f) {
         // Each HUD-layer state's nearest vertex over the frame, in view space.
@@ -2604,6 +2661,7 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     }
     std::vector<int8_t> answer(b.states.size(), -1);
     std::vector<uint8_t> hidden_mtx;   // EyeHideObject: the position matrices to clear of draws
+    std::vector<uint8_t> late_mtx;     // EyeLateObject: those whose draws go last
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
         if (c.type != CmdType::Draw || skip[i]) continue;
@@ -2626,6 +2684,16 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
             g_screen[c.state] = 1;
             continue;
         }
+        if (a == EyeFacing) {
+            if (g_facing.empty()) g_facing.assign(b.states.size(), 0);
+            g_facing[c.state] = 1;
+            continue;
+        }
+        if (a == EyeTrueScale) {
+            if (g_true_scale.empty()) g_true_scale.assign(b.states.size(), 0);
+            g_true_scale[c.state] = 1;
+            continue;
+        }
         if (a == EyeRestore) {
             if (g_restore.empty()) {
                 g_restore.assign(b.states.size(), 0);
@@ -2640,6 +2708,11 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
             }
             continue;
         }
+        if (a == EyeLateObject) {
+            if (late_mtx.size() <= c.mtx) late_mtx.resize(c.mtx + 1, 0);
+            late_mtx[c.mtx] = 1;
+            continue;
+        }
         if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
         g_hide[i] = 1;
         if (a == EyeHideObject) {
@@ -2647,11 +2720,18 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
             hidden_mtx[c.mtx] = 1;
         }
     }
-    if (hidden_mtx.empty()) return;
+    if (hidden_mtx.empty() && late_mtx.empty()) return;
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
         if (c.type != CmdType::Draw || skip[i]) continue;
-        if (c.mtx < hidden_mtx.size() && hidden_mtx[c.mtx]) g_hide[i] = 1;
+        const bool hidden = c.mtx < hidden_mtx.size() && hidden_mtx[c.mtx];
+        const bool late = !hidden && c.mtx < late_mtx.size() && late_mtx[c.mtx];
+        if (!hidden && !late) continue;
+        if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
+        g_hide[i] = 1;
+        if (!late) continue;
+        if (g_late.empty()) g_late.assign(b.cmds.size(), 0);
+        g_late[i] = 1;
     }
 }
 
@@ -3261,12 +3341,16 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 gl_state_invalidate();
             }
             g_cur_screen = !g_screen.empty() && g_screen[c.state];
+            g_cur_facing = !g_facing.empty() && g_facing[c.state];
+            g_cur_true_scale = !g_true_scale.empty() && g_true_scale[c.state];
             g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
             g_cur_restore = restore_draw;
             g_cur_restore_box = restore_draw ? &g_restore_box[c.state * 4] : nullptr;
             apply_state(b.states[c.state], c.prim);
             g_cur_flat3d = false;
             g_cur_screen = false;
+            g_cur_facing = false;
+            g_cur_true_scale = false;
             g_cur_hud_push = 1.0f;
             g_cur_restore = false;
             g_cur_restore_box = nullptr;
@@ -3285,6 +3369,33 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                     (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f, st.viewport[5] / 16777215.0f, (int)st.view_space);
         }
         eye_draw_index++;
+        draw_cmd(b, c);
+    }
+    // The objects the game asked for last (EyeLateObject), over everything the eye drew,
+    // with their own depth state against the depth the eye has written: a marker in the
+    // world stays hidden behind what is in front of it there, and shows over the 2D
+    // window the game painted on top of where it stands. The flat pass left them out, so
+    // a copy the window magnifies does not hold them a second time.
+    for (size_t i = 0; i < eye_end && !g_late.empty(); i++) {
+        if (!g_late[i] || skip[i]) continue;
+        Cmd& c = b.cmds[i];
+        const bool zfreeze = (b.states[c.state].bp[0x00] >> 19) & 1;
+        if (!zfreeze) zfreeze_plane_eye(b, c, g_zplane);
+        if (c.state != cur_state || c.prim != cur_prim) {
+            g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
+            g_cur_true_scale = !g_true_scale.empty() && g_true_scale[c.state];
+            apply_state(b.states[c.state], c.prim);
+            g_cur_hud_push = 1.0f;
+            g_cur_true_scale = false;
+            glViewport(0, 0, w, h);
+            glDisable(GL_SCISSOR_TEST);
+            cur_state = c.state;
+            cur_prim = c.prim;
+        } else if (zfreeze && g_applied.pr && g_applied.pr->u_zplane >= 0) {
+            glUniform4fv(g_applied.pr->u_zplane, 1, g_zplane);
+        }
+        if (eye_drawlog && do_copies) fprintf(stderr, "[eyedraw] late cmd %zu st=%u %s\n", i, c.state, g_eye_layer_name);
+        n_drawn++;
         draw_cmd(b, c);
     }
     if (eyelog && do_copies)

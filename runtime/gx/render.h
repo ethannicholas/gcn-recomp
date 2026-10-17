@@ -86,7 +86,25 @@ struct PixelState {
 // the game copies, draws the quad across its whole field at the depth the game gives it in
 // its band, with the game's depth test, and samples the grab at each fragment's own
 // position. That depth compares only with draws that keep the game's depth in their band,
-// a foreground layer's (render_set_depth_layers). The flat view is untouched; a hidden draw's textures are
+// a foreground layer's (render_set_depth_layers). EyeFacing is for an orthographic panel
+// the game moves about its picture by translating its projection -- a window that follows
+// a pointer or the gaze. On the HUD frame, which is flat and fixed to the camera, such a
+// panel away from the frame's centre is seen at a slant, a trapezoid. It is drawn instead
+// on the HUD frame turned about the camera to face the point the projection puts the
+// panel's origin at, with that origin at the turned frame's centre: the same place, the
+// same distance, square on to the viewer. EyeLateObject is for a marker the game draws
+// into its world and then partly covers with a 2D window that magnifies a copy of the
+// picture around it -- a scanner's or a scope's window. On the screen the copy holds the
+// marker, magnified; in an eye the window covers the marker and the copy holds the flat
+// view's, off where the flat view had it. Every draw sharing a position matrix with one
+// so called is left out of the flat pass that feeds the copies (as EyeHideObject leaves
+// them out) and drawn by each eye after everything else in the frame, with its own depth
+// test against what the eye has drawn: hidden behind what stands in front of it, over
+// the window. EyeTrueScale is for a perspective draw placed in the world that the game
+// puts in a near layer's depth band only so that it is drawn over everything -- a marker
+// on a target, a reticle out where the aim is: the layer's scale towards the camera
+// (render_set_depth_layers) would bring it near, where the eyes cannot fuse it with what
+// it marks. It is drawn at its modelled distance and keeps its band's depth. The flat view is untouched; a hidden draw's textures are
 // kept alive. For a game that hides a model's materials (by TexData::hash, the same in
 // every run) or an effect that cannot be re-projected (a screen-space refraction of part
 // of the frame).
@@ -106,7 +124,7 @@ struct EyeDrawFacts {
     float clip_x0, clip_x1, clip_y0, clip_y1, clip_area;
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5 };
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };
