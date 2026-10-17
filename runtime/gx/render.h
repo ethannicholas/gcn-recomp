@@ -63,6 +63,9 @@ struct PixelState {
     // XF 0x1005 bit 0: GXSetClipMode(GX_CLIP_DISABLE). Nothing is clipped at the near and
     // far planes; depth beyond them is clamped to the buffer's range.
     uint8_t clip_disable;
+    // The game's tag for the draws (set_draw_tag) where the command stream had got to
+    // when this state was taken; 0 for none.
+    uint8_t tag;
 };
 
 // A game's own say over what an eye draws, on top of the eye hook: called once per pixel
@@ -241,6 +244,17 @@ std::unique_ptr<Batch> take_batch(int timeout_ms);
 // a frame morphing between the panel and the eyes takes the turn at its panel end too.
 // The identity until a game says otherwise.
 void set_view_turn(const float q[4]);
+
+// A game's tag for the draws it makes from here on (PixelState::tag), from the guest thread,
+// 0 to end it: what its eye filter can tell a set of draws by when nothing in their state
+// says what they are -- the draws one of its functions makes, say, tagged on entering the
+// function and untagged on leaving. Like a view turn, the tag takes its place in the command
+// stream, so the front end, however far behind, applies it to the draws written after it.
+// It is only as exact as the stream: the last 31 bytes or less the game wrote before the
+// call may still be in the gather pipe, so a draw that ends just before a change of tag can
+// land on the far side of it. A tag is best changed where the game has written a little
+// state (a projection, a viewport) between the change and the nearest draw.
+void set_draw_tag(uint8_t tag);
 
 // Frame pacing / stats
 extern std::atomic<uint32_t> g_frames_submitted;

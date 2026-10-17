@@ -140,6 +140,15 @@ void view_turn_reached(const float q[4]) {
     if (g_batch) memcpy(g_batch->view_turn, q, sizeof(g_view_turn));
 }
 
+// set_draw_tag, where the command stream has got to it: the states taken from here on
+// carry it (PixelState::tag).
+static uint8_t g_draw_tag;
+void draw_tag_reached(uint8_t tag) {
+    if (tag == g_draw_tag) return;
+    g_draw_tag = tag;
+    g_state.pixel_dirty = true;
+}
+
 // GCN_MTXLOG=<n> dumps the nth presented frame's draws; see draw_impl.
 static const uint32_t g_mtxlog = getenv("GCN_MTXLOG") ? (uint32_t)atoi(getenv("GCN_MTXLOG")) : 0;
 static uint32_t g_mtx_draw;
@@ -880,6 +889,7 @@ static uint32_t snapshot_state(bool view_space) {
     st.num_texgens = g_state.xf_regs[0x3F] & 15;
     st.num_colors = g_state.xf_regs[0x09] & 3;
     st.clip_disable = g_state.xf_regs[0x05] & 1;
+    st.tag = g_draw_tag;
     // Textures referenced by TEV stages and indirect stages.
     uint32_t genmode = g_state.bp[0x00];
     uint32_t nstages = ((genmode >> 10) & 15) + 1;

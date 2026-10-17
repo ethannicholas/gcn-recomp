@@ -214,8 +214,9 @@ static std::vector<uint8_t> g_skim_out;
 // thread when it set them, a turn landed on whichever batch the front end, up to a frame
 // behind, was building: in the headset, a frame of the world now and then drawn a frame's
 // turn off. Under g_fe_mutex.
-namespace gx { void view_turn_reached(const float q[4]); }
-struct PendingTurn { uint64_t at; float q[4]; };
+// The game's draw tags (gx::set_draw_tag) go in the same queue, in order with the turns.
+namespace gx { void view_turn_reached(const float q[4]); void draw_tag_reached(uint8_t tag); }
+struct PendingTurn { uint64_t at; float q[4]; int tag = -1; };   // a draw tag when tag >= 0
 static std::deque<PendingTurn> g_turns;
 
 // On the front end, before it processes what starts at `at`: the turns set by then.
@@ -228,7 +229,8 @@ static void turns_reached(uint64_t at) {
             t = g_turns.front();
             g_turns.pop_front();
         }
-        gx::view_turn_reached(t.q);
+        if (t.tag >= 0) gx::draw_tag_reached((uint8_t)t.tag);
+        else gx::view_turn_reached(t.q);
     }
 }
 
@@ -305,6 +307,21 @@ void gx::set_view_turn(const float q[4]) {
     fe_submit();
     PendingTurn t;
     memcpy(t.q, q, sizeof(t.q));
+    std::lock_guard<std::mutex> lk(g_fe_mutex);
+    t.at = g_fe_handed;
+    g_turns.push_back(t);
+}
+
+// See g_turns and set_draw_tag.
+void gx::set_draw_tag(uint8_t tag) {
+    if (!fe_threaded()) {
+        draw_tag_reached(tag);
+        return;
+    }
+    fe_submit();
+    PendingTurn t;
+    memset(t.q, 0, sizeof(t.q));
+    t.tag = tag;
     std::lock_guard<std::mutex> lk(g_fe_mutex);
     t.at = g_fe_handed;
     g_turns.push_back(t);

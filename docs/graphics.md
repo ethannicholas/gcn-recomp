@@ -203,6 +203,17 @@ hidden behind what stands in front of it, over the window. A frame that also has
 `EyeFlat` draw has had its depth cleared by then, so there the markers lose their
 occlusion by the world.
 
+A filter tells draws apart by what their state says, and that is not always enough: a
+texture's content hash, stable for most textures, can differ from one run to the next for
+one the game writes as it goes. So a game can also tag its draws by where they come from
+(`set_draw_tag` in `render.h`, `PixelState::tag`): on entering one of its functions and on
+leaving it, from the guest thread. The tag is pinned to the command stream as a view turn
+is (the same queue, `g_turns` in `fifo.cpp`), so the front end, however far behind,
+applies it to the states it takes from the draws written after it. It is as exact as the
+stream: up to 31 bytes the game wrote before the call can still be in the gather pipe and
+reach the front end after the change, so a tag is best changed where some state has been
+written since the last draw it should not cover.
+
 `EyeTrueScale` is for a perspective draw in a scaled layer's band (the foreground's or
 the HUD's, "Depth bands in an eye") that is placed in the world all the same: a reticle
 out where the aim is, a marker on a target, put in a near band only so that nothing in the
