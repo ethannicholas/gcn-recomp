@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // ---- virtual memory ----
 // Reserve `size` bytes of address space without committing it. Returns nullptr on failure.
@@ -42,6 +43,13 @@ void plat_thread_role(ThreadRole role, const char* name);
 // One listener, called with every thread recorded so far and then with each as it is
 // recorded, on that thread. Null removes it.
 void plat_set_thread_role_listener(void (*fn)(ThreadRole role, long tid));
+// The threads recorded so far, by name and OS thread id.
+struct PlatThread { const char* name; long tid; };
+std::vector<PlatThread> plat_threads();
+// What the OS's scheduler says of a thread so far: nanoseconds it has run, nanoseconds it
+// has waited runnable for a core, and the core it last ran on. False where the platform
+// does not say (Linux and Android do, in /proc).
+bool plat_thread_sched(long tid, uint64_t* run_ns, uint64_t* wait_ns, int* cpu);
 
 // ---- time ----
 // Seconds to add to UTC to get local wall-clock time, including any DST in effect.

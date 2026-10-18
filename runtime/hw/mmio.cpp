@@ -12,6 +12,12 @@ void pi_update() {
 }
 
 void pi_set_interrupt(uint32_t cause, bool set) {
+    // The CP's state is re-asserted at every gather-pipe drain, tens of thousands of times a
+    // frame and nearly always unchanged; two atomic read-modify-writes each time were 6% of
+    // the guest thread in a heavy scene. A pending cause keeps asking for its own poll
+    // (irq_poll), so an unchanged one needs nothing here.
+    const uint32_t cur = g_pi_intsr.load(std::memory_order_relaxed);
+    if (set ? (cur & cause) == cause : (cur & cause) == 0) return;
     if (set) g_pi_intsr.fetch_or(cause);
     else g_pi_intsr.fetch_and(~cause);
     pi_update();

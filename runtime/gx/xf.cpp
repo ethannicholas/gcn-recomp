@@ -6,6 +6,7 @@
 #include "render.h"
 #include "texture.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -1207,14 +1208,32 @@ static void transform_range(const Pending& pd, size_t lo, size_t hi, Batch& b) {
     if (xfstats_on()) flush_draw_stats();
 }
 
+// A frame's draws, handed out a chunk at a time to whichever of the worker and its helpers
+// is free. They were split into equal shares of vertices, one per thread, but a vertex's
+// cost varies severalfold with its lighting and texgens: in a scene of lit, skinned models
+// beside plain ones one share took two and a half times the other, and the thread with the
+// light share sat idle while the frame waited on the heavy one.
+struct XfShare {
+    const Pending* pd;
+    Batch* batch;
+    size_t n;
+    std::atomic<size_t> next{0};
+};
+static void transform_share(XfShare& s) {
+    constexpr size_t kChunk = 128;   // draws: most are 4-8 vertices, a few thousands
+    for (;;) {
+        const size_t lo = s.next.fetch_add(kChunk, std::memory_order_relaxed);
+        if (lo >= s.n) return;
+        transform_range(*s.pd, lo, std::min(s.n, lo + kChunk), *s.batch);
+    }
+}
+
 // Helpers that take a share of each frame alongside the worker.
 struct XfHelper {
     std::thread thread;
     std::mutex m;
     std::condition_variable cv;
-    const Pending* pd = nullptr;
-    size_t lo = 0, hi = 0;
-    Batch* batch = nullptr;
+    XfShare* share = nullptr;
     bool busy = false;
 };
 static std::vector<std::unique_ptr<XfHelper>> g_helpers;
@@ -1223,14 +1242,12 @@ static void helper_main(XfHelper* h) {
     plat_thread_role(ThreadRole::RenderWorker, "gx-transform");
     for (;;) {
         std::unique_lock<std::mutex> lk(h->m);
-        h->cv.wait(lk, [h] { return h->busy && h->pd; });
-        const Pending* pd = h->pd;
-        const size_t lo = h->lo, hi = h->hi;
-        Batch* batch = h->batch;
+        h->cv.wait(lk, [h] { return h->busy && h->share; });
+        XfShare* share = h->share;
         lk.unlock();
-        transform_range(*pd, lo, hi, *batch);
+        transform_share(*share);
         lk.lock();
-        h->pd = nullptr;
+        h->share = nullptr;
         h->busy = false;
         h->cv.notify_all();
     }
@@ -1254,31 +1271,18 @@ static void transform_pending(const Pending& pd, Batch& b) {
         transform_range(pd, 0, n, b);
         return;
     }
-    // Split by vertices rather than draws: a frame's draws range from one vertex to
-    // thousands.
-    const size_t total = pd.in.size();
-    std::vector<size_t> cut(threads + 1, n);
-    cut[0] = 0;
-    for (int k = 1; k < threads; k++) {
-        const size_t target = total * k / threads;
-        size_t lo = cut[k - 1], hi = n;
-        while (lo < hi) {
-            const size_t mid = (lo + hi) / 2;
-            if (pd.draws[mid].first_in < target) lo = mid + 1; else hi = mid;
-        }
-        cut[k] = lo;
-    }
+    XfShare share;
+    share.pd = &pd;
+    share.batch = &b;
+    share.n = n;
     for (int k = 1; k < threads; k++) {
         XfHelper* h = g_helpers[k - 1].get();
         std::lock_guard<std::mutex> lk(h->m);
-        h->pd = &pd;
-        h->lo = cut[k];
-        h->hi = cut[k + 1];
-        h->batch = &b;
+        h->share = &share;
         h->busy = true;
         h->cv.notify_all();
     }
-    transform_range(pd, cut[0], cut[1], b);
+    transform_share(share);
     for (int k = 1; k < threads; k++) {
         XfHelper* h = g_helpers[k - 1].get();
         std::unique_lock<std::mutex> lk(h->m);

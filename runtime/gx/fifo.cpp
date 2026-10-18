@@ -493,11 +493,12 @@ static void cp_follow_pi() {
     if (g_cp_cr & CP_CR_LINK) g_cp_wptr = pi_fifo_wptr();
 }
 
-static void cp_drain() {
-    if (!(g_cp_cr & CP_CR_READ)) return;
+// True when it got as far as checking the watermarks.
+static bool cp_drain() {
+    if (!(g_cp_cr & CP_CR_READ)) return false;
     uint32_t base = g_cp_base & 0x03FFFFE0, end = cp_end_excl();
     uint32_t wptr = g_cp_wptr & 0x03FFFFE0;
-    if (!end || end <= base) return;
+    if (!end || end <= base) return false;
     uint32_t r = g_cp_rptr & 0x03FFFFE0;
     if (r < base || r >= end) r = base;
     if (wptr < base || wptr >= end) {
@@ -505,7 +506,7 @@ static void cp_drain() {
         // nothing to do with its own.
         static uint32_t warned;
         if (warned++ < 8) LOG(LOG_GX, "CP wptr %08X outside GP FIFO %08X-%08X (rptr %08X)", wptr, base, end, r);
-        return;
+        return false;
     }
     bool bp_on = g_cp_cr & CP_CR_BPEN;
     uint32_t bp = g_cp_bp & 0x03FFFFE0;
@@ -525,12 +526,18 @@ static void cp_drain() {
     g_cp_rptr = r;
     g_cp_rwdist = wptr >= r ? wptr - r : (end - r) + (wptr - base);
     cp_watermarks();
+    return true;
 }
 
+// Once per 32 bytes the game writes to the GPU -- tens of thousands of times a frame in a
+// heavy scene, where this path was a fifth of the guest thread -- so the common case is
+// kept short: the line inside RAM without dma_fit's call, the watermarks checked once,
+// and the buffer shifted only when it held more than the line.
 static void gp_flush32() {
     uint32_t& wptr = pi_fifo_wptr();
     uint32_t addr = wptr & 0x03FFFFFF;
-    memcpy(phys_ptr(addr), g_gp_buf, dma_fit("write-gather", addr, 32));
+    const uint32_t fit = (addr & 0x01FFFFFF) + 32 <= RAM_SIZE ? 32u : dma_fit("write-gather", addr, 32);
+    memcpy(phys_ptr(addr), g_gp_buf, fit);
     addr += 32;
     if (addr > pi_fifo_end()) {  // the end is the last line; see cp_end_excl
         addr = pi_fifo_base();
@@ -540,9 +547,8 @@ static void gp_flush32() {
         wptr = (wptr & 0x04000000) | addr;
     }
     cp_follow_pi();
-    cp_drain();
-    cp_watermarks();  // cp_drain returns early while the GP is stopped, and the writer is not
-    memmove(g_gp_buf, g_gp_buf + 32, g_gp_len - 32);
+    if (!cp_drain()) cp_watermarks();  // cp_drain returns early while the GP is stopped, and the writer is not
+    if (g_gp_len > 32) memmove(g_gp_buf, g_gp_buf + 32, g_gp_len - 32);
     g_gp_len -= 32;
 }
 

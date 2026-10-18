@@ -23,6 +23,7 @@
 #include <cstring>
 #include <memory>
 #include <thread>
+#include <unordered_map>
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -1276,6 +1277,32 @@ bool build_shaders() {
     return true;
 }
 
+// GCN_SCHEDLOG=1: once a second, for each named thread that ran at least 5 ms of it, how
+// long it ran, how long it waited runnable for a core, and the core it last ran on --
+// what tells a stage that is slow from one the OS is not giving a core to.
+void log_thread_sched() {
+    static const bool on = getenv("GCN_SCHEDLOG") != nullptr;
+    if (!on) return;
+    struct Prev { uint64_t run, wait; };
+    static std::unordered_map<long, Prev> prev;
+    std::string line;
+    for (const PlatThread& t : plat_threads()) {
+        uint64_t run, wait;
+        int cpu;
+        if (!plat_thread_sched(t.tid, &run, &wait, &cpu)) continue;
+        Prev& p = prev[t.tid];
+        const uint64_t dr = run - p.run, dw = wait - p.wait;
+        const bool first = p.run == 0 && p.wait == 0;
+        p = {run, wait};
+        if (first || dr < 5000000) continue;
+        char buf[96];
+        snprintf(buf, sizeof(buf), " %s %llu/%llu@%d", t.name, (unsigned long long)(dr / 1000000),
+                 (unsigned long long)(dw / 1000000), cpu);
+        line += buf;
+    }
+    if (!line.empty()) LOGI("threads (run/waiting ms @core):%s", line.c_str());
+}
+
 // Dynamic resolution (gpu_budget_ms). A scene can cost the GPU many times its usual
 // work for a second or two -- a burst of large translucent effects around the camera is
 // overdraw on every one of an eye's pixels, at many times the console's resolution -- and
@@ -1849,6 +1876,7 @@ void run() {
                  underruns - underruns_reported, lowest_ms);
             underruns_reported = underruns;
             eye_res.report_reset();
+            log_thread_sched();
             xr_frames = game_frames = skipped = 0;
             holds[0] = holds[1] = holds[2] = holds[3] = 0;
             gap_max = eyes_sum = eyes_max = 0;

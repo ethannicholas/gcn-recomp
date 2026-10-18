@@ -363,6 +363,7 @@ static void set_thread_name(const char* name) {
 
 static std::mutex g_roles_mutex;
 static std::vector<std::pair<ThreadRole, long>> g_roles;
+static std::vector<PlatThread> g_named;
 static void (*g_role_listener)(ThreadRole, long);
 
 void plat_thread_role(ThreadRole role, const char* name) {
@@ -372,9 +373,50 @@ void plat_thread_role(ThreadRole role, const char* name) {
     {
         std::lock_guard<std::mutex> lk(g_roles_mutex);
         g_roles.emplace_back(role, tid);
+        g_named.push_back({name, tid});
         fn = g_role_listener;
     }
     if (fn) fn(role, tid);
+}
+
+std::vector<PlatThread> plat_threads() {
+    std::lock_guard<std::mutex> lk(g_roles_mutex);
+    return g_named;
+}
+
+bool plat_thread_sched(long tid, uint64_t* run_ns, uint64_t* wait_ns, int* cpu) {
+#if defined(__linux__)
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/schedstat", tid);
+    FILE* f = fopen(path, "r");
+    if (!f) return false;
+    unsigned long long run = 0, wait = 0;
+    const bool ok = fscanf(f, "%llu %llu", &run, &wait) == 2;
+    fclose(f);
+    if (!ok) return false;
+    *run_ns = run;
+    *wait_ns = wait;
+    // The core is the 39th field of stat, counted after the parenthesised name, which
+    // may itself hold spaces.
+    *cpu = -1;
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/stat", tid);
+    if ((f = fopen(path, "r"))) {
+        char buf[1024];
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = 0;
+        if (const char* q = strrchr(buf, ')')) {
+            int field = 2;
+            for (q++; *q && field < 39; q++)
+                if (*q == ' ') field++;
+            if (field == 39) *cpu = atoi(q);
+        }
+    }
+    return true;
+#else
+    (void)tid; (void)run_ns; (void)wait_ns; (void)cpu;
+    return false;
+#endif
 }
 
 void plat_set_thread_role_listener(void (*fn)(ThreadRole, long)) {

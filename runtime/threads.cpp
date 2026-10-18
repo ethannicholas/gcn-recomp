@@ -16,6 +16,7 @@
 #include "platform.h"
 #include "input_log.h"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -112,7 +113,26 @@ static void spawn(HostThread* h) {
         fatal("could not start host thread %d", h->id);
 }
 
+// GCN_SWITCHLOG=1: how many times a frame the baton passed between host threads and how
+// long each handoff took, from the wake to the woken thread running -- time the guest is
+// stopped that neither the profile (CPU time) nor GCN_STALLS sees.
+static const bool g_switchlog = getenv("GCN_SWITCHLOG") != nullptr;
+static std::chrono::steady_clock::time_point g_switch_t0;
+static uint64_t g_switches, g_switch_ns;
+uint32_t gx_frames_submitted();
+static void switch_report() {
+    static uint32_t last_frame;
+    const uint32_t f = gx_frames_submitted();
+    if (f < last_frame + 60) return;
+    const double frames = f - last_frame;
+    fprintf(stderr, "[switch] f%u per frame over %.0f: %.1f handoffs, %.3f ms (%.1f us each)\n", f, frames,
+            g_switches / frames, g_switch_ns / frames / 1e6, g_switches ? g_switch_ns / (double)g_switches / 1e3 : 0.0);
+    g_switches = g_switch_ns = 0;
+    last_frame = f;
+}
+
 static void wake(HostThread* h, Binding* b) {
+    if (g_switchlog) g_switch_t0 = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(h->m);
     h->resume = b;
     h->run = true;
@@ -146,6 +166,11 @@ static Binding* wait_for_baton(HostThread* self) {
     }
     wake(target, b);
     Binding* mine = wait_for_baton(self);
+    if (g_switchlog) {
+        g_switches++;
+        g_switch_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_switch_t0).count();
+        switch_report();
+    }
     if (!mine) fatal("thread %d woken without resume point", self->id);
     resume_binding(self, mine);
 }

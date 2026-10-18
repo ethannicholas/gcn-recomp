@@ -242,6 +242,22 @@ stalls is its own work, which is what tells the stage that sets the pace from th
 waiting on it. `GCN_GX_TOKEN_EAGER=1` makes the guest wait for the front end at every
 token, as it once did.
 
+Which stage sets the pace is easy to misread. In an unpaced harness run the guest does not
+wait at the end of a frame (`kFeMaxFrames` applies in real time only), so it runs ahead and
+its stalls read zero, and a profile's share per thread (CPU time, sampled) tells how busy
+each thread was only relative to the others. `GCN_SCHEDLOG=1` in the headset app prints, once a
+second, each named thread's run time, its time spent runnable waiting for a core, and the
+core it last ran on (`/proc/self/task/<tid>/schedstat`); run time per presented frame is
+each stage's real cost there, and a thread near 16.7 ms of it a frame at 60 is the one that
+sets the pace. `GCN_SWITCHLOG=1` prints, per frame, how often the baton passed between the
+guest's host threads and what the handoffs cost, which neither a profile nor the stall
+counters see.
+
+A replay in the app runs at its recording's pace, not its own: the recorded catch-up jumps
+are made and the pacer sleeps whenever the build is faster than the one that recorded, so
+its frame rate is the recording's. It still gives each thread's work per frame. For the
+app's own capacity, replay unpaced (`GCN_TIMESCALE=0` in `gcn_env.txt`).
+
 `<game>_bench` runs the game with no graphics, audio or input, unpaced, and reports how fast
 the guest advances; `--warmup=N` (default 8) excludes boot from the steady-state figure. Its
 last column is the guest's work per presented frame in loop back-edges, the figure the
