@@ -4,6 +4,7 @@
 //
 //   * desktop OpenGL 3.3 core  -- macOS, Windows, Linux
 //   * OpenGL ES 3.2            -- Android / standalone headsets (GCN_GL_ES)
+//   * OpenGL ES 3.0            -- ANGLE's, on visionOS (GCN_GL_ES and GCN_GL_ES30)
 //
 // Nothing here uses a feature newer than GL 3.3 / ES 3.0: samplers, VAOs, FBOs and
 // explicit attribute locations are the whole requirement. Keeping the desktop floor at
@@ -16,12 +17,21 @@
 
 #ifdef GCN_GL_ES
 
-#define GCN_GL_MAJOR 3
-#define GCN_GL_MINOR 2
 // GLSL ES has no default precision for float or int in a fragment shader, so it has to
 // be stated or the shader fails to compile. Stays on one line per statement so the
 // #version directive remains the first line.
+#define GCN_GL_MAJOR 3
+#ifdef GCN_GL_ES30
+// ANGLE's Metal backend, which is what visionOS renders through, offers GL ES 3.0. What the
+// renderer takes from 3.2 is optional there: glDrawElementsBaseVertex has a fallback in
+// render_gl.cpp, and the extensions it asks for by name it does without when they are
+// missing.
+#define GCN_GL_MINOR 0
+#define GCN_GLSL_VERSION "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+#else
+#define GCN_GL_MINOR 2
 #define GCN_GLSL_VERSION "#version 320 es\nprecision highp float;\nprecision highp int;\n"
+#endif
 #include <glad/gles2.h>
 
 #else

@@ -28,6 +28,37 @@ else()
 endif()
 option(GCN_OPENXR "Build the desktop executable's OpenXR frontend (--vr)" ${_gcn_openxr_default})
 
+# visionOS: the Vision Pro app in visionos/, configured with CMake's Xcode generator and
+# -DCMAKE_SYSTEM_NAME=visionOS (see gcn_add_game's VISIONOS_BUNDLE_ID). Its launcher is
+# Swift and its frontend Objective-C++, languages a project has to enable at its top level
+# before targets use them, which is what gcn_enable_languages() is for.
+# A cache entry, since gcn_add_game() runs in the game project's scope, not this one.
+if(CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+  set(GCN_VISIONOS ON CACHE INTERNAL "")
+else()
+  set(GCN_VISIONOS OFF CACHE INTERNAL "")
+endif()
+macro(gcn_enable_languages)
+  if(CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+    enable_language(OBJCXX)
+    enable_language(Swift)
+  endif()
+endmacro()
+
+# Khronos' OpenXR headers alone, for a platform with no OpenXR loader to link: visionOS,
+# whose OpenXR is the frontend's own (visionos/xr_runtime.mm). SOURCE_SUBDIR names a
+# directory that does not exist so that nothing of the SDK is built.
+macro(_gcn_fetch_openxr_headers)
+  include(FetchContent)
+  FetchContent_Declare(openxr_headers
+    URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.63.tar.gz
+    URL_HASH SHA256=5b8dac0608f49498fe8e95f562fe6bcf0bc781e561f137348a8c251d06a88b6f
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR headers-only)
+  FetchContent_MakeAvailable(openxr_headers)
+  set(GCN_OPENXR_INCLUDE ${openxr_headers_SOURCE_DIR}/include)
+endmacro()
+
 # The OpenXR loader, from Khronos' SDK source at the version the Android build's AAR is.
 # Static, and nothing but the loader.
 macro(_gcn_fetch_openxr_loader)
@@ -121,10 +152,13 @@ endmacro()
 #                              headset app (lib<target>.so, a NativeActivity that
 #                              tools/package-apk.ps1 packages) and <target>_egl, the
 #                              renderer headless on a device; see android/
+#   [VISIONOS_BUNDLE_ID <id>]  On a visionOS build, the Vision Pro app <target>.app under
+#                              that bundle identifier; see visionos/. Signed for the team
+#                              in GCN_APPLE_TEAM.
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;DOL_FIXUP;REL_SYMBOLS" "SOURCES;RELS;REL_RUNTIME" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;VISIONOS_BUNDLE_ID;DOL_FIXUP;REL_SYMBOLS" "SOURCES;RELS;REL_RUNTIME" ${ARGN})
   if(NOT G_LABEL)
     set(G_LABEL "${G_TITLE}")
   endif()
@@ -291,10 +325,10 @@ function(gcn_add_game)
   set(BENCH_SOURCES ${CORE_SOURCES} ${RT}/bench_main.cpp ${RT}/gx/render_stub.cpp)
 
   # Render target: desktop OpenGL 3.3 core, or OpenGL ES 3.2 for Android and standalone
-  # headsets. One renderer source serves both; see runtime/gx/gl.h. GL entry points are
-  # resolved at runtime via a vendored glad loader; macOS links the system framework
-  # directly and needs neither.
-  if(ANDROID)
+  # headsets, or Apple's OpenGL ES 3.0 on visionOS. One renderer source serves all three;
+  # see runtime/gx/gl.h. GL entry points are resolved at runtime via a vendored glad loader;
+  # macOS links the system framework directly and needs neither.
+  if(ANDROID OR GCN_VISIONOS)
     set(_gcn_gl_es_default ON)
   else()
     set(_gcn_gl_es_default OFF)
@@ -304,18 +338,21 @@ function(gcn_add_game)
     set(GLAD_INCLUDE_DIR ${RT}/gx/glad_es/include)
     set(GLAD_SOURCE ${RT}/gx/glad_es/src/gles2.c)
     set(GCN_GL_DEFS GCN_GL_ES)
+    if(GCN_VISIONOS)
+      list(APPEND GCN_GL_DEFS GCN_GL_ES30)
+    endif()
   else()
     set(GLAD_INCLUDE_DIR ${RT}/gx/glad/include)
     set(GLAD_SOURCE ${RT}/gx/glad/src/gl.c)
     set(GCN_GL_DEFS "")
   endif()
-  if(NOT APPLE)
+  if(NOT APPLE OR GCN_GL_ES)
     list(APPEND RUNTIME_SOURCES ${GLAD_SOURCE})
   endif()
 
   # SDL2: pkg-config where it exists; on Windows there are no prebuilt ARM64 binaries,
   # so build it from source.
-  if(GCN_BENCH_ONLY)
+  if(GCN_BENCH_ONLY OR GCN_VISIONOS)
     set(GCN_SDL_TARGET "")
   elseif(WIN32)
     include(FetchContent)
@@ -343,7 +380,7 @@ function(gcn_add_game)
 
   # Platform libraries the runtime needs beyond SDL2. The benchmark links none of this.
   set(GCN_PLATFORM_LIBS "")
-  if(GCN_BENCH_ONLY)
+  if(GCN_BENCH_ONLY OR GCN_VISIONOS)
   elseif(APPLE)
     list(APPEND GCN_PLATFORM_LIBS "-framework OpenGL")
   elseif(WIN32)
@@ -368,7 +405,7 @@ function(gcn_add_game)
 
   # Headless benchmark: reports how fast the guest advances, with no graphics or audio
   # in the way. Used to compare host CPUs.
-  if(HAVE_GAME_ISO)
+  if(HAVE_GAME_ISO AND NOT GCN_VISIONOS)
     add_executable(${G_NAME}_bench ${BENCH_SOURCES} ${G_SOURCES})
     _gcn_set_standards(${G_NAME}_bench)
     target_include_directories(${G_NAME}_bench PRIVATE ${RT} ${RECOMP_GEN_DIR})
@@ -384,7 +421,7 @@ function(gcn_add_game)
   # port work can be checked on its own. With an image present the game target already
   # compiles these sources, so keep it out of the default build; `ninja runtime_check`
   # still works.
-  if(NOT GCN_BENCH_ONLY)
+  if(NOT GCN_BENCH_ONLY AND NOT GCN_VISIONOS)
     if(HAVE_GAME_ISO)
       add_library(runtime_check OBJECT EXCLUDE_FROM_ALL ${RUNTIME_SOURCES})
     else()
@@ -397,7 +434,7 @@ function(gcn_add_game)
     target_compile_definitions(runtime_check PRIVATE ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
   endif()
 
-  if(HAVE_GAME_ISO AND NOT GCN_BENCH_ONLY)
+  if(HAVE_GAME_ISO AND NOT GCN_BENCH_ONLY AND NOT GCN_VISIONOS)
     add_executable(${G_NAME} ${RUNTIME_SOURCES} ${G_SOURCES})
     _gcn_set_standards(${G_NAME})
     target_include_directories(${G_NAME} PRIVATE ${GLAD_INCLUDE_DIR})
@@ -470,6 +507,68 @@ function(gcn_add_game)
     target_link_options(${G_NAME} PRIVATE -u ANativeActivity_onCreate)
 
     configure_file(${AND_DIR}/AndroidManifest.xml.in ${CMAKE_BINARY_DIR}/AndroidManifest.xml @ONLY)
+  endif()
+
+  # ---- Vision Pro app ----
+  # The OpenXR frontend's core on the runtime in visionos/xr_runtime.mm, with GL ES through
+  # ANGLE, a Core Audio device and a SwiftUI launcher, as an app bundle Xcode signs and
+  # installs. Configure with -G Xcode -DCMAKE_SYSTEM_NAME=visionOS -DGCN_APPLE_TEAM=<team>.
+  # ANGLE is built from source by tools/build-angle-visionos.sh the first time, into
+  # GCN_ANGLE_DIR.
+  if(GCN_VISIONOS AND HAVE_GAME_ISO AND G_VISIONOS_BUNDLE_ID)
+    set(VOS_DIR ${GCN_RECOMP_DIR}/visionos)
+    _gcn_fetch_openxr_headers()
+    set(GCN_ANGLE_DIR ${CMAKE_BINARY_DIR}/angle CACHE PATH "ANGLE for visionOS, as tools/build-angle-visionos.sh leaves it")
+    if(NOT EXISTS ${GCN_ANGLE_DIR}/libANGLE-shared.dylib)
+      message(STATUS "Building ANGLE for visionOS into ${GCN_ANGLE_DIR} (a few minutes)")
+      execute_process(COMMAND sh ${GCN_RECOMP_DIR}/tools/build-angle-visionos.sh ${GCN_ANGLE_DIR} xros
+                      RESULT_VARIABLE _r)
+      if(NOT _r EQUAL 0)
+        message(FATAL_ERROR "building ANGLE failed")
+      endif()
+    endif()
+    set(GCN_APPLE_TEAM "" CACHE STRING "The Apple development team that signs the visionOS app")
+    set(VOS_SOURCES ${CORE_SOURCES} ${RT}/audio.cpp ${RT}/gx/render_gl.cpp ${RT}/gx/shadergen.cpp
+      ${RT}/gx/gl_load.cpp ${RT}/png.cpp ${GLAD_SOURCE} ${GCN_RECOMP_DIR}/openxr/xr_frontend.cpp
+      ${VOS_DIR}/xr_runtime.mm ${VOS_DIR}/angle.mm ${VOS_DIR}/visionos_main.mm ${VOS_DIR}/audio_coreaudio.cpp
+      ${VOS_DIR}/App.swift
+      ${G_SOURCES})
+    list(REMOVE_ITEM VOS_SOURCES ${RT}/audio_stub.cpp)
+    add_executable(${G_NAME} MACOSX_BUNDLE ${VOS_SOURCES})
+    _gcn_set_standards(${G_NAME})
+    target_include_directories(${G_NAME} PRIVATE ${VOS_DIR} ${GCN_RECOMP_DIR}/openxr ${RT} ${RECOMP_GEN_DIR}
+      ${GLAD_INCLUDE_DIR} ${GCN_OPENXR_INCLUDE} ${GCN_ANGLE_DIR}/include)
+    target_link_libraries(${G_NAME} PRIVATE game_recomp
+      "-framework CompositorServices" "-framework ARKit" "-framework Metal" "-framework GameController"
+      "-framework AudioToolbox" "-framework Foundation")
+    # On the C family's sources only: the Xcode generator does not split a target's
+    # definitions by language, and Swift takes no valued ones.
+    set(VOS_DEFS ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
+    list(FILTER VOS_DEFS EXCLUDE REGEX "^GCN_DEFAULT_ISO=")
+    list(APPEND VOS_DEFS GCN_DEFAULT_ISO="")
+    set(VOS_C_SOURCES ${VOS_SOURCES})
+    list(FILTER VOS_C_SOURCES EXCLUDE REGEX "\\.swift$")
+    set_source_files_properties(${VOS_C_SOURCES} PROPERTIES COMPILE_DEFINITIONS "${VOS_DEFS}"
+                                COMPILE_OPTIONS "${GCN_RUNTIME_WARNINGS}")
+    configure_file(${VOS_DIR}/Info.plist.in ${CMAKE_BINARY_DIR}/visionos/Info.plist @ONLY)
+    set_target_properties(${G_NAME} PROPERTIES
+      OUTPUT_NAME ${G_NAME}
+      XCODE_ATTRIBUTE_INFOPLIST_FILE ${CMAKE_BINARY_DIR}/visionos/Info.plist
+      XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER ${G_VISIONOS_BUNDLE_ID}
+      XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER ${VOS_DIR}/bridge.h
+      XCODE_ATTRIBUTE_SWIFT_VERSION 5.0
+      XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+      XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY 7
+      XCODE_ATTRIBUTE_XROS_DEPLOYMENT_TARGET 26.0
+      XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
+      XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
+      XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${GCN_APPLE_TEAM}"
+      XCODE_ATTRIBUTE_ENABLE_BITCODE NO
+      # ANGLE is opened from the bundle's Frameworks directory (visionos/angle.mm), signed
+      # as it is copied in.
+      XCODE_EMBED_FRAMEWORKS ${GCN_ANGLE_DIR}/libANGLE-shared.dylib
+      XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON
+      XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks")
   endif()
 
   # For a game project that adds frontends of its own -- a headset app, a headless harness

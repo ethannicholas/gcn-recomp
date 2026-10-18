@@ -261,12 +261,36 @@ static void bind_vertex_format(uint32_t ntex) {
     glBindVertexArray(vao);
 }
 
+// Without glDrawElementsBaseVertex (GL ES 3.0 without the extension), the base vertex is
+// folded into each draw's indices when the batch is uploaded (upload_indices) and the draw
+// is an ordinary one. A base vertex is often negative -- it is where the draw's vertices
+// were packed less where they were first numbered -- so pointing the vertex arrays at it
+// instead would not do.
+static bool g_base_vertex = true;
+
 // One draw command, from the packed region its texture coordinate count selects.
 static void draw_cmd(const Batch& b, const Cmd& c) {
     static const GLenum mode[3] = {GL_TRIANGLES, GL_LINES, GL_POINTS};
     bind_vertex_format(draw_ntex(b.states[c.state]));
-    glDrawElementsBaseVertex(mode[c.prim], c.count, GL_UNSIGNED_INT, (const void*)(uintptr_t)(c.first * sizeof(uint32_t)),
-                             c.base_vertex);
+    const void* first = (const void*)(uintptr_t)(c.first * sizeof(uint32_t));
+    if (g_base_vertex) glDrawElementsBaseVertex(mode[c.prim], c.count, GL_UNSIGNED_INT, first, c.base_vertex);
+    else glDrawElements(mode[c.prim], c.count, GL_UNSIGNED_INT, first);
+}
+
+// The batch's indices into the bound element buffer, each draw's base vertex added in
+// where the GL cannot add it (see g_base_vertex).
+static void upload_indices(const Batch& b) {
+    if (g_base_vertex) {
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, b.indices.size() * sizeof(uint32_t), b.indices.data(), GL_STREAM_DRAW);
+        return;
+    }
+    static std::vector<uint32_t> rebased;
+    rebased = b.indices;
+    for (const Cmd& c : b.cmds) {
+        if (c.type != CmdType::Draw) continue;
+        for (uint32_t i = c.first; i < c.first + c.count; i++) rebased[i] += (uint32_t)c.base_vertex;
+    }
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, rebased.size() * sizeof(uint32_t), rebased.data(), GL_STREAM_DRAW);
 }
 static GLuint g_copy_prog, g_copy_vao;
 static GLint g_copy_u_src, g_copy_u_rect, g_copy_u_mode, g_copy_u_depth;
@@ -772,6 +796,9 @@ void render_init(int internal_scale) {
         }
         if (!g_dual_source)
             fprintf(stderr, "no GL_EXT_blend_func_extended: a blended draw stores its own alpha, not GXSetDstAlpha's\n");
+        g_base_vertex = glDrawElementsBaseVertex != nullptr;
+        if (!g_base_vertex)
+            fprintf(stderr, "no glDrawElementsBaseVertex: base vertices are added into the indices instead\n");
     }
 #else
     g_clip_ok = true;
@@ -3655,7 +3682,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         glBindVertexArray(g_vao);
         glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
         glBufferData(GL_ARRAY_BUFFER, b.packed.size(), b.packed.data(), GL_STREAM_DRAW);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, b.indices.size() * sizeof(uint32_t), b.indices.data(), GL_STREAM_DRAW);
+        upload_indices(b);
         ms_vbo = frametime_on() ? ms_since(t_start) - ms_tex : 0.0;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
