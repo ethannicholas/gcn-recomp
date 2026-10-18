@@ -48,6 +48,10 @@ VrConfig vr_config_load(const std::string& dir, const VrConfig& defaults) {
         else if (!strcmp(key, "eye_scale")) c.eye_scale = (float)val;
         else if (!strcmp(key, "msaa")) c.msaa = (int)val;
         else if (!strcmp(key, "perf_boost")) c.perf_boost = val != 0;
+        else if (!strcmp(key, "thread_hints")) c.thread_hints = val != 0;
+        else if (!strcmp(key, "display_hz")) c.display_hz = (float)val;
+        else if (!strcmp(key, "gpu_budget_ms")) c.gpu_budget_ms = (float)val;
+        else if (!strcmp(key, "min_eye_res")) c.min_eye_res = (float)val;
         else if (!strcmp(key, "log_frames")) c.log_frames = val != 0;
         else if (!strcmp(key, "dump_every")) c.dump_every = (int)val;
         else if (!strcmp(key, "start_in_stereo")) c.start_in_stereo = val != 0;

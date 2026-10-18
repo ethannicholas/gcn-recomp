@@ -33,6 +33,15 @@ bool plat_thread_start(void* (*fn)(void*), void* arg, size_t stack_size);
 // Terminate the calling thread. Used when the process is shutting down, so skipping
 // destructor/unwind cleanup is intentional.
 [[noreturn]] void plat_thread_exit();
+// What a host thread does, for a frontend that can tell the OS: a headset runtime's thread
+// hints decide which cores and what priority the game's threads get beside its own.
+enum class ThreadRole { GuestMain, GuestWorker, RenderMain, RenderWorker };
+// Called by a thread about itself: names it (top -H, the profiles) and records its OS
+// thread id under `role` for the listener below.
+void plat_thread_role(ThreadRole role, const char* name);
+// One listener, called with every thread recorded so far and then with each as it is
+// recorded, on that thread. Null removes it.
+void plat_set_thread_role_listener(void (*fn)(ThreadRole role, long tid));
 
 // ---- time ----
 // Seconds to add to UTC to get local wall-clock time, including any DST in effect.

@@ -6,7 +6,10 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // ===========================================================================
 #ifdef _WIN32
@@ -192,6 +195,9 @@ bool plat_read_at(PlatFile* f, uint64_t offset, void* dst, uint32_t len) {
 #include <sys/mman.h>
 #include <unistd.h>
 #include <pthread.h>
+#ifndef __APPLE__
+#include <sys/syscall.h>
+#endif
 #ifdef __ANDROID__
 // bionic has no execinfo.h; unwind by hand and symbolize with dladdr.
 #include <android/set_abort_message.h>
@@ -330,6 +336,58 @@ bool plat_read_at(PlatFile* f, uint64_t offset, void* dst, uint32_t len) {
 // ===========================================================================
 // Shared
 // ===========================================================================
+static long current_tid() {
+#if defined(_WIN32)
+    return (long)GetCurrentThreadId();
+#elif defined(__APPLE__)
+    uint64_t id = 0;
+    pthread_threadid_np(nullptr, &id);
+    return (long)id;
+#else
+    return (long)syscall(SYS_gettid);
+#endif
+}
+
+static void set_thread_name(const char* name) {
+#if defined(_WIN32)
+    wchar_t w[64];
+    if (MultiByteToWideChar(CP_UTF8, 0, name, -1, w, 64)) SetThreadDescription(GetCurrentThread(), w);
+#elif defined(__APPLE__)
+    pthread_setname_np(name);
+#else
+    char n[16];  // Linux keeps 15 characters
+    snprintf(n, sizeof(n), "%s", name);
+    pthread_setname_np(pthread_self(), n);
+#endif
+}
+
+static std::mutex g_roles_mutex;
+static std::vector<std::pair<ThreadRole, long>> g_roles;
+static void (*g_role_listener)(ThreadRole, long);
+
+void plat_thread_role(ThreadRole role, const char* name) {
+    set_thread_name(name);
+    const long tid = current_tid();
+    void (*fn)(ThreadRole, long);
+    {
+        std::lock_guard<std::mutex> lk(g_roles_mutex);
+        g_roles.emplace_back(role, tid);
+        fn = g_role_listener;
+    }
+    if (fn) fn(role, tid);
+}
+
+void plat_set_thread_role_listener(void (*fn)(ThreadRole, long)) {
+    std::vector<std::pair<ThreadRole, long>> known;
+    {
+        std::lock_guard<std::mutex> lk(g_roles_mutex);
+        g_role_listener = fn;
+        known = g_roles;
+    }
+    if (fn)
+        for (const auto& r : known) fn(r.first, r.second);
+}
+
 void plat_make_dirs(const std::string& path) {
     if (path.empty()) return;
     std::error_code ec;

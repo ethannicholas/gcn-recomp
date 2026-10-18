@@ -21,7 +21,10 @@ static const int EFB_W = 640, EFB_H = 528;
 // spent uploading textures, uploading the vertex buffer, and issuing the frame, plus how
 // many times the full pixel state had to be re-applied. CPU time only: the GPU runs
 // behind, so a long frame here is driver and submission cost, not fill.
-static const bool g_frametime = getenv("GCN_FRAMETIME") != nullptr;
+static bool frametime_on() {  // on first use: the app sets its environment after static init
+    static const bool on = getenv("GCN_FRAMETIME") != nullptr;
+    return on;
+}
 static inline double ms_since(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
 }
@@ -649,7 +652,7 @@ static const Program& get_program(const ShaderKey& k) {
     std::string src = gen_pixel_shader(k);
     GLuint p = build_program(k, src, nullptr, 0, 0);
     const Program& pr = register_program(k, p);
-    if (g_frametime) fprintf(stderr, "[shaders] compiled program %zu in %.1f ms\n", g_programs.size(), ms_since(t0));
+    if (frametime_on()) fprintf(stderr, "[shaders] compiled program %zu in %.1f ms\n", g_programs.size(), ms_since(t0));
     if (!g_shader_cache_path.empty()) {
         // Appended rather than rewritten, so a crash later in the run keeps what was
         // learned so far. A missing or truncated file gets a header first.
@@ -1317,13 +1320,16 @@ static void view_invalidate() { g_view_gen++; }
 // GCN_APPLYSTATS=1: which groups of state apply_state actually had to send, summed over a
 // pass, printed every 64th frame. What a game changes between draws decides what a state
 // application costs, and this is how to see it.
-static const bool g_applystats = getenv("GCN_APPLYSTATS") != nullptr;
+static bool applystats_on() {  // on first use: the app sets its environment after static init
+    static const bool on = getenv("GCN_APPLYSTATS") != nullptr;
+    return on;
+}
 static struct ApplyStats {
     uint32_t applies, program, proj, viewport, psize, tev, aref, ind, indcs, fog, screen, ripple,
         texbind, sampbind, tsz, blend, depth, cull, scissor;
 } g_astat;
 static void apply_stats_flush(const char* pass, uint32_t frame) {
-    if (!g_applystats) return;
+    if (!applystats_on()) return;
     if ((frame & 63) == 0) {
         const ApplyStats& a = g_astat;
         fprintf(stderr, "[apply] f%u %s applies %u: prog %u proj %u vp %u psz %u tev %u aref %u ind %u "
@@ -3225,7 +3231,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         flat_pass_trim(b, skip, trim);
         for (uint8_t t : trim) n_trimmed += t;
         execute_batch(b, false, trim.empty() ? nullptr : &trim);  // which also notes this batch's whole-frame copies
-        if (g_frametime) ms_flat = ms_since(t_start);
+        if (frametime_on()) ms_flat = ms_since(t_start);
     }
     // GCN_EYELOG=1 reports how a frame was split, which is the only way to tell a scene
     // rendered at the wrong field of view from a composite quad standing in for one.
@@ -3517,7 +3523,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 n_skipped, n_spray, n_trimmed);
     // The renderer's half of GCN_FRAMETIME for an eye: the flat pass (first eye only) and
     // this eye's own draws, CPU time.
-    if (g_frametime)
+    if (frametime_on())
         fprintf(stderr, "[eye-rt] f%u %s flat %6.2fms eye %6.2fms  draws %d\n", g_render_frame,
                 do_copies ? "first" : "second", ms_flat, ms_since(t_start) - ms_flat, n_drawn);
     apply_stats_flush(do_copies ? "eye0" : "eye1", g_render_frame);
@@ -3629,10 +3635,10 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         g_render_frame++;
         const size_t n_dead = g_dead_pending.size();
         evict_textures(b);
-        const double ms_evict = g_frametime ? ms_since(t_start) : 0.0;
+        const double ms_evict = frametime_on() ? ms_since(t_start) : 0.0;
         upload_textures(b);
-        ms_tex = g_frametime ? ms_since(t_start) : 0.0;
-        if (g_frametime && ms_tex > 5.0) {
+        ms_tex = frametime_on() ? ms_since(t_start) : 0.0;
+        if (frametime_on() && ms_tex > 5.0) {
             size_t bytes = 0;
             for (auto& t : b.new_textures)
                 for (auto& l : t->levels) bytes += l.size() * 4;
@@ -3650,7 +3656,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
         glBufferData(GL_ARRAY_BUFFER, b.packed.size(), b.packed.data(), GL_STREAM_DRAW);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, b.indices.size() * sizeof(uint32_t), b.indices.data(), GL_STREAM_DRAW);
-        ms_vbo = g_frametime ? ms_since(t_start) - ms_tex : 0.0;
+        ms_vbo = frametime_on() ? ms_since(t_start) - ms_tex : 0.0;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
     glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
@@ -3964,12 +3970,12 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         case CmdType::EfbCopy: {
             // Timed on its own: a copy mid-frame ends the EFB's render pass on a tiled GPU
             // and the driver's share of that lands here, on the CPU.
-            const auto t_copy = g_frametime ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            const auto t_copy = frametime_on() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             if (log_copies)
                 fprintf(stderr, "[copy] after draw %d: %ux%u from %u,%u to %08X tex %u fmt %X%s\n", draw_index - 1, c.copy.dst_w, c.copy.dst_h,
                         c.copy.src_x, c.copy.src_y, c.copy.dest, c.copy.tex_id, c.copy.format, c.copy.to_xfb ? " (display)" : "");
             do_efb_copy(c.copy);
-            if (g_frametime) ms_copy += ms_since(t_copy);
+            if (frametime_on()) ms_copy += ms_since(t_copy);
             glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
             cur_state = UINT32_MAX;
             gl_state_invalidate();
@@ -3985,7 +3991,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             break;
         }
     }
-    if (g_frametime)
+    if (frametime_on())
         fprintf(stderr, "[rt] f%u render %6.2fms (tex %5.2f vbo %5.2f copies %5.2f)  applies %4u  programs %zu\n",
                 g_render_frame, ms_since(t_start), ms_tex, ms_vbo, ms_copy, n_apply, g_programs.size());
     apply_stats_flush("flat", g_render_frame);

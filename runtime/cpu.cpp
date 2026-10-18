@@ -468,6 +468,7 @@ void clock_update_limit() {
 }
 
 uint32_t gx_frames_submitted();
+extern uint64_t g_aid_frames_delivered;   // hw/dsp.cpp
 
 // GCN_CLOCKLOG=1: once per virtual second, how the guest's time relates to the host's and
 // how much the guest executed per presented frame. The edges/frame figure is what
@@ -475,17 +476,20 @@ uint32_t gx_frames_submitted();
 static void clock_log() {
     static bool on = getenv("GCN_CLOCKLOG") != nullptr;
     if (!on) return;
-    static uint64_t next_at, last_edges, last_frames;
+    static uint64_t next_at, last_edges, last_frames, last_audio;
     uint64_t vt = now_ticks();
     if (vt < next_at) return;
     next_at = vt + TB_FREQ;
+    const uint64_t audio = g_aid_frames_delivered;
     uint64_t edges = g_vcount - g_vskipped, frames = gx_frames_submitted(), host = host_ns();
     fprintf(stderr, "[clock] virtual %6.1fs host %6.1fs  frames %u (+%u)  work edges/frame %.0fk (%.0f%% of a field)  jumps %u (%.0f ms)\n",
             (double)vt / TB_FREQ, (double)host / 1e9, (unsigned)frames, (unsigned)(frames - last_frames),
             frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) / 1000.0 : 0.0,
             frames > last_frames ? (double)(edges - last_edges) / (frames - last_frames) * g_ticks_per_edge * 100.0 / (TB_FREQ / 59.94) : 0.0,
             (unsigned)g_jumps, (double)g_jump_edges * g_ticks_per_edge * 1000.0 / TB_FREQ);
-    last_edges = edges; last_frames = frames;
+    // The sound the AI DMA delivered in that second, which should be its sample rate.
+    fprintf(stderr, "[clock] audio %llu frames\n", (unsigned long long)(audio - last_audio));
+    last_edges = edges; last_frames = frames; last_audio = audio;
 }
 
 // Catching up. A host that cannot keep real time -- a heavy room on a headset -- left

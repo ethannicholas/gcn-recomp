@@ -33,6 +33,8 @@
 #define LOGE(fmt, ...) fprintf(stderr, "[xr] error: " fmt "\n", ##__VA_ARGS__)
 #endif
 
+void audio_ring_stats(int* underruns, int* min_fill_ms);   // runtime/audio.cpp
+
 namespace xrf {
 namespace {
 
@@ -40,6 +42,9 @@ namespace {
 // the game's own shape, 2.5 m ahead of where the viewer started.
 constexpr float kQuadDist = 2.5f;
 constexpr float kQuadW = 3.2f, kQuadH = 2.4f;
+
+// The console's field rate (NTSC), which the guest's frames are paced on.
+constexpr float kFieldHz = 59.94f;
 
 // Rendering an eye at the headset's own resolution and then dropping back to a panel
 // drawn at the GameCube's is the jarring part of leaving stereo, so the panel is given as
@@ -68,6 +73,7 @@ struct Xr {
     XrSystemId system = XR_NULL_SYSTEM_ID;
     XrSession session = XR_NULL_HANDLE;
     bool has_perf_settings = false;   // XR_EXT_performance_settings
+    bool has_refresh_rate = false;    // XR_FB_display_refresh_rate
     XrSpace space = XR_NULL_HANDLE;
     XrSwapchain swapchain = XR_NULL_HANDLE;          // the theater quad
     std::vector<SwapImage> images;
@@ -414,6 +420,10 @@ bool create_instance() {
                 exts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
                 g_xr.has_perf_settings = true;
             }
+            if (!strcmp(e.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME)) {
+                exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+                g_xr.has_refresh_rate = true;
+            }
             for (const char* o : g_xr.plat.optional_extensions)
                 if (!strcmp(e.extensionName, o)) exts.push_back(o);
         }
@@ -448,6 +458,42 @@ bool create_instance() {
     return true;
 }
 
+// display_hz. The console presents on its field rate, 59.94 Hz, so on a display at any
+// rate that is not a multiple of it some game frames stay up for more display frames than
+// others: at 72 Hz every fifth is shown twice, and whatever moves in the world -- the
+// camera turning with the stick -- jerks twelve times a second while the head, which the
+// compositor reprojects, stays smooth. A multiple holds every game frame alike: at 120 Hz,
+// two display frames each.
+void request_refresh_rate() {
+    PFN_xrEnumerateDisplayRefreshRatesFB enumerate = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB request = nullptr;
+    PFN_xrGetDisplayRefreshRateFB current = nullptr;
+    xrGetInstanceProcAddr(g_xr.instance, "xrEnumerateDisplayRefreshRatesFB", (PFN_xrVoidFunction*)&enumerate);
+    xrGetInstanceProcAddr(g_xr.instance, "xrRequestDisplayRefreshRateFB", (PFN_xrVoidFunction*)&request);
+    xrGetInstanceProcAddr(g_xr.instance, "xrGetDisplayRefreshRateFB", (PFN_xrVoidFunction*)&current);
+    if (!enumerate || !request || !current) return;
+    uint32_t n = 0;
+    if (XR_FAILED(enumerate(g_xr.session, 0, &n, nullptr)) || n == 0) return;
+    std::vector<float> rates(n);
+    enumerate(g_xr.session, n, &n, rates.data());
+    std::string offered;
+    for (float r : rates) offered += (offered.empty() ? "" : ", ") + std::to_string((int)(r + 0.5f));
+    float now = 0.0f;
+    current(g_xr.session, &now);
+    const float want = g_vrcfg.display_hz;
+    float pick = 0.0f;
+    for (float r : rates) {
+        const bool ok = want > 0.0f ? fabsf(r - want) < 0.5f
+                      : want < 0.0f ? fabsf(r / kFieldHz - roundf(r / kFieldHz)) * kFieldHz < 0.5f
+                      : false;
+        if (ok && (pick == 0.0f || r < pick)) pick = r;
+    }
+    if (pick > 0.0f && XR_SUCCEEDED(request(g_xr.session, pick)))
+        LOGI("display %.0f Hz, was %.0f (offered %s)", pick, now, offered.c_str());
+    else
+        LOGI("display stays at %.0f Hz (offered %s; display_hz %.0f)", now, offered.c_str(), want);
+}
+
 bool create_session() {
     const void* bind = g_xr.plat.graphics_binding(g_xr.instance, g_xr.system);
     if (!bind) return false;
@@ -468,6 +514,8 @@ bool create_session() {
             LOGI("performance levels: boost (cpu %d, gpu %d)", (int)cpu, (int)gpu);
         }
     }
+    if (g_xr.plat.session_created) g_xr.plat.session_created(g_xr.instance, g_xr.session);
+    if (g_xr.has_refresh_rate) request_refresh_rate();
 
     XrReferenceSpaceCreateInfo sp{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     sp.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
@@ -727,23 +775,26 @@ GLuint eye_target(int e, uint32_t image) {
 #endif
 }
 
-// Finishes an eye drawn into eye_target: on desktop GL, copies it into the swapchain
-// image. Returns a single-sampled framebuffer holding it, for the mirror.
-GLuint eye_finish(int e, uint32_t image) {
+// Finishes an eye drawn into eye_target, w x h of it from the corner: on desktop GL,
+// copies it into the swapchain image. Returns a single-sampled framebuffer holding it,
+// for the mirror.
+GLuint eye_finish(int e, uint32_t image, int w, int h) {
     const auto& eye = g_xr.eyes[e];
 #ifdef GCN_GL_ES
+    (void)w;
+    (void)h;
     return eye.fbos[image];
 #else
     GLuint src = g_xr.eye_fbo;
     if (g_xr.eye_samples) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, g_xr.eye_fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_xr.resolve_fbo);
-        glBlitFramebuffer(0, 0, eye.w, eye.h, 0, 0, eye.w, eye.h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         src = g_xr.resolve_fbo;
     }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, eye.fbos[image]);
-    glBlitFramebuffer(0, 0, eye.w, eye.h, 0, 0, eye.w, eye.h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return src;
 #endif
@@ -1225,6 +1276,106 @@ bool build_shaders() {
     return true;
 }
 
+// Dynamic resolution (gpu_budget_ms). A scene can cost the GPU many times its usual
+// work for a second or two -- a burst of large translucent effects around the camera is
+// overdraw on every one of an eye's pixels, at many times the console's resolution -- and
+// a GPU that falls behind holds up the render thread, the threads feeding it and at last
+// the guest, so the game slows and its sound runs dry. The eyes' GPU time is measured
+// every game frame (timer queries, read a few frames late from a ring so that measuring
+// stalls nothing), and when a frame goes over the budget the next ones are drawn into a
+// smaller part of each eye's image, which the projection layer tells the compositor to
+// scale up. The size drops at once to what would have fitted, taking the cost to go with
+// the pixel count, and comes back a step at a time once there is room.
+struct EyeResolution {
+    float scale = 1.0f;         // of each side
+    double sum_ms = 0.0, max_ms = 0.0, scale_sum = 0.0, scale_min = 1.0;
+    uint32_t n = 0;
+
+    bool init(GLLoadProc proc) {
+        if (g_vrcfg.gpu_budget_ms <= 0.0f) return false;
+        query_u64 = (void (*)(GLuint, GLenum, uint64_t*))proc("glGetQueryObjectui64vEXT");
+        if (!query_u64) query_u64 = (void (*)(GLuint, GLenum, uint64_t*))proc("glGetQueryObjectui64v");
+        if (!query_u64) {
+            LOGI("dynamic resolution off: no timer queries");
+            return false;
+        }
+        glGenQueries(kRing, queries);
+        on = true;
+        LOGI("dynamic resolution: eyes' GPU budget %.1f ms, down to %.2f of each side",
+             g_vrcfg.gpu_budget_ms, g_vrcfg.min_eye_res);
+        return true;
+    }
+    void begin() {
+        if (!on) return;
+        if (live == kRing) collect(true);
+        query_scale[head] = scale;
+        glBeginQuery(kTimeElapsed, queries[head]);
+    }
+    void end() {
+        if (!on) return;
+        glEndQuery(kTimeElapsed);
+        head = (head + 1) % kRing;
+        live++;
+        collect(false);
+    }
+    // The eye's size this frame, in multiples of 16 texels.
+    int size(int full) const {
+        const int s = ((int)(full * scale) + 8) & ~15;
+        return std::max(16, std::min(full, s));
+    }
+    void report_reset() { sum_ms = max_ms = scale_sum = 0.0; scale_min = 1.0; n = 0; }
+
+private:
+    static constexpr int kRing = 8;
+    static constexpr GLenum kTimeElapsed = 0x88BF;   // GL_TIME_ELAPSED(_EXT)
+    bool on = false;
+    void (*query_u64)(GLuint, GLenum, uint64_t*) = nullptr;
+    GLuint queries[kRing] = {};
+    float query_scale[kRing] = {};   // the scale each query's frame was drawn at
+    int head = 0, live = 0;
+    uint32_t since_change = 0;
+
+    void collect(bool all) {
+        // A disjoint event (the GPU changing clock) spoils the queries in flight.
+        GLint disjoint = 0;
+        glGetIntegerv(0x8FBB /* GL_GPU_DISJOINT_EXT */, &disjoint);
+        while (live > 0) {
+            const int i = (head - live + kRing) % kRing;
+            GLuint ready = 0;
+            if (!all) glGetQueryObjectuiv(queries[i], GL_QUERY_RESULT_AVAILABLE, &ready);
+            if (!all && !ready) break;
+            uint64_t ns = 0;
+            query_u64(queries[i], GL_QUERY_RESULT, &ns);
+            live--;
+            if (!disjoint && ns < 1000000000ull) adjust(ns * 1e-6, query_scale[i]);
+        }
+    }
+    void adjust(double ms, float at) {
+        sum_ms += ms;
+        max_ms = std::max(max_ms, ms);
+        scale_sum += scale;
+        scale_min = std::min<double>(scale_min, scale);
+        n++;
+        since_change++;
+        const double budget = g_vrcfg.gpu_budget_ms;
+        const float floor = std::max(0.1f, std::min(1.0f, g_vrcfg.min_eye_res));
+        if (ms > budget) {
+            // What would have fitted, from the size this frame was drawn at.
+            const float fit = at * (float)sqrt(budget / ms) * 0.95f;
+            if (fit < scale) {
+                scale = std::max(floor, fit);
+                since_change = 0;
+            }
+        } else if (scale < 1.0f && since_change >= 30) {
+            const float up = std::min(1.0f, scale + 0.05f);
+            if (ms * (up / at) * (up / at) < 0.85 * budget) {
+                scale = up;
+                since_change = 0;
+            }
+        }
+    }
+};
+
 void run() {
     uint32_t xr_frames = 0, game_frames = 0, skipped = 0;
     // For the stats line: the longest wait between game frames, and the render thread's
@@ -1233,6 +1384,12 @@ void run() {
     uint32_t eyes_n = 0;
     auto last_game_frame = std::chrono::steady_clock::now();
     uint64_t disp_frames = 0;  // monotonic, unlike xr_frames which the stats line resets
+    // Cadence, for the stats line: how many display frames each game frame stayed up, as
+    // counts of 1, 2, 3 and 4 or more. Even pacing is all one column.
+    uint32_t held = 0, holds[4] = {};
+    EyeResolution eye_res;
+    eye_res.init(g_xr.plat.gl_proc);
+    int underruns_reported = 0;
     bool have_content = false;
     bool stereo = g_vrcfg.start_in_stereo, toggle_was_down = false, left_click_was_down = false;
     const auto wants_stereo = vr::game_hooks().wants_stereo;
@@ -1385,6 +1542,8 @@ void run() {
         }
         if (batch) {
             game_frames++;
+            if (held) holds[std::min<uint32_t>(held, 4) - 1]++;
+            held = 0;
             const auto now = std::chrono::steady_clock::now();
             gap_max = std::max(gap_max, std::chrono::duration<double, std::milli>(now - last_game_frame).count());
             last_game_frame = now;
@@ -1497,6 +1656,7 @@ void run() {
                 }
                 publish_hands(fs.predictedDisplayTime, true);
                 publish_eyes(views);
+                eye_res.begin();
                 for (int e = 0; e < 2; e++) {
                     auto& eye = g_xr.eyes[e];
                     uint32_t ei = 0;
@@ -1507,6 +1667,7 @@ void run() {
                     }
                     XrSwapchainImageWaitInfo ewi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
                     ewi.timeout = XR_INFINITE_DURATION;
+                    int w = eye.w, h = eye.h;   // what was drawn, which the layer shows
                     if (XR_SUCCEEDED(xrWaitSwapchainImage(eye.handle, &ewi))) {
                         float P[16], V[16];
                         const float n = g_vrcfg.near_m * g_vrcfg.units_per_metre;
@@ -1514,9 +1675,11 @@ void run() {
                         mat_proj(views[e].fov, n, f, P);
                         mat_view(views[e].pose, g_vrcfg, g_head_zero, V);
                         gx::render_set_vr_eye(P, V, H);
-                        if (b) gx::render_execute_eye(*b, eye_target(e, ei), eye.w, eye.h, e == 0);
-                        const GLuint shown = eye_finish(e, ei);
-                        if (e == 0 && g_xr.plat.mirror) g_xr.plat.mirror(shown, eye.w, eye.h);
+                        w = eye_res.size(eye.w);
+                        h = eye_res.size(eye.h);
+                        if (b) gx::render_execute_eye(*b, eye_target(e, ei), w, h, e == 0);
+                        const GLuint shown = eye_finish(e, ei, w, h);
+                        if (e == 0 && g_xr.plat.mirror) g_xr.plat.mirror(shown, w, h);
                         glFlush();
                     }
                     XrSwapchainImageReleaseInfo eri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -1526,9 +1689,10 @@ void run() {
                     proj_views[e].pose = views[e].pose;
                     proj_views[e].fov = views[e].fov;
                     proj_views[e].subImage.swapchain = eye.handle;
-                    proj_views[e].subImage.imageRect = {{0, 0}, {eye.w, eye.h}};
+                    proj_views[e].subImage.imageRect = {{0, 0}, {w, h}};
                     proj_views[e].subImage.imageArrayIndex = 0;
                 }
+                eye_res.end();
                 // A half-filled projection layer is invalid, so only keep it when both
                 // eyes were acquired.
                 if (both_eyes) have_proj = true;
@@ -1668,13 +1832,25 @@ void run() {
 
         xr_frames++;
         disp_frames++;
+        held++;
         // Every second: what the viewer got. On a Quest the compositor's own line (VrApi
         // FPS=) has the clocks and the GPU's load beside it in logcat.
         if (fs.predictedDisplayTime - last_report > 1000000000LL) {  // 1 s in ns
+            int underruns = 0, lowest_ms = 0;
+            audio_ring_stats(&underruns, &lowest_ms);
             LOGI("compositor %u frames, game %u frames (longest gap %.0f ms), %u not rendered; "
-                 "stereo render thread %.1f ms mean, %.1f max",
-                 xr_frames, game_frames, gap_max, skipped, eyes_n ? eyes_sum / eyes_n : 0.0, eyes_max);
+                 "stereo render thread %.1f ms mean, %.1f max; held 1:%u 2:%u 3:%u 4+:%u; "
+                 "eyes' GPU %.1f ms mean, %.1f max, resolution %.2f mean, %.2f min; "
+                 "sound %d underruns, lowest %d ms",
+                 xr_frames, game_frames, gap_max, skipped, eyes_n ? eyes_sum / eyes_n : 0.0, eyes_max,
+                 holds[0], holds[1], holds[2], holds[3],
+                 eye_res.n ? eye_res.sum_ms / eye_res.n : 0.0, eye_res.max_ms,
+                 eye_res.n ? eye_res.scale_sum / eye_res.n : 1.0, eye_res.scale_min,
+                 underruns - underruns_reported, lowest_ms);
+            underruns_reported = underruns;
+            eye_res.report_reset();
             xr_frames = game_frames = skipped = 0;
+            holds[0] = holds[1] = holds[2] = holds[3] = 0;
             gap_max = eyes_sum = eyes_max = 0;
             eyes_n = 0;
             last_report = fs.predictedDisplayTime;

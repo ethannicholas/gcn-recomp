@@ -98,6 +98,27 @@ struct VrConfig {
     // two or three steps below its top clock while a heavy scene missed frames.
     bool perf_boost = true;
 
+    // Tell the runtime which threads are which (XR_KHR_android_thread_settings): the
+    // guest's as the application's main thread, the front end as its worker, the frame
+    // loop as the renderer's main thread and the vertex transform as its workers. A Quest
+    // decides from these which cores and what priority they get beside its own threads.
+    bool thread_hints = true;
+
+    // The display's refresh rate, where the runtime lets the app choose one
+    // (XR_FB_display_refresh_rate): a rate in Hz, 0 for the runtime's default, or -1 for the
+    // lowest one offered that is a multiple of the console's field rate, so that every game
+    // frame stays up for the same number of display frames. Not -1 by default: the frame
+    // loop takes a game frame only at a display frame, so at 120 Hz a stereo frame that
+    // takes the render thread more than 8.3 ms holds the next one for a third display
+    // frame, and the game ran at 40-48 frames a second where 72 Hz kept 60.
+    float display_hz = 0.0f;
+
+    // Dynamic resolution: the eyes' GPU time per game frame that the eyes are kept under by
+    // drawing fewer of their pixels (0: always the full size), and the smallest fraction
+    // of each side they may go down to.
+    float gpu_budget_ms = 13.0f;
+    float min_eye_res = 0.5f;
+
     // Trace the theater path one display frame at a time (adb logcat -s <game>).
     bool log_frames = false;
 

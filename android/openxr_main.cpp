@@ -132,6 +132,32 @@ static bool pump() {
 
 static void on_cmd(android_app*, int32_t) {}
 
+// Thread hints (thread_hints in vr.txt). Without them the runtime knows only the threads
+// it made itself, and the game's busy ones -- the guest, the GX front end, the transform
+// workers and this frame loop -- get no say in where they run beside the compositor's and
+// the tracking's.
+static bool g_thread_hints;
+static XrSession g_hint_session;
+static PFN_xrSetAndroidApplicationThreadKHR g_set_thread;
+
+static void hint_thread(ThreadRole role, long tid) {
+    static const XrAndroidThreadTypeKHR types[] = {
+        XR_ANDROID_THREAD_TYPE_APPLICATION_MAIN_KHR, XR_ANDROID_THREAD_TYPE_APPLICATION_WORKER_KHR,
+        XR_ANDROID_THREAD_TYPE_RENDERER_MAIN_KHR, XR_ANDROID_THREAD_TYPE_RENDERER_WORKER_KHR};
+    static const char* names[] = {"application main", "application worker", "renderer main", "renderer worker"};
+    const XrResult r = g_set_thread(g_hint_session, types[(int)role], (uint32_t)tid);
+    LOGI("thread %ld: %s%s", tid, names[(int)role], XR_SUCCEEDED(r) ? "" : " (refused)");
+}
+
+static void session_created(XrInstance instance, XrSession session) {
+    if (!g_thread_hints) return;
+    xrGetInstanceProcAddr(instance, "xrSetAndroidApplicationThreadKHR", (PFN_xrVoidFunction*)&g_set_thread);
+    if (!g_set_thread) { LOGI("no thread hints: the runtime lacks XR_KHR_android_thread_settings"); return; }
+    g_hint_session = session;
+    plat_thread_role(ThreadRole::RenderMain, "xr-frame-loop");
+    plat_set_thread_role_listener(hint_thread);
+}
+
 static std::string read_script(const std::string& dir) {
     FILE* f = fopen((dir + "/gcn_input.txt").c_str(), "rb");
     if (!f) return {};
@@ -258,6 +284,9 @@ void android_main(android_app* app) {
     android_info.applicationActivity = app->activity->clazz;
     xrf::Platform plat;
     plat.extensions = {XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME};
+    plat.optional_extensions = {XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME};
+    plat.session_created = session_created;
+    g_thread_hints = cfg.thread_hints;
     plat.instance_next = &android_info;
     plat.graphics_binding = graphics_binding;
     plat.image_type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;

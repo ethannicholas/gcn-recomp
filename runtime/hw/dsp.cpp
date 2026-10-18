@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <deque>
 #include <mutex>
+#include <string>
 
 static uint16_t g_dspcr;
 static uint16_t g_mbox_in_h, g_mbox_in_l;
@@ -135,6 +136,25 @@ static void aid_block_done();
 // timing each block from when the last one's event ran would add all of that lateness
 // up, and the DMA would deliver audibly fewer samples a second than its rate says.
 static uint64_t g_aid_due;
+// Catching up. Behind its clock -- the virtual clock jumped to the host's -- the DMA
+// delivers the blocks it owes at speed, each as soon as the guest has queued the next
+// buffer, which it does in the interrupt a block's start raises (AIInitDMA writes the
+// address). They were spaced a quarter of a block apart in virtual time instead, which
+// repaid three milliseconds of backlog for each one the guest ran; but in a heavy scene
+// on a headset most of virtual time is jumps (60-87% of each second, the guest waiting on
+// the render stages in real time), the backlog outgrew that, passed the 100 ms limit below
+// and was thrown away -- the sound cutting out for a fifth to two fifths of every second.
+// A guest that has not queued a buffer yet still gets the quarter block to do it in.
+//
+// Not solved here: a guest that fills its buffers from its main loop rather than in the
+// interrupt (a streamed-music player, say) has not refilled when blocks come this close
+// together, and the DMA plays the same buffer again, as the hardware would; in a slow
+// cutscene that was one block in ten, heard as crackle. Holding a block back until the
+// guest had queued the next one, by what the guest executed rather than by guest time,
+// was tried and was worse: such a guest queues only once the DMA has moved on, so every
+// block waited and then repeated anyway, and the sound came up short.
+static uint64_t g_aid_started;   // when the block in flight started
+static bool g_aid_queued;        // the guest has written the address since then
 
 static void aid_start_block() {
     g_aid_cur_addr = g_aid_addr;
@@ -149,17 +169,51 @@ static void aid_start_block() {
     // A guest that stalled for longer than anything downstream buffers has lost that
     // audio; start the clock again rather than replay the backlog at speed.
     if (g_aid_due + TB_FREQ / 10 < now) g_aid_due = now;
-    // Behind by less than that, catch up -- but leave the guest time to take this
-    // interrupt and queue a buffer it has actually filled before the block is over.
-    event_schedule(std::max(g_aid_due, now + dur / 4), aid_block_done);
+    // Behind by less than that, catch up (above).
+    g_aid_started = now;
+    g_aid_queued = false;
+    event_schedule(std::max(g_aid_due, now + dur / 32), aid_block_done);
+}
+
+uint64_t g_aid_frames_delivered;   // for GCN_CLOCKLOG: what the DMA has handed the device
+
+// GCN_AIDWAV=<file>: every block the DMA delivers, as raw 16-bit stereo (left, right,
+// little endian) at the DMA's rate, with a text file beside it (<file>.txt) giving each
+// block's start in frames, its length, the virtual time it was delivered at, whether it
+// was delivered catching up, the buffer's address and whether the guest had queued the
+// next one by then. Works in the benchmark, which has no audio device, so a
+// replay can be listened to and its blocks checked.
+static void aid_capture(const int16_t* be, uint32_t frames, bool catching_up, uint32_t addr, bool queued) {
+    static FILE* pcm = [] { const char* p = getenv("GCN_AIDWAV"); return p ? fopen(p, "wb") : nullptr; }();
+    static FILE* idx = [] {
+        const char* p = getenv("GCN_AIDWAV");
+        return p ? fopen((std::string(p) + ".txt").c_str(), "w") : nullptr;
+    }();
+    static uint64_t at;
+    if (!pcm) return;
+    fprintf(idx, "%llu %u %llu %d %08X %d\n", (unsigned long long)at, frames, (unsigned long long)now_ticks(), catching_up ? 1 : 0, addr, queued ? 1 : 0);
+    for (uint32_t i = 0; i < frames; i++) {
+        const int16_t s[2] = {(int16_t)GCN_BSWAP16((uint16_t)be[2 * i + 1]), (int16_t)GCN_BSWAP16((uint16_t)be[2 * i])};
+        fwrite(s, sizeof(s), 1, pcm);
+    }
+    at += frames;
 }
 
 static void aid_block_done() {
+    if (!g_aid_queued) {
+        const uint64_t dur = (uint64_t)g_aid_blocks_left * 32 / 4 * TB_FREQ / ai_dma_sample_rate();
+        if (now_ticks() < g_aid_started + dur / 4) {
+            event_schedule(g_aid_started + dur / 4, aid_block_done);
+            return;
+        }
+    }
     uint32_t bytes = g_aid_blocks_left * 32;
     static int n;
     if (getenv("GCN_AXSTATS") && n++ % 400 == 0) fprintf(stderr, "[aid] block addr=%08X bytes=%u ctrl=%04X\n", g_aid_cur_addr, bytes, g_aid_ctrl);
     bytes = dma_fit("AI", g_aid_cur_addr, bytes);
     if (bytes) audio_push_dma((const int16_t*)phys_ptr(g_aid_cur_addr), bytes / 4);
+    if (bytes) aid_capture((const int16_t*)phys_ptr(g_aid_cur_addr), bytes / 4, now_ticks() > g_aid_due, g_aid_cur_addr, g_aid_queued);
+    g_aid_frames_delivered += bytes / 4;
     g_aid_blocks_left = 0;
     if (g_aid_ctrl & 0x8000) aid_start_block();
     else g_aid_running = false;
@@ -234,7 +288,7 @@ void dsp_write16(uint32_t off, uint16_t v) {
     case 0x28: g_ar_cnt = (g_ar_cnt & 0xFFFF) | ((uint32_t)v << 16); return;
     case 0x2A: g_ar_cnt = (g_ar_cnt & 0xFFFF0000u) | (v & ~0x1Fu); aram_dma(); return;
     case 0x30: g_aid_addr = (g_aid_addr & 0xFFFF) | ((uint32_t)(v & 0x03FF) << 16); return;
-    case 0x32: g_aid_addr = (g_aid_addr & 0xFFFF0000u) | (v & ~0x1Fu); return;
+    case 0x32: g_aid_addr = (g_aid_addr & 0xFFFF0000u) | (v & ~0x1Fu); g_aid_queued = true; return;
     case 0x36: {
         bool was = g_aid_ctrl & 0x8000;
         g_aid_ctrl = v;

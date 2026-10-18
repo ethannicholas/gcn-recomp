@@ -1,6 +1,7 @@
 // Command Processor / Pixel Engine registers, write-gather pipe and FIFO feeding.
 #include <algorithm>
 #include "../runtime.h"
+#include "../platform.h"
 #include "gx.h"
 #include "render.h"
 #include "render_gl.h"
@@ -235,6 +236,7 @@ static void turns_reached(uint64_t at) {
 }
 
 static void fe_thread_main() {
+    plat_thread_role(ThreadRole::GuestWorker, "gx-frontend");
     for (;;) {
         std::vector<uint8_t> chunk;
         uint64_t start;

@@ -183,7 +183,23 @@ The app has no environment of its own, so `gcn_env.txt` in its files directory
 (`/sdcard/Android/data/<package>/files/`), one `KEY=VALUE` per line, is put into it before
 the runtime starts; `gcn_input.txt` there holds a `GCN_INPUT` script, and `GCN_REPLAY=<dir>`
 in the env file replays an input log relative to that directory. Its log is
-`adb logcat -s <game>`, with compositor and game frame counts every five seconds.
+`adb logcat -s <game>`, with a line every second: compositor and game frames, the longest
+wait between game frames, the render thread's time per stereo frame, how many display frames
+each game frame stayed up (`held 1:a 2:b 3:c 4+:d`; even pacing is all one column), the
+eyes' GPU time and the resolution dynamic resolution drew them at (`graphics.md`, "Dynamic
+resolution"), and the sound ring's underruns and lowest fill in that second. The compositor's
+own `VrApi FPS=` line beside it has the clocks and the app's GPU time (`App=`). Raise the
+buffer first (`adb logcat -G 64M`) and capture it as the session runs: with `GCN_FRAMETIME`
+on it laps even that in minutes. The variables the env file sets are read on first use, so
+they all work in the app; until 2026-10-18 `GCN_FRAMETIME`, `GCN_XFSTATS` and
+`GCN_APPLYSTATS` were read during static initialisation, before the env file was applied,
+and could not be turned on there at all.
+
+Every runtime thread names itself (`top -H`, the profiles): `guest` for each of the guest's
+host threads, `gx-frontend`, `gx-transform`, and on a headset `xr-frame-loop`. The OpenXR
+frontend hands those roles to the runtime as thread hints (`thread_hints` in vr.txt,
+`XR_KHR_android_thread_settings`); a Quest 3 accepts the main and renderer ones and refuses
+the workers. Turning them off and on made no difference to a replayed session's frame rate.
 
 `GCN_XR_INPUT_LOG=1` (either frontend) prints every button action's state on change:
 *inactive* means the runtime has bound it to nothing present, which is how an API layer
@@ -256,6 +272,40 @@ before. A host more than 100 ms behind is re-anchored rather than caught up (a l
 shader build). `GCN_CATCHUP=0` keeps the slow-motion behaviour; `GCN_CLOCKLOG` counts the
 jumps and their total.
 
+**A jump is not a dropped frame.** The guest waits in real time at the end of a frame for
+the stages after it (`kFeMaxFrames`), and virtual time does not move while it waits, so a
+jump follows; the frame still lands on its retrace. In a headset most of a heavy second can
+be jumps -- 300-400 ms of every second at a full 60 frames, 600-870 ms in a scene running at
+40-55 -- so counting a log's jump lines as lost time, as was once done here, reads a session
+that ran at 59 frames a second as one at 45. The frame rate a session really ran at is its
+presented frames per virtual second (`GCN_CLOCKLOG` on a replay, which reproduces virtual
+time exactly), or its frame count over the wall-clock length of the session.
+
+**The sound across a jump.** The blocks that came due during a jump are owed, and the AI
+DMA delivers them as soon as the guest has queued the next buffer (`aid_start_block`,
+`aid_block_done` in `hw/dsp.cpp`). They were once spaced a quarter of a block apart in
+virtual time, to give the guest time to queue, which repaid three milliseconds of backlog
+for every one the guest ran: once jumps passed 75% of virtual time the backlog outgrew that
+and passed the 100 ms limit, past which it is thrown away, and the sound cut out for a fifth
+to two fifths of every second. `GCN_CLOCKLOG` now prints, after each second's line, the
+sound the DMA delivered in it (`[clock] audio N frames`), which should be the DMA's rate;
+before the fix a replay of such a scene showed 18,700-29,000 frames a second of 32,000, and
+after it the full rate through every second. What is left: a guest that fills its buffers
+from its main loop rather than in the interrupt has not refilled when blocks come so close
+together, and the DMA plays the same buffer again (as the hardware does when nothing new was
+queued); in a slow scene that is about one block in ten, heard as crackle. Holding a block
+back until the guest had queued the next one, measured in what the guest executed, was tried
+and was worse: such a guest queues only after the DMA has moved on. `GCN_AIDWAV=<file>`
+writes every block the DMA delivers (raw 16-bit stereo at the DMA's rate, little endian),
+and `<file>.txt` each block's start, length, virtual time, whether it was delivered catching
+up, its address and whether the guest had queued the next one; it works in the benchmark,
+so a replay's sound can be checked block by block for repeats and broken joins.
+
+The sound ring between the DMA and the device keeps a cushion (`audio.cpp`), 100 ms by
+default and `GCN_AUDIO_CUSHION_MS` to change it. Running dry, it stays silent until the
+whole cushion is back, so every underrun is a gap at least that long; 60 ms, as it was, did
+not ride through the 40-60 ms a guest waits on a slow render stage.
+
 `GCN_CPU_SCALE=N` (or `clock_set_cpu_scale` from a game's sources) makes the emulated CPU
 N times as fast as the console's: the ticks per edge are divided by N, so the same frame of
 work takes 1/N of the virtual time. A game that paces itself on the retrace and is patched
@@ -273,7 +323,7 @@ no cost, which is why switching mid-run looked safe in the harness.
 `GCN_CLOCK=host` restores wall-clock time (the ticker thread polls for due events every
 200 µs). `GCN_TIMESCALE=N` paces virtual time at N× real time (0: unpaced; `--fast` on
 the game, and the benchmark's default). `GCN_CLOCKLOG=1` prints once per virtual second how
-virtual and host time compare and the work per presented frame.
+virtual and host time compare, the work per presented frame and the sound delivered.
 
 `GCN_FRAMETIME=1` prints a line per frame from each thread: the guest's interval between
 presents and how much of it the GX front end took, the batch's shape, and the renderer's

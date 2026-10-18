@@ -428,6 +428,48 @@ megabytes per eye per frame for a buffer nothing reads. `GCN_EYE_KEEPDEPTH=1` le
 
 The next lever, not taken, is `GL_OVR_multiview2`: both eyes from one set of draw calls.
 
+## Dynamic resolution
+
+A console game's large translucent effects -- a burst of additive layers around the camera
+-- are overdraw on every pixel they cover, which at 640x480 the console could afford. An eye
+on a headset has twenty and more times the pixels, and such a burst can take the GPU from
+a few milliseconds a frame to eighty. A GPU that falls behind holds up the frame loop, then
+the threads feeding it, then the guest, which stops keeping real time: the game slows and
+its sound runs dry. Halving the eyes' width and height took one such burst from 61 ms to
+about 21: the cost is the pixels, so fewer pixels is the fix.
+
+So the OpenXR frontend measures the eyes' GPU time every game frame (`EyeResolution` in
+`openxr/xr_frontend.cpp`: timer queries, read a few frames late from a ring so that measuring
+stalls nothing) and holds it under `gpu_budget_ms` (13 by default; 0 turns it off) by
+drawing the eyes into a smaller part of each swapchain image, down to `min_eye_res` of each
+side (0.5). The projection layer's `imageRect` tells the compositor how much of the image is
+the eye, and it scales that up. Over budget, the size drops at once to what would have
+fitted, taking the cost to go with the pixel count; it comes back 5% of a side at a time, at
+most every 30 frames, and only while the larger size would fit with a margin. Sizes are
+multiples of 16 texels, and `render_execute_eye` draws into the corner it is given; the
+frame's clear still covers the whole image. A grab of the eye (`grab_eye`) reallocates its
+texture when the size changes, which the coarse steps keep rare. The app's stats line
+reports the eyes' GPU time and the resolution each second.
+
+The flat pass and the eyes' fixed costs are in the measured time too, so the model is
+rough; the feedback corrects it. The first frame or two of a burst are still drawn at the
+old size, since the measurement is a few frames behind.
+
+## The display's refresh rate
+
+A console presents on its field rate, 59.94 Hz; a headset's display runs at its own, 72 Hz
+by default on a Quest 3, so some game frames stay up for two display frames and the rest
+for one, and whatever moves in the world judders twelve times a second while the head,
+which the compositor reprojects, stays smooth. `display_hz` in vr.txt requests a rate
+(`XR_FB_display_refresh_rate`): a rate in Hz, 0 for the runtime's default, -1 for the lowest
+one offered that is a multiple of the field rate (120 on a Quest 3). It is 0 by default. At
+120 Hz the frame loop, which takes a game frame only at a display frame, has 8.3 ms per
+display frame, and a stereo frame that takes the render thread longer holds the next game
+frame for a third display frame: a game that held 60 at 72 Hz ran at 40-48 in its heaviest
+stretches. Even at 120 Hz only about half the game frames were held for exactly two display
+frames, since the guest is paced by its own clock, not by the display's; pacing the guest
+on the display's frame timing is what would make the cadence even.
+
 ## Texture lifetimes and EFB copies
 
 **Who decides a texture is dead.** The front end decodes a texture when the game first

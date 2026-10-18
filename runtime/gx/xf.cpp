@@ -1,6 +1,7 @@
 // GX front end (runs on the guest thread): vertex decoding, XF (transform, lighting,
 // texgen) on the CPU, primitive assembly, pixel-state snapshots and EFB copies.
 #include "../runtime.h"
+#include "../platform.h"
 #include "gx.h"
 #include "render.h"
 #include "texture.h"
@@ -25,7 +26,10 @@ static uint32_t g_tev_reg[4][2], g_tev_konst[4][2];
 // decode, transform and lighting, texture hashing and decoding), the batch's shape, and
 // how full the submission queue was -- a full queue means the guest was waiting on the
 // renderer, not the other way round. The renderer prints its own line per batch.
-static const bool g_frametime = getenv("GCN_FRAMETIME") != nullptr;
+static bool frametime_on() {  // on first use: the app sets its environment after static init
+    static const bool on = getenv("GCN_FRAMETIME") != nullptr;
+    return on;
+}
 static double g_fe_ms, g_tex_ms;
 static uint32_t g_fe_draws;
 static std::chrono::steady_clock::time_point g_last_present;
@@ -807,9 +811,9 @@ static void resolve_texture(PixelState& st, int map) {
     p.levels = levels;
     p.tlut_off = (tlut & 0x3FF) << 9;
     p.tlut_fmt = (tlut >> 10) & 3;
-    const auto t0 = g_frametime ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto t0 = frametime_on() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     TexLookup r = texture_lookup(p, batch().new_textures);
-    if (g_frametime) g_tex_ms += ms_since(t0);
+    if (frametime_on()) g_tex_ms += ms_since(t0);
     st.tex_id[map] = r.id;
     st.tex_is_efb[map] = r.efb;
     st.tex_efb_fmt[map] = (uint8_t)r.efb_fmt;
@@ -1075,7 +1079,10 @@ static thread_local uint32_t t_plan_snap[XF_REGIONS];
 // time goes on, and every figure is a function of the draw's plan and its vertex count,
 // so nothing is added per vertex.
 struct XfStats { uint64_t verts, nrm, lit, alit, lights, texgens, post, emboss; };
-static const bool g_xfstats = getenv("GCN_XFSTATS") != nullptr;
+static bool xfstats_on() {  // on first use: the app sets its environment after static init
+    static const bool on = getenv("GCN_XFSTATS") != nullptr;
+    return on;
+}
 static thread_local XfStats t_stats;
 static std::mutex g_stats_mutex;
 static XfStats g_stats;
@@ -1177,7 +1184,7 @@ static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
     }
     t_plan_valid = true;
     memcpy(t_plan_snap, d.snap, sizeof(t_plan_snap));
-    if (g_xfstats) count_draw_stats(d);
+    if (xfstats_on()) count_draw_stats(d);
     const InVertex* in = pd.in.data() + d.first_in;
     GpuVertex* out = b.verts.data() + d.first_out;
     uint32_t stride = 0;
@@ -1197,7 +1204,7 @@ static void transform_draw(const Pending& pd, const XfDraw& d, Batch& b) {
 static void transform_range(const Pending& pd, size_t lo, size_t hi, Batch& b) {
     t_plan_valid = false;
     for (size_t i = lo; i < hi; i++) transform_draw(pd, pd.draws[i], b);
-    if (g_xfstats) flush_draw_stats();
+    if (xfstats_on()) flush_draw_stats();
 }
 
 // Helpers that take a share of each frame alongside the worker.
@@ -1213,6 +1220,7 @@ struct XfHelper {
 static std::vector<std::unique_ptr<XfHelper>> g_helpers;
 
 static void helper_main(XfHelper* h) {
+    plat_thread_role(ThreadRole::RenderWorker, "gx-transform");
     for (;;) {
         std::unique_lock<std::mutex> lk(h->m);
         h->cv.wait(lk, [h] { return h->busy && h->pd; });
@@ -1289,6 +1297,7 @@ static std::deque<XfJob> g_xf_jobs;
 static constexpr size_t kMaxXfJobs = 1;
 
 static void xf_worker() {
+    plat_thread_role(ThreadRole::RenderWorker, "gx-transform");
     for (;;) {
         XfJob job;
         {
@@ -1305,10 +1314,10 @@ static void xf_worker() {
         }
         const auto t0 = std::chrono::steady_clock::now();
         transform_pending(*job.pending, *job.batch);
-        if (g_frametime)
+        if (frametime_on())
             fprintf(stderr, "[xf] %zu draws, %zu vertices transformed in %.2fms\n",
                     job.pending->draws.size(), job.pending->in.size(), ms_since(t0));
-        if (g_xfstats) {
+        if (xfstats_on()) {
             static uint32_t frames;
             if (++frames % 64 == 0) {
                 std::lock_guard<std::mutex> lk(g_stats_mutex);
@@ -1351,7 +1360,7 @@ static void submit_for_transform(std::unique_ptr<Batch> b, std::unique_ptr<Pendi
 static void draw_impl(const DrawCall& dc);
 
 void renderer_draw(const DrawCall& dc) {
-    if (!g_frametime) { draw_impl(dc); return; }
+    if (!frametime_on()) { draw_impl(dc); return; }
     const auto t0 = std::chrono::steady_clock::now();
     draw_impl(dc);
     g_fe_ms += ms_since(t0);
@@ -1828,7 +1837,7 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
         }
     }
     if (cc.to_xfb) {
-        if (g_frametime) {
+        if (frametime_on()) {
             const Batch& bb = batch();
             size_t decoded = 0;
             for (auto& t : bb.new_textures)

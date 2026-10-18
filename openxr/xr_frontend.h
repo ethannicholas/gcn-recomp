@@ -50,6 +50,9 @@ struct Platform {
     // the head moves, on black, redrawn every display frame. In stereo the eye already
     // is that. Unset, theater mirrors the panel's own image.
     bool (*mirror_view)() = nullptr;
+    // Called once the session exists, on the thread that runs the frame loop: the
+    // platform's own setup that needs one, such as Android's thread hints.
+    void (*session_created)(XrInstance instance, XrSession session) = nullptr;
 };
 
 // The game's defaults with `config_dir`/vr.txt read over them, applied to the renderer.

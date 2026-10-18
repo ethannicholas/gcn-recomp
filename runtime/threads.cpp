@@ -180,6 +180,7 @@ static void retire(HostThread* h) {
 static void* host_thread_main(void* arg) {
     HostThread* self = (HostThread*)arg;
     t_self = self;
+    plat_thread_role(ThreadRole::GuestMain, "guest");
     Binding* b = wait_for_baton(self);
     if (b) fatal("fresh host thread %d asked to resume a binding", self->id);
     CPU* c = &self->cpu;
@@ -328,6 +329,7 @@ void threads_start_boot(uint32_t entry) {
     struct Boot { static void* main(void* arg) {
         HostThread* self = (HostThread*)arg;
         t_self = self;
+        plat_thread_role(ThreadRole::GuestMain, "guest");
         CPU* c = &self->cpu;
         c->msr = 0x00002032;  // FP, IR, DR, RI (EE off)
         call_indirect(c, self->start_ctx);
