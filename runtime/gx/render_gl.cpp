@@ -583,8 +583,12 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
                 break;
             }
             L.done++;
+            // A file from before keys were canonical holds many records for each program;
+            // all but the first are dropped, and the rewrite keeps one. A binary stays good
+            // under its canonical key: the source it was built from is the same.
+            canonicalize_shader_key(r.k);
             if (g_programs.count(r.k)) {
-                L.stale = true;  // a duplicate, written by a crash mid-append
+                L.stale = true;  // a duplicate: written by a crash mid-append, or see above
             } else {
                 std::string src = gen_pixel_shader(r.k);
                 const bool bin_ok = L.same_driver && r.len && program_src_hash(src.c_str()) == r.src_hash;
@@ -969,18 +973,37 @@ uint64_t render_texture_hash(uint32_t id) {
     return it == g_textures.end() ? 0 : it->second.hash;
 }
 
-static void upload_texture(const TexData& t) {
+// `from_pbo`: the texels are in the bound pixel unpack buffer from `pbo_off` on, every level
+// in turn, rather than in `t` (upload_textures).
+static void upload_texture(const TexData& t, bool from_pbo = false, size_t pbo_off = 0) {
     GlTex g{};
     glGenTextures(1, &g.tex);
     glBindTexture(GL_TEXTURE_2D, g.tex);
     g.w = t.width; g.h = t.height;
     g.hash = t.hash;
     uint32_t w = t.width, h = t.height;
+#ifdef GCN_GL_ES
+    // Storage for the whole chain at once, rather than a level at a time into a mutable
+    // texture: on an Adreno 740 that also took the first draw from the new textures from
+    // about 100 ms to 2 (a room's worth of them at a door).
+    uint32_t max_levels = 1;
+    for (uint32_t d = w > h ? w : h; d > 1; d /= 2) max_levels++;
+    const size_t nlevels = t.levels.size() < max_levels ? t.levels.size() : max_levels;
+    glTexStorage2D(GL_TEXTURE_2D, (GLsizei)nlevels, GL_RGBA8, w, h);
+    for (size_t l = 0; l < nlevels; l++) {
+        glTexSubImage2D(GL_TEXTURE_2D, (GLint)l, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE,
+                        from_pbo ? (const void*)(uintptr_t)pbo_off : (const void*)t.levels[l].data());
+        pbo_off += t.levels[l].size() * 4;
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+    }
+#else
     for (size_t l = 0; l < t.levels.size(); l++) {
         glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t.levels[l].data());
         w = w > 1 ? w / 2 : 1;
         h = h > 1 ? h / 2 : 1;
     }
+#endif
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)t.levels.size() - 1);
     g.levels = (uint32_t)t.levels.size();
     g.last_used = g_render_frame;
@@ -3383,7 +3406,11 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         if (!zfreeze) zfreeze_plane_eye(b, c, g_zplane);
         if (c.state != cur_state || c.prim != cur_prim) {
             g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
-            g_cur_true_scale = !g_true_scale.empty() && g_true_scale[c.state];
+            // At its modelled distance, as EyeTrueScale: a late object marks something in
+            // the world, and a scaled layer's band (one a reticle round the marked thing is
+            // drawn in, to be drawn over everything) would take it off what it marks. The
+            // band's depth is kept for the depth test.
+            g_cur_true_scale = true;
             apply_state(b.states[c.state], c.prim);
             g_cur_hud_push = 1.0f;
             g_cur_true_scale = false;
@@ -3464,6 +3491,45 @@ static void evict_textures(const Batch& b) {
     g_dead_pending = b.dead_textures;
 }
 
+// A batch's new textures. Where the GL is ES, all their texels go into one pixel unpack
+// buffer first and each level is uploaded from there: a new room brings a few dozen
+// textures at once, and on an Adreno 740 the uploads from client memory took 400-460 ms
+// for the 47 and 87 of two rooms (5.7 and 12.4 MB), against 255-310 ms this way. Most of
+// what was left was not the copying but the driver's allocations slowed by 23,673
+// resident programs (a level's upload took 0.01 ms or whole multiples of about 0.76 ms);
+// with the keys canonical (canonicalize_shader_key), 2,193, the two took 30-60 ms.
+static void upload_textures(const Batch& b) {
+    if (b.new_textures.empty()) return;
+#ifdef GCN_GL_ES
+    static GLuint pbo = 0;
+    size_t total = 0;
+    for (auto& t : b.new_textures)
+        for (auto& l : t->levels) total += l.size() * 4;
+    if (!pbo) glGenBuffers(1, &pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, (GLsizeiptr)total, nullptr, GL_STREAM_DRAW);
+    if (uint8_t* m = (uint8_t*)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, (GLsizeiptr)total,
+                                                GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT)) {
+        for (auto& t : b.new_textures)
+            for (auto& l : t->levels) {
+                memcpy(m, l.data(), l.size() * 4);
+                m += l.size() * 4;
+            }
+        if (glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)) {
+            size_t off = 0;
+            for (auto& t : b.new_textures) {
+                upload_texture(*t, true, off);
+                for (auto& l : t->levels) off += l.size() * 4;
+            }
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            return;
+        }
+    }
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+#endif
+    for (auto& t : b.new_textures) upload_texture(*t);
+}
+
 // Runs a batch into the EFB the way the hardware would. With do_present false the final
 // scanout is skipped but everything else -- including every render-to-texture copy -- still
 // happens, which is how the stereo path obtains the textures its eye passes sample.
@@ -3474,9 +3540,18 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
     double ms_tex = 0.0, ms_vbo = 0.0, ms_copy = 0.0;
     if (!again) {
         g_render_frame++;
+        const size_t n_dead = g_dead_pending.size();
         evict_textures(b);
-        for (auto& t : b.new_textures) upload_texture(*t);
+        const double ms_evict = g_frametime ? ms_since(t_start) : 0.0;
+        upload_textures(b);
         ms_tex = g_frametime ? ms_since(t_start) : 0.0;
+        if (g_frametime && ms_tex > 5.0) {
+            size_t bytes = 0;
+            for (auto& t : b.new_textures)
+                for (auto& l : t->levels) bytes += l.size() * 4;
+            fprintf(stderr, "[rt-tex] f%u deleted %zu in %.2f ms, uploaded %zu (%zu KB) in %.2f ms\n", g_render_frame,
+                    n_dead, ms_evict, b.new_textures.size(), bytes / 1024, ms_tex - ms_evict);
+        }
         // A set the GPU has finished with; see g_vaos. The eye passes after this draw from
         // the same one, so a batch is still uploaded once however many views it is drawn
         // into.

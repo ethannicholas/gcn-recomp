@@ -56,7 +56,55 @@ ShaderKey make_shader_key(const PixelState& st) {
         if (st.tex_pal[m]) k.efb_pal_mask |= 1u << (st.tex_pal_bits[m] == 8 ? 8 + m : m);
         k.efb_conv |= (uint32_t)efb_conv_for(st.tex_efb_fmt[m]) << (4 * m);
     }
+    canonicalize_shader_key(k);
     return k;
+}
+
+// The registers keep whatever a game last wrote to the parts no stage reads: the konstant
+// selectors and the order of stages past the last, swap tables nothing refers to, an
+// indirect command's matrix and format on a stage with no indirect stage behind it. Keyed
+// raw, a game that sets up only the stages it uses got a program for every leftover it
+// carried -- ten for each one it needed: a cache of 23,673 programs held 2,193 distinct
+// ones once these were cleared, and restoring it from binaries took 47 s on a Quest 3.
+// So everything gen_pixel_shader does not read is cleared, and two keys that generate
+// the same source are one key.
+void canonicalize_shader_key(ShaderKey& k) {
+    const uint32_t nstages = ((k.genmode >> 10) & 15) + 1;
+    const uint32_t nind = (k.genmode >> 16) & 7;
+    k.genmode &= (15u << 10) | (7u << 16) | (1u << 19);  // stages, indirect stages, z freeze
+    uint32_t swaps = 0;
+    uint32_t ksel_in[8];
+    memcpy(ksel_in, k.ksel, sizeof(ksel_in));
+    for (uint32_t i = 0; i < 8; i++) {
+        uint32_t order = 0, ksel = 0;
+        for (uint32_t h = 0; h < 2; h++) {
+            const uint32_t st = 2 * i + h;
+            if (st >= nstages) break;
+            const uint32_t sh = 12 * h;
+            order |= k.order[i] & (0xFFFu << sh);
+            ksel |= k.ksel[i] & (0x3FFu << (4 + 10 * h));  // the stage's kcsel and kasel
+            swaps |= 1u << (k.aenv[st] & 3) | 1u << ((k.aenv[st] >> 2) & 3);
+        }
+        k.order[i] = order;
+        k.ksel[i] = ksel;
+    }
+    for (uint32_t t = 0; t < 4; t++)  // swap table t is ksel[2t] and ksel[2t+1], bits 0-3
+        if ((swaps >> t) & 1) {
+            k.ksel[2 * t] |= ksel_in[2 * t] & 15;
+            k.ksel[2 * t + 1] |= ksel_in[2 * t + 1] & 15;
+        }
+    for (uint32_t st = nstages; st < 16; st++) k.cenv[st] = k.aenv[st] = k.indcmd[st] = 0;
+    for (uint32_t st = 0; st < nstages; st++) {
+        // The wraps and "add previous" always apply; the rest only through an indirect stage.
+        const uint32_t ind = k.indcmd[st];
+        const uint32_t bt = ind & 3, bs = (ind >> 7) & 3, mid = (ind >> 9) & 15;
+        uint32_t keep = (7u << 13) | (7u << 16) | (1u << 20);
+        if (bt < nind && (mid != 0 || bs != 0)) keep |= 0x1FFF;
+        k.indcmd[st] = ind & keep;
+    }
+    const uint32_t f0 = k.alpha_func & 7, f1 = (k.alpha_func >> 3) & 7, logic = (k.alpha_func >> 6) & 3;
+    if (f0 == 7 && f1 == 7 && logic == 0) k.alpha_func = 0x3F;  // no test
+    if ((k.fog & 7) < 2) k.fog = 0;  // no fog, whatever the projection
 }
 
 EfbConv efb_conv_for(uint32_t copy_fmt) {

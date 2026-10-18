@@ -47,6 +47,9 @@ struct ShaderKeyHash {
 enum EfbConv : uint32_t { EfbConvNone = 0, EfbConvI4 = 1, EfbConvI8 = 2, EfbConvIA = 3 };
 EfbConv efb_conv_for(uint32_t copy_fmt);
 ShaderKey make_shader_key(const PixelState& st);
+// Clears what gen_pixel_shader does not read, so that keys generating the same source are
+// equal. make_shader_key's keys already are; a key read from an older cache file is not.
+void canonicalize_shader_key(ShaderKey& k);
 // Whether the GL has dual-source blending (core in desktop 3.3, GL_EXT_blend_func_extended on
 // ES); set by render_init before any shader is made.
 extern bool g_dual_source;

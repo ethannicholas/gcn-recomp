@@ -87,6 +87,28 @@ header, so the file was skipped on every later run as well. From the version bum
 thousand of them at 15-40 ms each on a Quest 3, while the file grew to 60 MB that nothing
 read. If the startup line is missing, look for that message.
 
+**Keys are canonical** (`canonicalize_shader_key`): everything `gen_pixel_shader` does not
+read is cleared before a key is used -- the konstant selectors and order of stages past the
+last, swap tables no stage refers to, an indirect command's matrix and format where no
+indirect stage stands behind it, the projection bit of no fog, the comparisons of an alpha
+test that always passes. The registers keep whatever a game last wrote to those parts, and
+keyed raw a game that sets up only the stages it uses gets a program per leftover: one
+cache had 23,673 programs for 2,193 distinct keys (2,108 distinct sources), took 47 s to
+restore from binaries on a Quest 3 and held 133 MB. Keys read from an older file are made
+canonical too, and duplicates dropped, so the file shrinks on its next rewrite without a
+version bump: a canonical key generates the same source as the raw one, so a stored
+binary's source hash still matches. That equality is the invariant to keep when the
+generator starts reading a new field -- clear nothing it reads. A check over a cache file
+(generate each key raw and canonical, compare) is how it was established; the step that
+also lowered `num_texgens` to the coordinates used was dropped because it changed dead
+declarations in the source.
+
+So many resident programs also slowed every texture the driver allocated. Texture uploads
+on ES now go through immutable storage (`glTexStorage2D`) and one pixel unpack buffer per
+batch; with the 23,673 programs loaded that took a batch of 47 new textures (5.7 MB) from
+390-580 ms to 255 ms, and the first draw from them from about 100 ms to 2. With the 2,193
+the same batch took 30-40 ms, and one of 87 (12.4 MB) 54-62 ms against 460 at first.
+
 ## Stereo scaffolding
 
 `gx/render_gl.cpp` and `gx/shadergen.cpp` carry the stereo machinery: `render_execute_eye`,
@@ -202,6 +224,12 @@ frame (`g_late`), with its own depth state against the depth the eye has written
 hidden behind what stands in front of it, over the window. A frame that also has an
 `EyeFlat` draw has had its depth cleared by then, so there the markers lose their
 occlusion by the world.
+
+A late object is drawn at its modelled distance whatever its band, as `EyeTrueScale` is
+(the draw log names it `true-scale`). A game may draw the reticle round the thing a
+scanner marks in a band its foreground layer scales towards the camera, only to have it
+drawn over everything; scaled, the reticle stood at half the marker's distance, on the
+same line of sight, and the eyes could not fuse the two.
 
 A filter tells draws apart by what their state says, and that is not always enough: a
 texture's content hash, stable for most textures, can differ from one run to the next for
