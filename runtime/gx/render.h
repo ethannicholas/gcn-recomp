@@ -103,9 +103,9 @@ struct PixelState {
 // so called is left out of the flat pass that feeds the copies (as EyeHideObject leaves
 // them out) and drawn by each eye after everything else in the frame, with its own depth
 // test against what the eye has drawn: hidden behind what stands in front of it, over
-// the window. It is drawn at its modelled distance whatever its band, as EyeTrueScale
-// below, so that a marker and a reticle round it in a scaled layer's band stay together
-// on what they mark. EyeTrueScale is for a perspective draw placed in the world that the game
+// the window. One the game puts inside a facing panel's box (EyeFacing, the window) is
+// drawn on the panel's plane, scaled about the viewer; any other at its modelled distance
+// whatever its band, as EyeTrueScale below. EyeTrueScale is for a perspective draw placed in the world that the game
 // puts in a near layer's depth band only so that it is drawn over everything -- a marker
 // on a target, a reticle out where the aim is: the layer's scale towards the camera
 // (render_set_depth_layers) would bring it near, where the eyes cannot fuse it with what

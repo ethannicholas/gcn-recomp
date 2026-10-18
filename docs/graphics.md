@@ -225,11 +225,15 @@ hidden behind what stands in front of it, over the window. A frame that also has
 `EyeFlat` draw has had its depth cleared by then, so there the markers lose their
 occlusion by the world.
 
-A late object is drawn at its modelled distance whatever its band, as `EyeTrueScale` is
-(the draw log names it `true-scale`). A game may draw the reticle round the thing a
-scanner marks in a band its foreground layer scales towards the camera, only to have it
-drawn over everything; scaled, the reticle stood at half the marker's distance, on the
-same line of sight, and the eyes could not fuse the two.
+A late object whose origin the game projects inside the box of the frame's facing panels
+(`EyeFacing`, the window) is drawn on the panel's plane (`late_panel_view`): scaled about
+the viewer, so the same direction and angular size, at the panel's depth. The draw log
+names it `late(at-panel)`. Inside the window it reads as part of the window; left at its
+own distance it was seen through the window's outline but metres behind it, which is hard
+on the eyes. Any other late object is drawn at its modelled distance whatever its band, as
+`EyeTrueScale` is (`true-scale`): a game may draw the reticle round the thing a scanner
+marks in a band its foreground layer scales towards the camera, only to have it drawn over
+everything, and scaled it stood at half the marker's distance.
 
 A filter tells draws apart by what their state says, and that is not always enough: a
 texture's content hash, stable for most textures, can differ from one run to the next for

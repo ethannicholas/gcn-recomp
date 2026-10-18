@@ -187,6 +187,12 @@ static bool g_cur_facing = false;
 // distance all the same (EyeTrueScale).
 static std::vector<uint8_t> g_true_scale;
 static bool g_cur_true_scale = false;
+// What the frame's facing panels (EyeFacing) cover together in the game's clip space, for
+// the late objects inside it (late_panel_view); g_has_facing_box false when there is none.
+// g_cur_late_view is the view apply_state draws such an object with, null otherwise.
+static float g_facing_box[4];
+static bool g_has_facing_box = false;
+static const float* g_cur_late_view = nullptr;
 // The morph between theater and stereo; see render_set_vr_morph. 1 is plain stereo.
 static float g_morph = 1.0f;
 // A flat frame drawn as one of a stereo pair (render_execute_stereo_pair): where the eye
@@ -1595,6 +1601,7 @@ static void apply_state(const PixelState& st, int prim) {
             const float* view = background ? g_vr_view_sky
                               : view_space_3d ? (hud_layer ? g_vr_view_hud : foreground ? g_vr_view_fg : g_vr_view)
                               : (hud_layer ? g_vr_view_world_hud : foreground ? g_vr_view_world_fg : g_vr_view_world);
+            if (g_cur_late_view) view = g_cur_late_view;
             // GCN_EYE_GAMEPROJ keeps the game's own frustum and applies only the head
             // transform, which tells apart "the eye sees less than it should" from "the game
             // never drew anything out there".
@@ -1619,7 +1626,8 @@ static void apply_state(const PixelState& st, int prim) {
             g_eye_layer_name = background ? "sky" : hud_push != 1.0f ? "hud-band(pushed)"
                              : hud_layer ? (view_space_3d ? "hud-band(view)" : "hud-band(world)")
                              : foreground ? (view_space_3d ? "foreground(view)" : "foreground(world)")
-                             : view_space_3d ? "view-space-3d" : true_scale ? "true-scale" : "world";
+                             : view_space_3d ? "view-space-3d" : g_cur_late_view ? "late(at-panel)"
+                             : true_scale ? "true-scale" : "world";
             static const bool game_depth = !(getenv("GCN_EYE_FGDEPTH") && atoi(getenv("GCN_EYE_FGDEPTH")) == 0);
             glUniform1i(pr.u_vr, fg_layer && game_depth ? 4 : 1);
         } else if (g_vr_active) {
@@ -2613,6 +2621,7 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_restore.clear();
     g_restore_tex.clear();
     g_facing.clear();
+    g_has_facing_box = false;
     g_true_scale.clear();
     g_hud_push.clear();
     if (g_hud_push_below > 0.0f && g_hud_to > 0.0f) {
@@ -2710,6 +2719,16 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         if (a == EyeFacing) {
             if (g_facing.empty()) g_facing.assign(b.states.size(), 0);
             g_facing[c.state] = 1;
+            const float* r = &box[c.state * 4];
+            if (!g_has_facing_box) {
+                memcpy(g_facing_box, r, sizeof(g_facing_box));
+                g_has_facing_box = true;
+            } else {
+                g_facing_box[0] = std::min(g_facing_box[0], r[0]);
+                g_facing_box[1] = std::max(g_facing_box[1], r[1]);
+                g_facing_box[2] = std::min(g_facing_box[2], r[2]);
+                g_facing_box[3] = std::max(g_facing_box[3], r[3]);
+            }
             continue;
         }
         if (a == EyeTrueScale) {
@@ -3128,6 +3147,60 @@ static void flat_pass_trim(const Batch& b, const std::vector<uint8_t>& skip, std
 // are all shared between the eyes -- only the uniforms and the draw calls are repeated,
 // which is what makes stereo affordable here. Pass do_copies for the first eye only;
 // the second reuses what it produced.
+// A late object (EyeLateObject) the game draws where its window covers the screen: on the
+// screen the window magnifies it, and it reads as part of the window. In an eye the window
+// is a panel near the viewer (EyeFacing, on the HUD frame) and the object stands in the
+// world behind it, metres further off; seen through the panel's outline, at the panel's
+// place on the screen but far behind it, it is hard on the eyes. So an object whose origin
+// the game projects inside the facing panels' box is scaled about the viewer onto the
+// panel's plane: the same direction and the same angular size, at the panel's depth.
+// Returns false, leaving `out` alone, for an object outside the box, one nearer than the
+// panel, or a frame with no facing panel.
+static bool late_panel_view(const Batch& b, const Cmd& c, float out[16]) {
+    const PixelState& st = b.states[c.state];
+    if (!g_has_facing_box || (int)st.proj[6] != 0) return false;
+    // The object's origin in the game's view space: its position matrix's translation,
+    // or, for one drawn with the identity, the middle of its vertices.
+    float p[3] = {0, 0, 0};
+    if ((size_t)c.mtx * 12 + 12 <= b.mtxs.size()) {
+        const float* m = &b.mtxs[(size_t)c.mtx * 12];
+        p[0] = m[3]; p[1] = m[7]; p[2] = m[11];
+    }
+    if (p[0] * p[0] + p[1] * p[1] + p[2] * p[2] < 1e-6f && c.vcount) {
+        for (uint32_t v = 0; v < c.vcount; v++)
+            for (int k = 0; k < 3; k++) p[k] += b.verts[c.vfirst + v].pos[k];
+        for (int k = 0; k < 3; k++) p[k] /= (float)c.vcount;
+    }
+    if (p[2] >= -1e-3f) return false;
+    // Where the game's perspective puts it: x' = p0*x + p1*z, y' = p2*y + p3*z, w = -z.
+    const float x = (st.proj[0] * p[0] + st.proj[1] * p[2]) / -p[2];
+    const float y = (st.proj[2] * p[1] + st.proj[3] * p[2]) / -p[2];
+    const float* r = g_facing_box;
+    if (x < r[0] || x > r[1] || y < r[2] || y > r[3]) return false;
+    // The panel's plane, as facing_frame places it: square on to the direction of the
+    // box's centre on the HUD frame, as far out as the frame's centre.
+    const float* F = g_vr_hud_eff;
+    const float cx = 0.5f * (r[0] + r[1]), cy = 0.5f * (r[2] + r[3]);
+    float n[3] = {F[0] * cx + F[4] * cy + F[12], F[1] * cx + F[5] * cy + F[13], F[2] * cx + F[6] * cy + F[14]};
+    const float nl = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    const float d = sqrtf(F[12] * F[12] + F[13] * F[13] + F[14] * F[14]);
+    if (nl <= 0.0f || d <= 0.0f) return false;
+    for (float& v : n) v /= nl;
+    // The origin where the eyes see it (g_world_xform takes the game's view space there),
+    // and the scale about the viewer that puts it on the plane.
+    const float* W = g_world_xform;
+    float q[3];
+    for (int k = 0; k < 3; k++) q[k] = W[k] * p[0] + W[4 + k] * p[1] + W[8 + k] * p[2] + W[12 + k];
+    const float along = n[0] * q[0] + n[1] * q[1] + n[2] * q[2];
+    if (along <= d) return false;
+    const float s = d / along;
+    const float S[16] = {s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1};
+    float SW[16];
+    mat4_mul(S, g_world_xform, SW);
+    mat4_mul(g_vr_view, SW, out);
+    return true;
+}
+
 bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     // The scene samples textures the game produces by copying them back out of the EFB:
     // the water reflection, the sprite sheet the spray uses. An eye pass never draws into
@@ -3398,22 +3471,35 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
     // with their own depth state against the depth the eye has written: a marker in the
     // world stays hidden behind what is in front of it there, and shows over the 2D
     // window the game painted on top of where it stands. The flat pass left them out, so
-    // a copy the window magnifies does not hold them a second time.
+    // a copy the window magnifies does not hold them a second time. One inside the window
+    // is drawn on the window's plane (late_panel_view).
+    float late_view[16], cur_late_view[16];
+    bool cur_at_panel = false;
     for (size_t i = 0; i < eye_end && !g_late.empty(); i++) {
         if (!g_late[i] || skip[i]) continue;
         Cmd& c = b.cmds[i];
         const bool zfreeze = (b.states[c.state].bp[0x00] >> 19) & 1;
         if (!zfreeze) zfreeze_plane_eye(b, c, g_zplane);
-        if (c.state != cur_state || c.prim != cur_prim) {
+        const bool at_panel = late_panel_view(b, c, late_view);
+        const bool view_changed = at_panel != cur_at_panel ||
+                                  (at_panel && memcmp(late_view, cur_late_view, sizeof(late_view)) != 0);
+        if (view_changed) {
+            view_invalidate();
+            cur_at_panel = at_panel;
+            if (at_panel) memcpy(cur_late_view, late_view, sizeof(late_view));
+        }
+        if (view_changed || c.state != cur_state || c.prim != cur_prim) {
             g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
-            // At its modelled distance, as EyeTrueScale: a late object marks something in
-            // the world, and a scaled layer's band (one a reticle round the marked thing is
-            // drawn in, to be drawn over everything) would take it off what it marks. The
-            // band's depth is kept for the depth test.
+            // Otherwise at its modelled distance, as EyeTrueScale: a late object marks
+            // something in the world, and a scaled layer's band (one a reticle round the
+            // marked thing is drawn in, to be drawn over everything) would take it off what
+            // it marks. The band's depth is kept for the depth test.
             g_cur_true_scale = true;
+            g_cur_late_view = at_panel ? cur_late_view : nullptr;
             apply_state(b.states[c.state], c.prim);
             g_cur_hud_push = 1.0f;
             g_cur_true_scale = false;
+            g_cur_late_view = nullptr;
             glViewport(0, 0, w, h);
             glDisable(GL_SCISSOR_TEST);
             cur_state = c.state;
@@ -3425,6 +3511,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         n_drawn++;
         draw_cmd(b, c);
     }
+    if (cur_at_panel) view_invalidate();  // nothing after keeps the panel's view
     if (eyelog && do_copies)
         fprintf(stderr, "[eye]   drawn=%d skipped_composite=%d spray=%d flat_trimmed=%zu\n", n_drawn,
                 n_skipped, n_spray, n_trimmed);
