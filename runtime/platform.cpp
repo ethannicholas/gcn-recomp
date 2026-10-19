@@ -195,6 +195,7 @@ bool plat_read_at(PlatFile* f, uint64_t offset, void* dst, uint32_t len) {
 #include <sys/mman.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/resource.h>
 #ifndef __APPLE__
 #include <sys/syscall.h>
 #endif
@@ -369,6 +370,20 @@ static void (*g_role_listener)(ThreadRole, long);
 void plat_thread_role(ThreadRole role, const char* name) {
     set_thread_name(name);
     const long tid = current_tid();
+#if defined(__linux__)
+    // The render workers (the vertex transform) yield to the rest when cores are short. A
+    // headset gives an app three cores, and in its heaviest scenes the five busy threads
+    // wanted more than that: the guest, which sets the pace, spent 90-190 ms of each
+    // second runnable and waiting while the transform held its core. The transform has
+    // the slack -- a frame's is done while the guest is already on the next -- so it takes
+    // the lower priority. GCN_WORKER_NICE sets how much lower (5, a third of the share
+    // when contended; 0 leaves it).
+    if (role == ThreadRole::RenderWorker) {
+        const char* e = getenv("GCN_WORKER_NICE");
+        const int nice = e ? atoi(e) : 5;
+        if (nice) setpriority(PRIO_PROCESS, (id_t)tid, nice);
+    }
+#endif
     void (*fn)(ThreadRole, long);
     {
         std::lock_guard<std::mutex> lk(g_roles_mutex);

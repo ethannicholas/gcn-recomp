@@ -38,7 +38,12 @@ Four threads share a frame, besides the renderer's:
   frame from per-draw snapshots of the XF state, copied a sixteen-word block at a time as
   it changes. They take the frame's draws 128 at a time from a shared counter
   (`XfShare`): split into equal shares of vertices, one per thread, a frame of lit, skinned
-  models beside plain ones gave one share two and a half times the other's work. Batches reach the renderer through their queue in the order they were
+  models beside plain ones gave one share two and a half times the other's work. On Linux
+  and Android they run at a lower priority than the other threads (`GCN_WORKER_NICE`, 5 by
+  default): a headset gives an app three cores, and in a heavy scene the guest, which sets
+  the pace, spent 90-190 ms of each second runnable and waiting while the transform held
+  its core. With the workers at nice 5 that was 45-110 ms and the scene a frame a second
+  faster; the guest also contends with the frame loop and the front end. Batches reach the renderer through their queue in the order they were
   made, including a batch with nothing to transform (a copy alone): handed to the renderer
   directly, such a batch overtook the pass before it, still in the queue, and a game that
   clears a strip of the EFB with a copy between its two half-frame passes had the strip
