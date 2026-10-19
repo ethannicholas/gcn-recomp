@@ -117,11 +117,12 @@ compiled is appended to `saves/shaders.bin`, and the next run builds all of them
 game boots. Deleting the file is always safe. The startup line reports what happened:
 
 ```
-[shaders] 29 programs from cache (0 from binaries, 29 compiled) in 44 ms
+[shaders] 29 programs from cache (0 from binaries, 29 compiled, 0 of them from the game's key list) in 44 ms
 ```
 
-The header holds a version and the size of `ShaderKey`; bump `kCacheVersion` whenever a
-record's layout or a key field's meaning changes (a new field changes the size by itself). A
+The header holds a version and the size of `ShaderKey`; bump `kShaderKeyVersion`
+(`shadergen.h`, until 2026-10-19 `kCacheVersion` in `render_gl.cpp`) whenever a record's
+layout or a key field's meaning changes (a new field changes the size by itself). A
 file with any other header is replaced (`[shaders] replacing unrecognised cache`). It used
 to be only skipped. The programs compiled after that were then appended behind the old
 header, so the file was skipped on every later run as well. From the version bump on
@@ -161,6 +162,28 @@ moved some polygon-edge pixels by a few levels on macOS's GL against the build b
 scenes with no fog at all: painting the fogged pixels a solid colour instead left the
 frames identical, so it is the fog depth becoming an input every program reads, not the
 fog being drawn.
+
+**A game ships its keys** (`SHADER_KEYS` in `gcn_add_game`), so a fresh install compiles
+what a play-through needs before the game starts rather than in the middle of play. The
+list is the keys alone -- `kShaderKeysMagic`, `kShaderKeyFormat`, then each canonical key
+once, in the order first seen -- since a binary belongs to one driver. `tools/shader_keys`
+(the `shader_keys` target of a desktop build, or built with the NDK's clang and run on the
+headset over adb) makes one from any number of caches and earlier lists: `shader_keys
+OUT.bin IN.bin...`. The build embeds it in a generated source that hands it to
+`render_set_shader_keys` from a static initializer. At load, the keys the cache file lacks
+are compiled after the file's own records, counted in the same progress, and the file is
+rewritten with their binaries, so the next start restores them with the rest. The list is
+used only where the GL stores program binaries: elsewhere (desktop GL, whose loader stops
+at 3.3) it would be compiled again on every start. A list in another format is not read,
+and says so (`the game's key list is in another format`); a version bump retires it with
+the caches, and the next one is made from caches written after the bump.
+
+The headset's progress panel says which kind of start it is: "Compiling shaders... (first
+time startup only)" when the cache holds no binaries this driver will take
+(`render_shader_cache_compiling`: no file, another driver, or binaries of sources that
+have since changed, judged by the first record), "Loading shaders..." otherwise. The text
+is a 5x7 font drawn with scissored clears like the bar, with glyphs only for the characters
+those two lines use.
 
 So many resident programs also slowed every texture the driver allocated. Texture uploads
 on ES now go through immutable storage (`glTexStorage2D`) and one pixel unpack buffer per

@@ -32,6 +32,17 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total);
 // visible freeze; this trades it for something appearing a few frames late, the first
 // time it is seen. Set before render_init; GCN_ASYNC_SHADERS=0 or 1 overrides it.
 void render_set_async_shaders(bool on);
+// Keys a game ships (gcn_add_game's SHADER_KEYS, made by tools/shader_keys.cpp), built
+// with the cache's own the first time: on a fresh install the programs a play-through
+// needs are compiled before the game starts rather than in the middle of play, and from
+// then on come back as binaries with the rest. Only where the GL keeps program binaries:
+// elsewhere they would be compiled again on every run. `data` must outlive render_init.
+// Set from a static constructor, so it only stores the pointer.
+void render_set_shader_keys(const void* data, size_t size);
+// After render_init: whether building the cache will compile its programs from source,
+// because no binaries for this driver are stored yet -- the first run after an install,
+// a driver update or a change to the shaders. False where the GL keeps no binaries.
+bool render_shader_cache_compiling();
 
 // Re-scale the EFB between frames. Call only when a whole frame is about to be drawn:
 // it discards the EFB's contents and every texture an EFB copy has produced.

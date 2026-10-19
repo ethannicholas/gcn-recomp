@@ -148,6 +148,11 @@ endmacro()
 #                              installers it may call are stubbed there
 #                              (runtime/gx/render_stub.cpp), and anything more of the
 #                              renderer a game source needs must go through a hook.
+#   [SHADER_KEYS <file>]       the shader keys a play-through uses, as tools/shader_keys
+#                              makes them from the caches runs leave behind. Built into
+#                              every target, so that a fresh install compiles them before
+#                              the game starts (render_set_shader_keys in
+#                              runtime/gx/render_gl.h; docs/graphics.md, "Shader cache")
 #   [ANDROID_PACKAGE <id>]     e.g. com.example.game. On an Android build, also build the
 #                              headset app (lib<target>.so, a NativeActivity that
 #                              tools/package-apk.ps1 packages) and <target>_egl, the
@@ -158,7 +163,7 @@ endmacro()
 # )
 # The user's image may also be given as -DGAME_ISO=<path>.
 function(gcn_add_game)
-  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;VISIONOS_BUNDLE_ID;DOL_FIXUP;REL_SYMBOLS" "SOURCES;RELS;REL_RUNTIME" ${ARGN})
+  cmake_parse_arguments(G "" "NAME;TITLE;LABEL;DISC_ID;DOL_SHA1;SYMBOLS;TABLES;FPS;IMAGE_DIR;ANDROID_PACKAGE;VISIONOS_BUNDLE_ID;DOL_FIXUP;REL_SYMBOLS;SHADER_KEYS" "SOURCES;RELS;REL_RUNTIME" ${ARGN})
   if(NOT G_LABEL)
     set(G_LABEL "${G_TITLE}")
   endif()
@@ -354,6 +359,25 @@ function(gcn_add_game)
   endif()
   if(NOT APPLE OR GCN_GL_ES)
     list(APPEND RUNTIME_SOURCES ${GLAD_SOURCE})
+  endif()
+
+  # The game's shader keys, in a generated source alongside the game's own.
+  if(G_SHADER_KEYS)
+    set(_keys_cpp ${CMAKE_BINARY_DIR}/shader_keys.cpp)
+    add_custom_command(OUTPUT ${_keys_cpp}
+      COMMAND ${CMAKE_COMMAND} -DIN=${G_SHADER_KEYS} -DOUT=${_keys_cpp} -P ${GCN_RECOMP_DIR}/tools/embed_shader_keys.cmake
+      DEPENDS ${G_SHADER_KEYS} ${GCN_RECOMP_DIR}/tools/embed_shader_keys.cmake
+      COMMENT "Embedding the shader keys")
+    list(APPEND G_SOURCES ${_keys_cpp})
+  endif()
+
+  # Makes a key list for SHADER_KEYS from shader caches: `shader_keys OUT IN...`. Runs on
+  # the build machine, so only in a build for it.
+  if(NOT CMAKE_CROSSCOMPILING AND NOT GCN_BENCH_ONLY)
+    add_executable(shader_keys EXCLUDE_FROM_ALL ${GCN_RECOMP_DIR}/tools/shader_keys.cpp ${RT}/gx/shadergen.cpp)
+    _gcn_set_standards(shader_keys)
+    target_include_directories(shader_keys PRIVATE ${RT} ${GLAD_INCLUDE_DIR})
+    target_compile_definitions(shader_keys PRIVATE ${GCN_GL_DEFS})
   endif()
 
   # SDL2: pkg-config where it exists; on Windows there are no prebuilt ARM64 binaries,

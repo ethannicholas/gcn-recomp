@@ -411,10 +411,7 @@ static GLuint link(GLuint vs, GLuint fs) {
 static std::string g_shader_cache_path;
 static bool g_binaries_supported = false;
 static constexpr uint32_t kCacheMagic = 0x43535257;  // "WRSC"
-// Bumped whenever a record's layout or a key's meaning changes. The key's size goes in
-// beside it, so a field added to ShaderKey retires the file even without a bump.
-static constexpr uint32_t kCacheVersion = 3;
-static constexpr uint32_t kCacheFormat = kCacheVersion << 16 | (uint32_t)sizeof(ShaderKey);
+static constexpr uint32_t kCacheFormat = kShaderKeyFormat;
 
 static uint64_t hash_str(const char* s, uint64_t h = 1469598103934665603ull) {
     for (; s && *s; s++) h = (h ^ (uint8_t)*s) * 1099511628211ull;
@@ -578,20 +575,32 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
 void render_set_shader_cache(const char* path) { g_shader_cache_path = path ? path : ""; }
 
 // Building every program the file remembers: shader_cache_open reads the file, then
-// shader_cache_step builds its records in order -- all at once from render_init, or a few
-// milliseconds at a time for a frontend that asked for that
-// (render_set_shader_cache_deferred) -- and the last step rewrites the file if it has to.
+// shader_cache_step builds its records in order, then the game's keys the file lacks --
+// all at once from render_init, or a few milliseconds at a time for a frontend that asked
+// for that (render_set_shader_cache_deferred) -- and the last step rewrites the file if
+// it has to.
 struct CacheLoad {
     std::vector<uint8_t> data;
     size_t pos = 0;
-    bool active = false, same_driver = false, stale = false;
+    std::vector<ShaderKey> shipped;  // the game's keys that are not in the file
+    size_t shipped_pos = 0;
+    bool active = false, same_driver = false, stale = false, binaries = false;
     int total = 0, done = 0, from_binary = 0, compiled = 0;
     std::chrono::steady_clock::time_point t0;
 };
 static CacheLoad g_cache_load;
 static bool g_cache_deferred = false;
+static const uint8_t* g_shipped_keys = nullptr;
+static size_t g_shipped_keys_size = 0;
 
 void render_set_shader_cache_deferred(bool on) { g_cache_deferred = on; }
+void render_set_shader_keys(const void* data, size_t size) {
+    g_shipped_keys = (const uint8_t*)data;
+    g_shipped_keys_size = size;
+}
+bool render_shader_cache_compiling() {
+    return g_binaries_supported && g_cache_load.active && !g_cache_load.binaries;
+}
 
 // One record's fields, read from `p`; false at the end or at a truncated record.
 struct CacheRecord {
@@ -629,7 +638,6 @@ static void shader_cache_open() {
         }
         fclose(f);
     }
-    if (L.data.empty()) return;
     uint32_t magic = 0, ver = 0;
     uint64_t drv = 0;
     if (L.data.size() >= 16) {
@@ -637,7 +645,7 @@ static void shader_cache_open() {
         memcpy(&ver, L.data.data() + 4, 4);
         memcpy(&drv, L.data.data() + 8, 8);
     }
-    if (magic != kCacheMagic || ver != kCacheFormat) {
+    if (!L.data.empty() && (magic != kCacheMagic || ver != kCacheFormat)) {
         // Started afresh, not just skipped. The programs compiled from here on are appended
         // to this file, and behind the old header they would be skipped again on every run
         // after, each one compiled anew in the middle of play.
@@ -647,17 +655,50 @@ static void shader_cache_open() {
             shader_cache_write_header(f);
             fclose(f);
         }
-        return;
     }
-    L.same_driver = drv == driver_id();
-    L.stale = !L.same_driver;
-    L.pos = 16;
-    // Counted first, for the progress a frontend shows.
-    const uint8_t* p = L.data.data() + L.pos;
-    const uint8_t* end = L.data.data() + L.data.size();
-    CacheRecord r;
-    while (cache_next(p, end, r)) L.total++;
-    L.active = true;
+    // The file's keys, canonical, to leave out of the game's those it already holds.
+    std::unordered_set<ShaderKey, ShaderKeyHash> have;
+    if (!L.data.empty()) {
+        L.same_driver = drv == driver_id();
+        L.stale = !L.same_driver;
+        L.pos = 16;
+        // Counted first, for the progress a frontend shows.
+        const uint8_t* p = L.data.data() + L.pos;
+        const uint8_t* end = L.data.data() + L.data.size();
+        CacheRecord r;
+        bool checked = false;
+        while (cache_next(p, end, r)) {
+            L.total++;
+            canonicalize_shader_key(r.k);
+            have.insert(r.k);
+            // Whether the stored binaries will be taken, judged by the first: they all
+            // go together, with the driver or with a change to the shaders.
+            if (!checked && L.same_driver && r.len) {
+                checked = true;
+                L.binaries = program_src_hash(gen_pixel_shader(r.k).c_str()) == r.src_hash;
+            }
+        }
+    }
+    if (g_shipped_keys && g_binaries_supported) {
+        uint32_t kmagic = 0, kver = 0;
+        if (g_shipped_keys_size >= 8) {
+            memcpy(&kmagic, g_shipped_keys, 4);
+            memcpy(&kver, g_shipped_keys + 4, 4);
+        }
+        if (kmagic != kShaderKeysMagic || kver != kShaderKeyFormat) {
+            fprintf(stderr, "[shaders] the game's key list is in another format (%08x, not %08x); "
+                    "make it again with tools/shader_keys\n", kver, kShaderKeyFormat);
+        } else {
+            for (size_t o = 8; o + sizeof(ShaderKey) <= g_shipped_keys_size; o += sizeof(ShaderKey)) {
+                ShaderKey k;
+                memcpy(&k, g_shipped_keys + o, sizeof(k));
+                canonicalize_shader_key(k);
+                if (have.insert(k).second) L.shipped.push_back(k);
+            }
+            L.total += (int)L.shipped.size();
+        }
+    }
+    L.active = !L.data.empty() || !L.shipped.empty();
 }
 
 bool render_shader_cache_step(double budget_ms, int* done, int* total) {
@@ -707,7 +748,16 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
             t_progress = std::chrono::steady_clock::now();
             fprintf(stderr, "[shaders] %d of %d loaded, %.0f ms\n", L.done, L.total, ms_since(L.t0));
         }
-        if (p >= end) {
+        // Then the game's keys the file lacked, compiled; the rewrite below stores them.
+        while (p >= end && L.shipped_pos < L.shipped.size() && ms_since(t_step) < budget_ms) {
+            const ShaderKey& k = L.shipped[L.shipped_pos++];
+            L.done++;
+            if (g_programs.count(k)) continue;
+            register_program(k, build_program(k, gen_pixel_shader(k), nullptr, 0, 0));
+            L.compiled++;
+            L.stale = true;
+        }
+        if (p >= end && L.shipped_pos == L.shipped.size()) {
             // Anything that could not be used as stored is replaced: the whole file is
             // rewritten from the programs now in hand, with fresh binaries where the
             // driver gives them.
@@ -720,11 +770,13 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
                     fclose(f);
                 }
             }
-            fprintf(stderr, "[shaders] %d programs from cache (%d from binaries, %d compiled) in %.0f ms\n",
-                    L.from_binary + L.compiled, L.from_binary, L.compiled, ms_since(L.t0));
+            fprintf(stderr, "[shaders] %d programs from cache (%d from binaries, %d compiled, %zu of them from the game's key list) in %.0f ms\n",
+                    L.from_binary + L.compiled, L.from_binary, L.compiled, L.shipped.size(), ms_since(L.t0));
             L.active = false;
             L.data.clear();
             L.data.shrink_to_fit();
+            L.shipped.clear();
+            L.shipped.shrink_to_fit();
         }
     }
     if (done) *done = L.done;

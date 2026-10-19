@@ -54,6 +54,16 @@ void canonicalize_shader_key(ShaderKey& k);
 // and the konstant registers as the shader takes them (u_konst's layout: four registers,
 // r g b a each).
 void stage_konsts(const uint32_t* bp, const int konst[16], int out[64]);
+
+// Bumped whenever a key field's meaning or the shader cache's record layout changes. With
+// the key's size beside it, so that a field added to ShaderKey counts as a change by itself,
+// it is the format of both the cache file (render_gl.cpp) and a game's key list
+// (render_set_shader_keys, tools/shader_keys.cpp), and either one in another format is
+// not read.
+constexpr uint32_t kShaderKeyVersion = 3;
+constexpr uint32_t kShaderKeyFormat = kShaderKeyVersion << 16 | (uint32_t)sizeof(ShaderKey);
+// A key list: this, kShaderKeyFormat, then the canonical keys, each once.
+constexpr uint32_t kShaderKeysMagic = 0x4B534347;  // "GCSK"
 // Whether the GL has dual-source blending (core in desktop 3.3, GL_EXT_blend_func_extended on
 // ES); set by render_init before any shader is made.
 extern bool g_dual_source;
