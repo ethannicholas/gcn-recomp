@@ -111,7 +111,9 @@ same way:
   button is the left menu. Its hand comes from ARKit's accessory chirality, its aim pose from
   ARKit's accessory tracking (the `aim` location, predicted for the display time). A
   gamepad is merged as a pad (`Platform::merge_input`), with its stick clicks fed to the
-  thumbstick-click actions so the view toggle and the game's left click work on it too.
+  thumbstick-click actions so the view toggle and the game's left click work on it too. It
+  is read by position (`vr::Gamepad`) and laid out by the game's `map_gamepad` hook, or
+  failing one by `vr::default_gamepad_layout`, the GameCube's buttons in their places.
 - **Lifecycle.** Session states are queued as a runtime would send them. When the layer is
   invalidated (the viewer left the space) the session is lost and the core's loop ends.
 

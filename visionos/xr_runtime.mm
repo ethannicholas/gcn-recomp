@@ -630,29 +630,28 @@ void merge_gamepad(PadState& p) {
         if (is_spatial(c)) continue;
         GCExtendedGamepad* gp = c.extendedGamepad;
         if (!gp) continue;
-        // As the desktop lays a gamepad out: south is A, west B, east X, north Y, the right
-        // shoulder Z, the triggers L and R.
-        if (gp.buttonA.isPressed) p.buttons |= PAD_A;
-        if (gp.buttonX.isPressed) p.buttons |= PAD_B;
-        if (gp.buttonB.isPressed) p.buttons |= PAD_X;
-        if (gp.buttonY.isPressed) p.buttons |= PAD_Y;
-        if (gp.buttonMenu.isPressed) p.buttons |= PAD_START;
-        if (gp.rightShoulder.isPressed) p.buttons |= PAD_Z;
-        if (gp.dpad.up.isPressed) p.buttons |= PAD_UP;
-        if (gp.dpad.down.isPressed) p.buttons |= PAD_DOWN;
-        if (gp.dpad.left.isPressed) p.buttons |= PAD_LEFT;
-        if (gp.dpad.right.isPressed) p.buttons |= PAD_RIGHT;
-        auto to_u8 = [](float f) {
-            int v = 128 + (int)(f * 100.0f);
-            return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+        // GameController names the face buttons by an Xbox pad's places: A south, B east,
+        // X west, Y north.
+        vr::Gamepad g;
+        const struct { GCControllerButtonInput* in; uint32_t bit; } kButtons[] = {
+            {gp.buttonA, vr::Gamepad::South}, {gp.buttonB, vr::Gamepad::East},
+            {gp.buttonX, vr::Gamepad::West}, {gp.buttonY, vr::Gamepad::North},
+            {gp.leftShoulder, vr::Gamepad::LeftShoulder}, {gp.rightShoulder, vr::Gamepad::RightShoulder},
+            {gp.leftThumbstickButton, vr::Gamepad::LeftStick}, {gp.rightThumbstickButton, vr::Gamepad::RightStick},
+            {gp.dpad.up, vr::Gamepad::Up}, {gp.dpad.down, vr::Gamepad::Down},
+            {gp.dpad.left, vr::Gamepad::Left}, {gp.dpad.right, vr::Gamepad::Right},
+            {gp.buttonMenu, vr::Gamepad::Start}, {gp.buttonOptions, vr::Gamepad::Select},
         };
-        const float lx = gp.leftThumbstick.xAxis.value, ly = gp.leftThumbstick.yAxis.value;
-        if (fabsf(lx) > 0.12f || fabsf(ly) > 0.12f) { p.stick_x = to_u8(lx); p.stick_y = to_u8(ly); }
-        const float rx = gp.rightThumbstick.xAxis.value, ry = gp.rightThumbstick.yAxis.value;
-        if (fabsf(rx) > 0.05f || fabsf(ry) > 0.05f) { p.cstick_x = to_u8(rx); p.cstick_y = to_u8(ry); }
-        const float lt = gp.leftTrigger.value, rt = gp.rightTrigger.value;
-        if (lt > 0.03f) { p.trig_l = std::max(p.trig_l, (uint8_t)(lt * 255.0f)); if (lt > 0.9f) p.buttons |= PAD_L; }
-        if (rt > 0.03f) { p.trig_r = std::max(p.trig_r, (uint8_t)(rt * 255.0f)); if (rt > 0.9f) p.buttons |= PAD_R; }
+        for (const auto& b : kButtons)
+            if (b.in.isPressed) g.buttons |= b.bit;
+        g.lx = gp.leftThumbstick.xAxis.value;
+        g.ly = gp.leftThumbstick.yAxis.value;
+        g.rx = gp.rightThumbstick.xAxis.value;
+        g.ry = gp.rightThumbstick.yAxis.value;
+        g.lt = gp.leftTrigger.value;
+        g.rt = gp.rightTrigger.value;
+        if (vr::game_hooks().map_gamepad) vr::game_hooks().map_gamepad(g, p);
+        else vr::default_gamepad_layout(g, p);
     }
 }
 

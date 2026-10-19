@@ -2,6 +2,9 @@
 #include "vr_config.h"
 #include "vr_game.h"
 #include "input_log.h"
+#include "hw/pad.h"
+#include <algorithm>
+#include <cmath>
 #include "runtime.h"
 #include <cstdio>
 #include <cstdlib>
@@ -119,6 +122,22 @@ bool hand_pose(Hand h, HandPose* out) {
         memcpy(out->rot, v + 3, sizeof(out->rot));
     }
     return valid;
+}
+
+void default_gamepad_layout(const Gamepad& g, PadState& p) {
+    static const struct { uint32_t from; uint16_t to; } kButtons[] = {
+        {Gamepad::South, PAD_A}, {Gamepad::West, PAD_B}, {Gamepad::East, PAD_X},
+        {Gamepad::North, PAD_Y}, {Gamepad::Start, PAD_START}, {Gamepad::RightShoulder, PAD_Z},
+        {Gamepad::Up, PAD_UP}, {Gamepad::Down, PAD_DOWN}, {Gamepad::Left, PAD_LEFT},
+        {Gamepad::Right, PAD_RIGHT},
+    };
+    for (const auto& b : kButtons)
+        if (g.buttons & b.from) p.buttons |= b.to;
+    auto to_u8 = [](float f) { return (uint8_t)std::clamp(128 + (int)(f * 100.0f), 0, 255); };
+    if (fabsf(g.lx) > 0.12f || fabsf(g.ly) > 0.12f) { p.stick_x = to_u8(g.lx); p.stick_y = to_u8(g.ly); }
+    if (fabsf(g.rx) > 0.05f || fabsf(g.ry) > 0.05f) { p.cstick_x = to_u8(g.rx); p.cstick_y = to_u8(g.ry); }
+    if (g.lt > 0.03f) { p.trig_l = std::max(p.trig_l, (uint8_t)(g.lt * 255.0f)); if (g.lt > 0.9f) p.buttons |= PAD_L; }
+    if (g.rt > 0.03f) { p.trig_r = std::max(p.trig_r, (uint8_t)(g.rt * 255.0f)); if (g.rt > 0.9f) p.buttons |= PAD_R; }
 }
 
 static std::atomic<bool> g_gamepad_play{false};

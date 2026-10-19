@@ -14,6 +14,26 @@
 struct PadState;
 
 namespace vr {
+// A gamepad as a platform reads it: its buttons by where they are, not by what they are
+// called (an Xbox pad's A and a Nintendo pad's B are both `south`), its sticks from -1 to 1
+// with up positive, its triggers from 0 to 1.
+struct Gamepad {
+    enum : uint32_t {
+        South = 1u << 0, East = 1u << 1, West = 1u << 2, North = 1u << 3,
+        LeftShoulder = 1u << 4, RightShoulder = 1u << 5, LeftStick = 1u << 6, RightStick = 1u << 7,
+        Up = 1u << 8, Down = 1u << 9, Left = 1u << 10, Right = 1u << 11,
+        Start = 1u << 12, Select = 1u << 13,
+    };
+    uint32_t buttons = 0;
+    float lx = 0, ly = 0, rx = 0, ry = 0;
+    float lt = 0, rt = 0;
+};
+
+// The GameCube layout a gamepad gets by default, by position: south A, west B, east X,
+// north Y, the right shoulder Z, the triggers L and R, the sticks the main and C sticks.
+// Buttons are added to `p`, and a stick or trigger taken over only while it is pushed.
+void default_gamepad_layout(const Gamepad& g, PadState& p);
+
 struct GameHooks {
     // Adjusts the defaults before vr.txt is read over them: the game's units per metre,
     // its camera pitch, where its HUD reads well.
@@ -51,6 +71,13 @@ struct GameHooks {
     // game and not another. The desktop frontend has its own controllers and does not
     // call it.
     void (*map_pad)(PadState& p) = nullptr;
+
+    // A gamepad's place in the controller state (merged after map_pad, by a frontend that
+    // reads one), for a game whose controls on a modern pad are not the GameCube's
+    // buttons in its places. Called on the frontend's thread; whatever the game takes from
+    // it beyond the pad, it reads on the guest thread through input_pose, so that a replay
+    // has it too. Without this hook default_gamepad_layout.
+    void (*map_gamepad)(const Gamepad& g, PadState& p) = nullptr;
 
     // The game's say over what the eyes draw: a filter the frontend installs in the
     // renderer (gx::EyeFilter, with what it is told, in gx/render.h). Null hides nothing.
