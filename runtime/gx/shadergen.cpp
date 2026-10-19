@@ -35,11 +35,6 @@ ShaderKey make_shader_key(const PixelState& st) {
     for (int i = 0; i < 8; i++) k.ksel[i] = bp[0xF6 + i];
     k.alpha_func = (bp[0xF3] >> 16) & 0xFF;
     k.iref = nind ? bp[0x27] & ((1u << (6 * nind)) - 1) : 0;
-    // The fog's type as GXSetFog takes it: fsel (bits 21-23) in the low three bits, and the
-    // projection bit (20, set for an orthographic one) on top. Until 2026-10-16 this read
-    // bits 20-23 as the type, the projection bit as its lowest: exponential fog (4) came out
-    // as none, linear (2) as exponential and exp2 (5) as an orthographic linear one.
-    k.fog = ((bp[0xF1] >> 21) & 7) | (((bp[0xF1] >> 20) & 1) << 3);
     k.num_texgens = st.num_texgens;
     k.efb_has_alpha = (bp[0x43] & 7) == 1;
     if ((bp[0xF5] >> 2) & 3) k.ztex = bp[0xF5] & 0xF;
@@ -72,27 +67,23 @@ void canonicalize_shader_key(ShaderKey& k) {
     const uint32_t nstages = ((k.genmode >> 10) & 15) + 1;
     const uint32_t nind = (k.genmode >> 16) & 7;
     k.genmode &= (15u << 10) | (7u << 16) | (1u << 19);  // stages, indirect stages, z freeze
+    // Of the konstant selectors only the swap tables (bits 0-3) are compiled in, and only
+    // those a stage refers to. Which konstant each stage reads is a uniform (u_kstage): a
+    // game sets it per material, often leaving it as it was on a stage that reads none,
+    // and keyed, one object's program came in five variants that drew alike.
     uint32_t swaps = 0;
-    uint32_t ksel_in[8];
-    memcpy(ksel_in, k.ksel, sizeof(ksel_in));
     for (uint32_t i = 0; i < 8; i++) {
-        uint32_t order = 0, ksel = 0;
+        uint32_t order = 0;
         for (uint32_t h = 0; h < 2; h++) {
             const uint32_t st = 2 * i + h;
             if (st >= nstages) break;
-            const uint32_t sh = 12 * h;
-            order |= k.order[i] & (0xFFFu << sh);
-            ksel |= k.ksel[i] & (0x3FFu << (4 + 10 * h));  // the stage's kcsel and kasel
+            order |= k.order[i] & (0xFFFu << (12 * h));
             swaps |= 1u << (k.aenv[st] & 3) | 1u << ((k.aenv[st] >> 2) & 3);
         }
         k.order[i] = order;
-        k.ksel[i] = ksel;
     }
-    for (uint32_t t = 0; t < 4; t++)  // swap table t is ksel[2t] and ksel[2t+1], bits 0-3
-        if ((swaps >> t) & 1) {
-            k.ksel[2 * t] |= ksel_in[2 * t] & 15;
-            k.ksel[2 * t + 1] |= ksel_in[2 * t + 1] & 15;
-        }
+    for (uint32_t i = 0; i < 8; i++)  // swap table t is ksel[2t] and ksel[2t+1]
+        k.ksel[i] = (swaps >> (i / 2)) & 1 ? k.ksel[i] & 15 : 0;
     for (uint32_t st = nstages; st < 16; st++) k.cenv[st] = k.aenv[st] = k.indcmd[st] = 0;
     for (uint32_t st = 0; st < nstages; st++) {
         // The wraps and "add previous" always apply; the rest only through an indirect stage.
@@ -102,9 +93,21 @@ void canonicalize_shader_key(ShaderKey& k) {
         if (bt < nind && (mid != 0 || bs != 0)) keep |= 0x1FFF;
         k.indcmd[st] = ind & keep;
     }
-    const uint32_t f0 = k.alpha_func & 7, f1 = (k.alpha_func >> 3) & 7, logic = (k.alpha_func >> 6) & 3;
-    if (f0 == 7 && f1 == 7 && logic == 0) k.alpha_func = 0x3F;  // no test
-    if ((k.fog & 7) < 2) k.fog = 0;  // no fog, whatever the projection
+    // An alpha test that passes whatever the alpha is -- always AND always, always OR
+    // anything, and so on -- is no test (0x3F, which gen_pixel_shader leaves out).
+    {
+        const uint32_t f0 = k.alpha_func & 7, f1 = (k.alpha_func >> 3) & 7, logic = (k.alpha_func >> 6) & 3;
+        const int c0 = f0 == 7 ? 1 : f0 == 0 ? 0 : -1, c1 = f1 == 7 ? 1 : f1 == 0 ? 0 : -1;  // -1: depends
+        bool pass = false;
+        if (logic == 0) pass = c0 == 1 && c1 == 1;
+        else if (logic == 1) pass = c0 == 1 || c1 == 1;
+        else if (c0 >= 0 && c1 >= 0) pass = logic == 2 ? c0 != c1 : c0 == c1;
+        if (pass) k.alpha_func = 0x3F;
+    }
+    // Fog is a uniform (u_fogmode): whether there is any, its curve and its projection. A
+    // game changes them with the scene, and keyed, every program on screen was built again
+    // when the fog came or went or changed its curve, with nothing else drawn differently.
+    k.fog = 0;
 }
 
 EfbConv efb_conv_for(uint32_t copy_fmt) {
@@ -123,28 +126,23 @@ static const char* kColorIn[16] = {
 static const char* kAlphaIn[8] = {"prev.a", "c0.a", "c1.a", "c2.a", "tex.a", "ras.a", "konst.a", "0"};
 static const char* kDest[4] = {"prev", "c0", "c1", "c2"};
 
-static std::string konst_color(uint32_t sel) {
+void stage_konsts(const uint32_t* bp, const int konst[16], int out[64]) {
+    // kcsel and kasel: 0-7 a fixed fraction, 12-15 a konstant register's colour (kcsel
+    // only), 16 and up one channel of a register, (sel - 16) & 3 which register and
+    // (sel - 16) >> 2 which channel. What is left is reserved, and reads as 255.
     static const int frac[8] = {255, 223, 191, 159, 128, 96, 64, 32};
-    char b[64];
-    if (sel < 8) { snprintf(b, sizeof(b), "ivec3(%d)", frac[sel]); return b; }
-    if (sel >= 12 && sel <= 15) { snprintf(b, sizeof(b), "u_konst[%u].rgb", sel - 12); return b; }
-    if (sel >= 16) {
-        static const char* comp = "rgba";
-        snprintf(b, sizeof(b), "ivec3(u_konst[%u].%c)", (sel - 16) & 3, comp[(sel - 16) >> 2]);
-        return b;
+    for (uint32_t st = 0; st < 16; st++) {
+        const uint32_t ks = bp[0xF6 + st / 2] >> (10 * (st & 1));
+        const uint32_t kc = (ks >> 4) & 31, ka = (ks >> 9) & 31;
+        int* o = out + 4 * st;
+        if (kc < 8) o[0] = o[1] = o[2] = frac[kc];
+        else if (kc >= 12 && kc <= 15) for (int c = 0; c < 3; c++) o[c] = konst[4 * (kc - 12) + c];
+        else if (kc >= 16) o[0] = o[1] = o[2] = konst[4 * ((kc - 16) & 3) + ((kc - 16) >> 2)];
+        else o[0] = o[1] = o[2] = 255;
+        if (ka < 8) o[3] = frac[ka];
+        else if (ka >= 16) o[3] = konst[4 * ((ka - 16) & 3) + ((ka - 16) >> 2)];
+        else o[3] = 255;
     }
-    return "ivec3(255)";
-}
-static std::string konst_alpha(uint32_t sel) {
-    static const int frac[8] = {255, 223, 191, 159, 128, 96, 64, 32};
-    char b[64];
-    if (sel < 8) { snprintf(b, sizeof(b), "%d", frac[sel]); return b; }
-    if (sel >= 16) {
-        static const char* comp = "rgba";
-        snprintf(b, sizeof(b), "u_konst[%u].%c", (sel - 16) & 3, comp[(sel - 16) >> 2]);
-        return b;
-    }
-    return "255";
 }
 
 static std::string swizzle(const ShaderKey& k, uint32_t table) {
@@ -379,18 +377,19 @@ std::string gen_pixel_shader(const ShaderKey& k) {
 
     s += GCN_GLSL_VERSION;
     s += "in vec4 v_col0;\nin vec4 v_col1;\nin vec3 v_tex[8];\n";
-    // Only the shaders that fog read it, so every other one is generated exactly as before.
-    if ((k.fog & 7) >= 2) s += "in vec2 v_fogz;\n";
+    s += "in vec2 v_fogz;\n";
     if (k.fg_depth) s += "in vec2 v_gdepth;\nuniform int u_vr;\nuniform vec4 u_vp_b;\n";
     s += "uniform sampler2D u_tex[8];\n";
     // The palettes EFB copies are read through (efb_pal_mask), on units 8-15.
     if (k.efb_pal_mask) s += "uniform sampler2D u_pal[8];\n";
-    s += "uniform ivec4 u_reg[4];\nuniform ivec4 u_konst[4];\n";
+    s += "uniform ivec4 u_reg[4];\n";
+    s += "uniform ivec4 u_kstage[16];\n";  // the konstant each stage selects (kcsel, kasel)
     s += "uniform vec2 u_texsize[8];\n";
     s += "uniform ivec3 u_indmtx[6];\n";  // 3 matrices x 2 rows (11-bit signed entries)
     s += "uniform int u_indscale[3];\n";
     s += "uniform ivec2 u_alpharef;\n";
     s += "uniform vec4 u_fog;\n";       // A, C, bmag, bshift
+    s += "uniform int u_fogmode;\n";    // GXSetFog's type: fsel, and 8 for an orthographic projection
     s += "uniform vec3 u_fogcolor;\n";
     if (k.ztex) s += "uniform int u_zbias;\n";  // bp[0xF4]
     const bool zfreeze = (k.genmode >> 19) & 1;
@@ -578,13 +577,7 @@ std::string gen_pixel_shader(const ShaderKey& k) {
             default: W("    ras = ivec4(0);\n"); break;
             }
         }
-        // ---- konst ----
-        {
-            uint32_t ks = k.ksel[st / 2];
-            uint32_t kc = (st & 1) ? (ks >> 14) & 31 : (ks >> 4) & 31;
-            uint32_t ka = (st & 1) ? (ks >> 19) & 31 : (ks >> 9) & 31;
-            W("    konst = ivec4(%s, %s);\n", konst_color(kc).c_str(), konst_alpha(ka).c_str());
-        }
+        W("    konst = u_kstage[%u];\n", st);
         // ---- color combiner ----
         {
             uint32_t d = cenv & 15, c = (cenv >> 4) & 15, b = (cenv >> 8) & 15, a = (cenv >> 12) & 15;
@@ -689,31 +682,27 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         if (!(f0 == 7 && f1 == 7 && logic == 0) && !no_alpha_test)
             W("  if (!(%s %s %s)) discard;\n", t0, lop[logic], t1);
     }
-    // fog
-    {
-        uint32_t fsel = k.fog & 7;
-        bool ortho = (k.fog >> 3) & 1;
-        if (fsel >= 2 && !no_fog) {
-            // Not gl_FragCoord.z: that is the depth of whatever projection actually drew
-            // this fragment, and in an eye that is the headset's, not the game's. v_fogz
-            // carries the game's own screen z instead -- see the vertex shader. Clamping
-            // stands in for the depth range the hardware would have applied, and covers
-            // the geometry an eye can see outside the game's frustum, whose reconstructed
-            // z lands outside [0,1] (behind the game's camera it even goes negative).
-            s += "  float zs = clamp(v_fogz.x / v_fogz.y, 0.0, 1.0) * 16777215.0;\n";
-            if (ortho) s += "  float ze = u_fog.x * (zs / 16777215.0);\n";
-            else s += "  float ze = (u_fog.x * 16777216.0) / (u_fog.z - floor(zs / exp2(u_fog.w)));\n";
-            s += "  float fog = clamp(ze - u_fog.y, 0.0, 1.0);\n";
-            switch (fsel) {
-            case 4: s += "  fog = 1.0 - exp2(-8.0 * fog);\n"; break;
-            case 5: s += "  fog = 1.0 - exp2(-8.0 * fog * fog);\n"; break;
-            case 6: s += "  fog = exp2(-8.0 * (1.0 - fog));\n"; break;
-            case 7: s += "  fog = exp2(-8.0 * (1.0 - fog) * (1.0 - fog));\n"; break;
-            default: break;
-            }
-            s += "  vec3 fc = mix(vec3(outc.rgb), u_fogcolor * 255.0, fog);\n";
-            s += "  outc.rgb = ivec3(round(fc));\n";
-        }
+    // fog, when u_fogmode says there is any (fsel 2 and up)
+    if (!no_fog) {
+        // Not gl_FragCoord.z: that is the depth of whatever projection actually drew
+        // this fragment, and in an eye that is the headset's, not the game's. v_fogz
+        // carries the game's own screen z instead -- see the vertex shader. Clamping
+        // stands in for the depth range the hardware would have applied, and covers
+        // the geometry an eye can see outside the game's frustum, whose reconstructed
+        // z lands outside [0,1] (behind the game's camera it even goes negative).
+        s += "  int fsel = u_fogmode & 7;\n"
+             "  if (fsel >= 2) {\n"
+             "    float zs = clamp(v_fogz.x / v_fogz.y, 0.0, 1.0) * 16777215.0;\n"
+             "    float ze = (u_fogmode & 8) != 0 ? u_fog.x * (zs / 16777215.0)\n"
+             "                                    : (u_fog.x * 16777216.0) / (u_fog.z - floor(zs / exp2(u_fog.w)));\n"
+             "    float fog = clamp(ze - u_fog.y, 0.0, 1.0);\n"
+             "    if (fsel == 4) fog = 1.0 - exp2(-8.0 * fog);\n"
+             "    else if (fsel == 5) fog = 1.0 - exp2(-8.0 * fog * fog);\n"
+             "    else if (fsel == 6) fog = exp2(-8.0 * (1.0 - fog));\n"
+             "    else if (fsel == 7) fog = exp2(-8.0 * (1.0 - fog) * (1.0 - fog));\n"
+             "    vec3 fc = mix(vec3(outc.rgb), u_fogcolor * 255.0, fog);\n"
+             "    outc.rgb = ivec3(round(fc));\n"
+             "  }\n";
     }
     // Z texture (GXSetZTexture): the last stage's texel, read as a depth, replaces the
     // fragment's depth or is added to it. A frame is commonly cleared this way -- a

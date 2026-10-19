@@ -24,6 +24,7 @@
 // face where it faced and levelled, which is what OpenXR's LOCAL is. ARKit's own origin is
 // on the floor wherever the immersive space opened.
 #include "vos_runtime.h"
+#include "vr_game.h"
 #include "angle.h"
 #include "gx/gl.h"
 #include "hw/pad.h"
@@ -141,6 +142,7 @@ struct Runtime {
     ar_device_anchor_t anchor = nil;   // the head at this frame's anchor time
     bool anchor_valid = false;
     bool have_local = false;
+    int proj_frames = 0;
     simd_float4x4 origin_from_local = matrix_identity_float4x4;
     simd_float4x4 local_from_origin = matrix_identity_float4x4;
     double last_presentation = 0;
@@ -216,14 +218,14 @@ XrFovf fov_from(simd_float4x4 p) {
 const char* kShaders = R"(
 #include <metal_stdlib>
 using namespace metal;
-struct U { float4x4 mvp; };
+struct U { float4x4 mvp; float4 rect; };   // rect: the image's part, as offset and size in uv
 struct V { float4 pos [[position]]; float2 uv; };
 vertex V vs(uint vid [[vertex_id]], constant U& u [[buffer(0)]]) {
     float2 c = float2((vid & 1) ? 0.5 : -0.5, (vid & 2) ? 0.5 : -0.5);
     V o;
     o.pos = u.mvp * float4(c, 0.0, 1.0);
     // An image's first row in memory is GL's bottom row, which is Metal's v = 0.
-    o.uv = float2(c.x + 0.5, c.y + 0.5);
+    o.uv = u.rect.xy + float2(c.x + 0.5, c.y + 0.5) * u.rect.zw;
     return o;
 }
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
@@ -405,6 +407,8 @@ void read_spatial(GCController* c, HandInput& h) {
 
 void read_hands() {
     for (auto& h : g.hands) h = HandInput{};
+    // No spatial controller in hand: the game plays straight, for a gamepad.
+    vr::set_gamepad_play(g.hand_of.count == 0);
     for (GCController* c in GCController.controllers) {
         if (is_spatial(c)) {
             NSNumber* hand = [g.hand_of objectForKey:c];
@@ -479,7 +483,11 @@ bool next_frame() {
     g.drawables.clear();
     switch (cp_layer_renderer_get_state(g.layer)) {
     case cp_layer_renderer_state_invalidated: lost(); return false;
-    case cp_layer_renderer_state_paused: cp_layer_renderer_wait_until_running(g.layer); return false;
+    case cp_layer_renderer_state_paused:
+        LOGI("the immersive space is paused");
+        cp_layer_renderer_wait_until_running(g.layer);
+        LOGI("the immersive space is running again");
+        return false;
     default: break;
     }
     cp_frame_t f = cp_layer_renderer_query_next_frame(g.layer);
@@ -493,12 +501,10 @@ bool next_frame() {
     cp_drawable_array_t arr = cp_frame_query_drawables(f);
     for (size_t i = 0; arr && i < cp_drawable_array_get_count(arr); i++)
         g.drawables.push_back(cp_drawable_array_get_drawable(arr, i));
+    // A frame with no drawables is skipped, not submitted: ending its submission is a
+    // client bug to Compositor Services, which aborts the app.
+    if (g.drawables.empty()) return false;
     g.frame = f;
-    if (g.drawables.empty()) {
-        cp_frame_end_submission(f);
-        g.frame = nullptr;
-        return false;
-    }
     // The built-in display's drawable is the one the head is located for; a capture's
     // follows the same anchor.
     cp_drawable_t d = g.drawables[0];
@@ -516,6 +522,19 @@ bool next_frame() {
     return true;
 }
 
+// How far away the projection layer's images, and the black around everything, are put for
+// the compositor.
+constexpr float kProjectionDepthM = 50.0f;
+
+// That distance as a view's depth. Not depth 0, infinity, which marks no content: the
+// system fills that in tiles with the room when the space is not fully immersive, and
+// the panel showed a ragged edge of them.
+float far_depth(cp_drawable_t d, size_t view) {
+    const simd_float4x4 P = cp_drawable_compute_projection(d, cp_axis_direction_convention_right_up_back, view);
+    const simd_float4 far = simd_mul(P, simd_make_float4(0.0f, 0.0f, -kProjectionDepthM, 1.0f));
+    return far.z / far.w;
+}
+
 // Ends a frame that drew nothing: each drawable still has to be presented.
 void present_black() {
     if (!g.frame) return;
@@ -529,7 +548,8 @@ void present_black() {
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             rp.depthAttachment.texture = cp_drawable_get_depth_texture(d, t);
             rp.depthAttachment.loadAction = MTLLoadActionClear;
-            rp.depthAttachment.clearDepth = 0.0;
+            // Each texture is a view's (the layout is dedicated).
+            rp.depthAttachment.clearDepth = far_depth(d, t);
             rp.depthAttachment.storeAction = MTLStoreActionStore;
             rp.renderTargetArrayLength = rp.colorAttachments[0].texture.arrayLength;
             [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
@@ -540,6 +560,35 @@ void present_black() {
     cp_frame_end_submission(g.frame);
     g.frame = nullptr;
     g.drawables.clear();
+}
+
+// The shaders' U: where a quad goes, and which part of its image it shows. A layer may use
+// only part of an image -- the frontend's dynamic resolution draws the eyes smaller -- and
+// that part, not the whole image, fills the quad.
+struct DrawU {
+    simd_float4x4 mvp;
+    simd_float4 rect;
+};
+DrawU draw_u(simd_float4x4 mvp, const XrSwapchainSubImage& si) {
+    const float w = (float)si.swapchain->w, h = (float)si.swapchain->h;
+    return {mvp, simd_make_float4(si.imageRect.offset.x / w, si.imageRect.offset.y / h,
+                                  si.imageRect.extent.width / w, si.imageRect.extent.height / h)};
+}
+
+
+// Logs the colour at the centre of a texture once cb has run: whether an image the
+// compositing shows holds anything.
+void probe_pixel(id<MTLCommandBuffer> cb, id<MTLTexture> tex) {
+    id<MTLBuffer> buf = [g.device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+    [bl copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(tex.width / 2, tex.height / 2, 0)
+             sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:4
+  destinationBytesPerImage:4];
+    [bl endEncoding];
+    [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+        const uint8_t* p = (const uint8_t*)buf.contents;
+        LOGI("projection image centre: BGRA %u %u %u %u", p[0], p[1], p[2], p[3]);
+    }];
 }
 
 simd_float4x4 mvp_for_quad(cp_drawable_t d, size_t view, simd_float4x4 origin_from_device,
@@ -659,7 +708,12 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance, const XrSessionCreate
     if (!g.layer || vos::angle::display() == EGL_NO_DISPLAY) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
     if (!metal_init() || !arkit_init()) return XR_ERROR_INITIALIZATION_FAILED;
     LOGI("waiting for the immersive space");
-    cp_layer_renderer_wait_until_running(g.layer);
+    // Polled rather than waited on, so that a space the system never shows says so.
+    for (int i = 0; cp_layer_renderer_get_state(g.layer) != cp_layer_renderer_state_running; i++) {
+        if (cp_layer_renderer_get_state(g.layer) == cp_layer_renderer_state_invalidated) return XR_ERROR_SESSION_LOST;
+        if (i % 40 == 39) LOGI("the immersive space is not running yet (layer state %d)", (int)cp_layer_renderer_get_state(g.layer));
+        usleep(50000);
+    }
     for (int tries = 0; tries < 600 && g.view_w == 0; tries++) {
         if (!next_frame()) {
             if (!g.alive) return XR_ERROR_SESSION_LOST;
@@ -876,6 +930,17 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* fe) {
         return img;
     };
 
+    // The first stereo frames, and a few seconds in: past any fade.
+    const int proj_n = proj ? ++g.proj_frames : 0;
+    if ((proj_n == 1 || proj_n == 90 || proj_n == 450) && proj->viewCount >= 1) {
+        const XrSwapchainSubImage& si = proj->views[0].subImage;
+        if (si.swapchain && si.swapchain->released >= 0) {
+            LOGI("projection layer: %dx%d images, rect %dx%d", si.swapchain->w, si.swapchain->h,
+                 si.imageRect.extent.width, si.imageRect.extent.height);
+            probe_pixel(cb, si.swapchain->images[si.swapchain->released]->mtl);
+        }
+    }
+
     for (cp_drawable_t d : g.drawables) {
         cp_drawable_set_device_anchor(d, anchor);
         const size_t nviews = cp_drawable_get_view_count(d);
@@ -891,7 +956,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* fe) {
             rp.depthAttachment.texture = cp_drawable_get_depth_texture(d, ti);
             rp.depthAttachment.slice = cp_view_texture_map_get_slice_index(map);
             rp.depthAttachment.loadAction = MTLLoadActionClear;
-            rp.depthAttachment.clearDepth = 0.0;
+            // Black, far away, where nothing is drawn: see far_depth.
+            rp.depthAttachment.clearDepth = far_depth(d, v);
             rp.depthAttachment.storeAction = MTLStoreActionStore;
             id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
             [enc setViewport:cp_view_texture_map_get_viewport(map)];
@@ -899,16 +965,18 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* fe) {
             [enc setFragmentSamplerState:g.sampler atIndex:0];
             [enc setCullMode:MTLCullModeNone];
 
-            // The projection layer's image for this eye, across the whole view, at
-            // infinity: its depth is unknown, so the compositor reprojects it for rotation.
+            // The projection layer's image for this eye, across the whole view, far away:
+            // its depth is unknown, so the compositor reprojects it for rotation only.
             if (proj && v < proj->viewCount) {
                 if (XrSwapchain_T::Image* img = image_of(proj->views[v].subImage.swapchain)) {
                     simd_float4x4 full = matrix_identity_float4x4;
                     full.columns[0].x = 2.0f;
                     full.columns[1].y = 2.0f;
                     full.columns[2].z = 0.0f;
+                    full.columns[3].z = far_depth(d, v);
+                    const DrawU u = draw_u(full, proj->views[v].subImage);
                     [enc setDepthStencilState:g.depth_always];
-                    [enc setVertexBytes:&full length:sizeof(full) atIndex:0];
+                    [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                     [enc setFragmentTexture:img->srgb atIndex:0];
                     [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 }
@@ -920,9 +988,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* fe) {
                     continue;
                 XrSwapchain_T::Image* img = image_of(q->subImage.swapchain);
                 if (!img) continue;
-                const simd_float4x4 mvp = mvp_for_quad(d, v, origin_from_device, *q);
+                const DrawU u = draw_u(mvp_for_quad(d, v, origin_from_device, *q), q->subImage);
                 [enc setDepthStencilState:g.depth_greater];
-                [enc setVertexBytes:&mvp length:sizeof(mvp) atIndex:0];
+                [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentTexture:img->srgb atIndex:0];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             }

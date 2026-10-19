@@ -141,6 +141,26 @@ const char* gcn_vos_find_image(void) {
     return found.c_str();
 }
 
+const char* gcn_vos_check_image(void) {
+    static std::string why;
+    const std::string path = gcn_vos_find_image();
+    if (path.empty()) return why = "There is no disc image (.iso or .ciso) in the app.", why.c_str();
+    FILE* f = fopen(path.c_str(), "rb");
+    // A CISO keeps its first stored block, where the disc header is, right after its own
+    // 0x8000-byte header.
+    char id[6] = {};
+    char magic[4] = {};
+    bool ok = f && fread(magic, 1, 4, f) == 4;
+    if (ok) ok = fseek(f, memcmp(magic, "CISO", 4) == 0 ? 0x8000 : 0, SEEK_SET) == 0 && fread(id, 1, 6, f) == 6;
+    if (f) fclose(f);
+    if (!ok) return why = "The disc image cannot be read.", why.c_str();
+    if (memcmp(id, GCN_DISC_ID, 6) != 0)
+        return why = std::string("That is not the right disc: this app plays ") + GCN_DISC_ID + ", and the image is " +
+                     std::string(id, 6) + ".",
+               why.c_str();
+    return why = "", why.c_str();
+}
+
 // The game runs once per process, as on the Quest: the recompiled executable has no
 // shutdown path. Leaving the immersive space ends the app, and the next launch is a clean
 // console. A console reset (the game over screen does one) ends it too: visionOS gives an
@@ -184,6 +204,7 @@ void gcn_vos_run(void* layer_renderer) {
     static const std::string shader_cache = dir + "/shaders.bin";
     gx::render_set_shader_cache(shader_cache.c_str());
     gx::render_set_shader_cache_deferred(true);
+    gx::render_set_async_shaders(true);
     gx::render_init(cfg.start_in_stereo ? cfg.stereo_scale : cfg.theater_scale);
     int pw, ph;
     xrf::panel_size(&pw, &ph);

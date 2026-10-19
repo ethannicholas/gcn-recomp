@@ -90,6 +90,14 @@ struct EyeView {
 void set_eye_views(const EyeView* views);  // two views, left then right; null: not in stereo
 bool eye_views(EyeView out[2]);
 
+// Whether the viewer plays with a gamepad rather than tracked controllers: the visionOS
+// frontend's answer when no spatial controller is in hand, never the Quest's. A game that
+// turns its camera, aims or scans after the head should then play straight, as on a
+// television -- the head only looks around -- though it still culls to the eyes. Readable
+// from any thread; the guest's reads are logged and replayed, like the poses.
+void set_gamepad_play(bool on);
+bool gamepad_play();
+
 // The defaults with the game's adjustments applied, then `dir`/vr.txt over them.
 VrConfig load_config(const std::string& dir);
 }  // namespace vr

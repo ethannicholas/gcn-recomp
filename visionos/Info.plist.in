@@ -31,10 +31,20 @@
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<true/>
+		<!-- Straight into the game: the launcher window opens only when there is no disc. A
+		     CompositorLayer space has Compositor Services' role, not UIKit's immersive one. -->
 		<key>UIApplicationPreferredDefaultSceneSessionRole</key>
-		<string>UIWindowSceneSessionRoleApplication</string>
+		<string>CPSceneSessionRoleImmersiveSpaceApplication</string>
 		<key>UISceneConfigurations</key>
-		<dict/>
+		<dict>
+			<key>CPSceneSessionRoleImmersiveSpaceApplication</key>
+			<array>
+				<dict>
+					<key>UISceneInitialImmersionStyle</key>
+					<string>UIImmersionStyleFull</string>
+				</dict>
+			</array>
+		</dict>
 	</dict>
 	<!-- Gamepads, and spatial controllers (PS VR2 Sense) with their tracking. -->
 	<key>GCSupportsControllerUserInteraction</key>

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <mutex>
 
 // Messages go to stderr: the headset app pipes it into logcat, and the headless harness
@@ -118,6 +119,16 @@ bool hand_pose(Hand h, HandPose* out) {
         memcpy(out->rot, v + 3, sizeof(out->rot));
     }
     return valid;
+}
+
+static std::atomic<bool> g_gamepad_play{false};
+
+void set_gamepad_play(bool on) { g_gamepad_play = on; }
+
+bool gamepad_play() {
+    bool on = g_gamepad_play;
+    if (cpu_current()) input_pose("gamepad", &on, nullptr, 0);
+    return on;
 }
 
 static EyeView g_eyes[2];

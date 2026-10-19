@@ -50,6 +50,10 @@ ShaderKey make_shader_key(const PixelState& st);
 // Clears what gen_pixel_shader does not read, so that keys generating the same source are
 // equal. make_shader_key's keys already are; a key read from an older cache file is not.
 void canonicalize_shader_key(ShaderKey& k);
+// The konstant each of the 16 stages reads (u_kstage), from its selectors (bp[0xF6..0xFD])
+// and the konstant registers as the shader takes them (u_konst's layout: four registers,
+// r g b a each).
+void stage_konsts(const uint32_t* bp, const int konst[16], int out[64]);
 // Whether the GL has dual-source blending (core in desktop 3.3, GL_EXT_blend_func_extended on
 // ES); set by render_init before any shader is made.
 extern bool g_dual_source;

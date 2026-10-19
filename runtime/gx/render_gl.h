@@ -25,6 +25,14 @@ void render_init(int internal_scale);
 void render_set_shader_cache_deferred(bool on);
 bool render_shader_cache_step(double budget_ms, int* done, int* total);
 
+// Programs the cache does not hold built in the background, where the GL can
+// (KHR_parallel_shader_compile), rather than in the frame that first needs one: a draw
+// whose program is not built yet is left out of the frame, and drawn once it is. Through
+// ANGLE on Metal a program takes about 90 ms to build, so on a headset each new one was a
+// visible freeze; this trades it for something appearing a few frames late, the first
+// time it is seen. Set before render_init; GCN_ASYNC_SHADERS=0 or 1 overrides it.
+void render_set_async_shaders(bool on);
+
 // Re-scale the EFB between frames. Call only when a whole frame is about to be drawn:
 // it discards the EFB's contents and every texture an EFB copy has produced.
 void render_set_internal_scale(int scale);
@@ -146,6 +154,13 @@ void render_set_frame_hook(FrameHook hook);
 // CPU-side transform and any render-to-texture results, so only uniforms and draw
 // calls are repeated. Pass do_copies for the first eye only.
 bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies);
+
+// For a frontend that times its frames: called after each frame's rendering with how long
+// it took. A frame of more than 50 ms is logged with what in it is known to stall -- the
+// programs compiled for it, and the draws that were the first of a program with a blend
+// state, where a GL over Metal (ANGLE) builds a pipeline -- and either way the counts start
+// again.
+void render_report_frame(const char* what, double ms);
 
 // The flat frame as a stereo pair for a theater panel, like a 3D film: the batch drawn
 // twice, into `fbo_l` then `fbo_r`, with every perspective draw seen from half `eye_sep`

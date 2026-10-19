@@ -1724,6 +1724,7 @@ void run() {
                 // eyes were acquired.
                 if (both_eyes) have_proj = true;
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_eyes).count();
+                gx::render_report_frame("stereo", ms);
                 eyes_sum += ms;
                 eyes_max = std::max(eyes_max, ms);
                 eyes_n++;
@@ -1755,6 +1756,7 @@ void run() {
                     // Consume at most one game frame per display frame; otherwise a
                     // backlog would be drawn and thrown away.
                     bool drew;
+                    const auto t_panel = std::chrono::steady_clock::now();
                     if (have_r) {
                         // The pair is separated by the viewer's own eyes, as the runtime
                         // places them for this frame; a headset that will not say gets a
@@ -1784,6 +1786,9 @@ void run() {
                         drew = gx::render_execute(*batch);
                         gx::render_set_output_fbo(0);
                     }
+                    gx::render_report_frame(
+                        "theater",
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_panel).count());
                     if (drew && wants_view_mirror()) keep_panel(g_xr.fbos[idx]);
                     else if (drew && g_xr.plat.mirror) g_xr.plat.mirror(g_xr.fbos[idx], g_swap_w, g_swap_h);
                     // `log_frames 1` in vr.txt traces the theater path one display frame

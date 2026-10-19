@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
 
 bool write_png(const char* path, const uint8_t* rgba, int w, int h);
 
@@ -69,6 +70,7 @@ struct UniformShadow {
     uint32_t psize_reg;        // bp[0x22]
     uint32_t point_tex;        // point_tex_key(): what u_points and u_point_off were sent for
     uint32_t tev_reg[4][2], tev_konst[4][2];
+    uint32_t ksel[8];          // bp[0xF6..0xFD]
     uint32_t aref;             // bp[0xF3]
     uint32_t ind[9];           // bp[0x06..0x0E]
     uint32_t indcs[2];         // bp[0x25..0x26]
@@ -81,8 +83,8 @@ struct UniformShadow {
 
 struct Program {
     GLuint prog;
-    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_konst, u_texsize, u_indmtx, u_indscale,
-        u_alpharef, u_fog, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
+    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_indmtx, u_indscale,
+        u_alpharef, u_fog, u_fogmode, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
     GLint u_points, u_point_off;
     mutable UniformShadow shadow;
@@ -268,13 +270,44 @@ static void bind_vertex_format(uint32_t ntex) {
 // instead would not do.
 static bool g_base_vertex = true;
 
+// What stalled a frame, for render_report_frame: programs compiled, and draws that were the
+// first of their program and blend state (g_seen_states), timed.
+static struct {
+    int compiled = 0, new_states = 0, waited = 0;
+    double compile_ms = 0.0, new_state_ms = 0.0;
+} g_stall;
+static std::unordered_set<uint64_t> g_seen_states;
+static bool g_state_new;  // the state applied for the next draw has not been drawn with
+// The state applied for the next draw has a program still being built in the background
+// (render_set_async_shaders), so the draw is left out.
+static bool g_draw_skip;
+
 // One draw command, from the packed region its texture coordinate count selects.
 static void draw_cmd(const Batch& b, const Cmd& c) {
     static const GLenum mode[3] = {GL_TRIANGLES, GL_LINES, GL_POINTS};
+    if (g_draw_skip) {
+        g_stall.waited++;
+        return;
+    }
     bind_vertex_format(draw_ntex(b.states[c.state]));
     const void* first = (const void*)(uintptr_t)(c.first * sizeof(uint32_t));
+    const bool timed = g_state_new;
+    const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (g_base_vertex) glDrawElementsBaseVertex(mode[c.prim], c.count, GL_UNSIGNED_INT, first, c.base_vertex);
     else glDrawElements(mode[c.prim], c.count, GL_UNSIGNED_INT, first);
+    if (timed) {
+        g_state_new = false;
+        g_stall.new_states++;
+        g_stall.new_state_ms += ms_since(t0);
+    }
+}
+
+void render_report_frame(const char* what, double ms) {
+    if (ms > 50.0)
+        fprintf(stderr, "[stall] %s frame: %.0f ms; %d programs compiled (%.0f ms), %d new program/blend states drawn (%.0f ms), "
+                "%d draws left out awaiting a program\n",
+                what, ms, g_stall.compiled, g_stall.compile_ms, g_stall.new_states, g_stall.new_state_ms, g_stall.waited);
+    g_stall = {};
 }
 
 // The batch's indices into the bound element buffer, each draw's base vertex added in
@@ -437,6 +470,45 @@ static void shader_cache_write_header(FILE* f) {
     fwrite(&drv, sizeof(drv), 1, f);
 }
 
+// Starts compiling and linking a program from source. Nothing here waits for the result:
+// with parallel compilation (g_parallel_compile) the GL builds it in the background, and
+// finish_program, or any query of the program, waits for it.
+static GLuint start_program(const std::string& src, GLuint* fs_out) {
+    if (getenv("GCN_DUMP_SHADERS")) fprintf(stderr, "---- shader %zu ----\n%s\n", g_programs.size(), src.c_str());
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* text = src.c_str();
+    glShaderSource(fs, 1, &text, nullptr);
+    glCompileShader(fs);
+    GLuint p = glCreateProgram();
+    glAttachShader(p, g_vs);
+    glAttachShader(p, fs);
+    glBindAttribLocation(p, 0, "a_pos");
+#if GCN_HAVE_PROGRAM_BINARY
+    if (g_binaries_supported) glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+#endif
+    glLinkProgram(p);
+    *fs_out = fs;
+    return p;
+}
+
+// The link's outcome, which a program that fails to build makes fatal.
+static void finish_program(GLuint p, GLuint fs, const std::string& src) {
+    GLint ok;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            glGetShaderInfoLog(fs, sizeof(log), nullptr, log);
+            fprintf(stderr, "%s\n", src.c_str());
+            fatal("shader compile failed: %s", log);
+        }
+        glGetProgramInfoLog(p, sizeof(log), nullptr, log);
+        fatal("program link failed: %s", log);
+    }
+    glDeleteShader(fs);
+}
+
 // Compiles a program from source, or restores it from a binary when one is given and
 // the driver accepts it. Returns 0 if the binary was refused.
 static GLuint build_program(const ShaderKey& k, const std::string& src, const uint8_t* bin, uint32_t fmt, uint32_t len) {
@@ -453,24 +525,9 @@ static GLuint build_program(const ShaderKey& k, const std::string& src, const ui
 #else
     (void)bin; (void)fmt; (void)len;
 #endif
-    if (getenv("GCN_DUMP_SHADERS")) fprintf(stderr, "---- shader %zu ----\n%s\n", g_programs.size(), src.c_str());
-    GLuint fs = compile(GL_FRAGMENT_SHADER, src);
-    GLuint p = glCreateProgram();
-    glAttachShader(p, g_vs);
-    glAttachShader(p, fs);
-    glBindAttribLocation(p, 0, "a_pos");
-#if GCN_HAVE_PROGRAM_BINARY
-    if (g_binaries_supported) glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
-#endif
-    glLinkProgram(p);
-    GLint ok;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        glGetProgramInfoLog(p, sizeof(log), nullptr, log);
-        fatal("program link failed: %s", log);
-    }
-    glDeleteShader(fs);
+    GLuint fs;
+    GLuint p = start_program(src, &fs);
+    finish_program(p, fs, src);
     (void)k;
     return p;
 }
@@ -491,12 +548,13 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_screen_ripple = glGetUniformLocation(p, "u_screen_ripple");
     pr.u_tex = glGetUniformLocation(p, "u_tex");
     pr.u_reg = glGetUniformLocation(p, "u_reg");
-    pr.u_konst = glGetUniformLocation(p, "u_konst");
+    pr.u_kstage = glGetUniformLocation(p, "u_kstage");
     pr.u_texsize = glGetUniformLocation(p, "u_texsize");
     pr.u_indmtx = glGetUniformLocation(p, "u_indmtx");
     pr.u_indscale = glGetUniformLocation(p, "u_indscale");
     pr.u_alpharef = glGetUniformLocation(p, "u_alpharef");
     pr.u_fog = glGetUniformLocation(p, "u_fog");
+    pr.u_fogmode = glGetUniformLocation(p, "u_fogmode");
     pr.u_fogcolor = glGetUniformLocation(p, "u_fogcolor");
     pr.u_indcoordscale = glGetUniformLocation(p, "u_indcoordscale");
     pr.u_texsnap = glGetUniformLocation(p, "u_texsnap");
@@ -623,6 +681,7 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
             if (g_programs.count(r.k)) {
                 L.stale = true;  // a duplicate: written by a crash mid-append, or see above
             } else {
+                const auto t_rec = std::chrono::steady_clock::now();
                 std::string src = gen_pixel_shader(r.k);
                 const bool bin_ok = L.same_driver && r.len && program_src_hash(src.c_str()) == r.src_hash;
                 GLuint prog = bin_ok ? build_program(r.k, src, r.bin, r.fmt, r.len) : 0;
@@ -634,10 +693,20 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
                     L.stale = true;
                 }
                 register_program(r.k, prog);
+                // A load that hangs or crawls says where.
+                const double rec_ms = ms_since(t_rec);
+                if (rec_ms > 100.0)
+                    fprintf(stderr, "[shaders] record %d of %d took %.0f ms (%s)\n", L.done, L.total, rec_ms,
+                            bin_ok ? "binary" : "compiled");
             }
             if (ms_since(t_step) >= budget_ms) break;
         }
         L.pos = (size_t)(p - L.data.data());
+        static auto t_progress = std::chrono::steady_clock::now();
+        if (p < end && ms_since(t_progress) > 2000.0) {
+            t_progress = std::chrono::steady_clock::now();
+            fprintf(stderr, "[shaders] %d of %d loaded, %.0f ms\n", L.done, L.total, ms_since(L.t0));
+        }
         if (p >= end) {
             // Anything that could not be used as stored is replaced: the whole file is
             // rewritten from the programs now in hand, with fresh binaries where the
@@ -669,26 +738,72 @@ static void shader_cache_load() {
     if (!g_cache_deferred) render_shader_cache_step(1e30, nullptr, nullptr);
 }
 
-static const Program& get_program(const ShaderKey& k) {
+// A newly built program goes into the cache file. Appended rather than rewritten, so a
+// crash later in the run keeps what was learned so far. A missing or truncated file gets
+// a header first.
+static void shader_cache_append(const ShaderKey& k, uint64_t src_hash, GLuint p) {
+    if (g_shader_cache_path.empty()) return;
+    FILE* f = fopen(g_shader_cache_path.c_str(), "ab");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    if (ftell(f) == 0) shader_cache_write_header(f);
+    shader_cache_write_record(f, k, src_hash, p);
+    fclose(f);
+}
+
+// Programs being built in the background, under render_set_async_shaders.
+struct PendingProgram {
+    GLuint prog, fs;
+    std::string src;
+    std::chrono::steady_clock::time_point t0;
+};
+static std::unordered_map<ShaderKey, PendingProgram, ShaderKeyHash> g_pending;
+static bool g_async_wanted;      // render_set_async_shaders
+static bool g_parallel_compile;  // the GL can build programs in the background
+#ifndef GL_COMPLETION_STATUS_KHR
+#define GL_COMPLETION_STATUS_KHR 0x91B1
+#endif
+
+void render_set_async_shaders(bool on) { g_async_wanted = on; }
+
+// The program for a key, built now if it has not been. With background builds, a program
+// not yet built is started and nullptr returned, as it is on each call until it is done.
+static const Program* get_program(const ShaderKey& k) {
     auto it = g_programs.find(k);
-    if (it != g_programs.end()) return it->second;
+    if (it != g_programs.end()) return &it->second;
     const auto t0 = std::chrono::steady_clock::now();
-    std::string src = gen_pixel_shader(k);
-    GLuint p = build_program(k, src, nullptr, 0, 0);
-    const Program& pr = register_program(k, p);
-    if (frametime_on()) fprintf(stderr, "[shaders] compiled program %zu in %.1f ms\n", g_programs.size(), ms_since(t0));
-    if (!g_shader_cache_path.empty()) {
-        // Appended rather than rewritten, so a crash later in the run keeps what was
-        // learned so far. A missing or truncated file gets a header first.
-        FILE* f = fopen(g_shader_cache_path.c_str(), "ab");
-        if (f) {
-            fseek(f, 0, SEEK_END);
-            if (ftell(f) == 0) shader_cache_write_header(f);
-            shader_cache_write_record(f, k, program_src_hash(src.c_str()), p);
-            fclose(f);
-        }
+    if (!g_parallel_compile) {
+        std::string src = gen_pixel_shader(k);
+        GLuint p = build_program(k, src, nullptr, 0, 0);
+        const Program& pr = register_program(k, p);
+        g_stall.compiled++;
+        g_stall.compile_ms += ms_since(t0);
+        if (frametime_on()) fprintf(stderr, "[shaders] compiled program %zu in %.1f ms\n", g_programs.size(), ms_since(t0));
+        shader_cache_append(k, program_src_hash(src.c_str()), p);
+        return &pr;
     }
-    return pr;
+    auto pit = g_pending.find(k);
+    if (pit == g_pending.end()) {
+        PendingProgram pp;
+        pp.src = gen_pixel_shader(k);
+        pp.prog = start_program(pp.src, &pp.fs);
+        pp.t0 = t0;
+        g_pending.emplace(k, std::move(pp));
+        g_stall.compiled++;
+        g_stall.compile_ms += ms_since(t0);
+        return nullptr;
+    }
+    PendingProgram& pp = pit->second;
+    GLint done = 0;
+    glGetProgramiv(pp.prog, GL_COMPLETION_STATUS_KHR, &done);
+    if (!done) return nullptr;
+    finish_program(pp.prog, pp.fs, pp.src);
+    const Program& pr = register_program(k, pp.prog);
+    if (frametime_on())
+        fprintf(stderr, "[shaders] built program %zu in the background in %.1f ms\n", g_programs.size(), ms_since(pp.t0));
+    shader_cache_append(k, program_src_hash(pp.src.c_str()), pp.prog);
+    g_pending.erase(pit);
+    return &pr;
 }
 
 // Without a version line: glsl_header_with_clip() goes in front. Clip distances 4 and 5
@@ -821,6 +936,23 @@ void render_init(int internal_scale) {
         g_binaries_supported = n > 0;
     }
 #endif
+    {
+        // GL_COMPLETION_STATUS_KHR is the same enum in the ARB extension. Neither says how
+        // many threads build programs; ANGLE uses as many as it likes unless told otherwise.
+        GLint n = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+        bool parallel = false;
+        for (GLint i = 0; i < n && !parallel; i++) {
+            const char* e = (const char*)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+            parallel = e && (!strcmp(e, "GL_KHR_parallel_shader_compile") || !strcmp(e, "GL_ARB_parallel_shader_compile"));
+        }
+        bool want = g_async_wanted;
+        if (const char* v = getenv("GCN_ASYNC_SHADERS")) want = atoi(v) != 0;
+        g_parallel_compile = want && parallel;
+        if (want)
+            fprintf(stderr, parallel ? "[shaders] built in the background; a draw waiting for its program is left out\n"
+                                     : "[shaders] no parallel shader compilation: a new program stalls the frame it is built in\n");
+    }
     shader_cache_load();
 
     glGenFramebuffers(1, &g_efb_fbo);
@@ -1481,7 +1613,12 @@ static void apply_state(const PixelState& st, int prim) {
     g_astat.applies++;
     // `same` means the previous application is still in GL and the program is unchanged.
     const bool same = g_applied.valid && key == g_applied.key;
-    const Program& pr = same ? *g_applied.pr : get_program(key);
+    const Program* ready = same ? g_applied.pr : get_program(key);
+    // Its program is still being built: the draw is left out, and nothing applied, so
+    // what GL holds is still what g_applied says.
+    g_draw_skip = !ready;
+    if (!ready) return;
+    const Program& pr = *ready;
     if (!same) {
         g_astat.program++;
         glUseProgram(pr.prog);
@@ -1806,7 +1943,7 @@ static void apply_state(const PixelState& st, int prim) {
 
     // TEV registers
     if (!(held && memcmp(st.tev_reg, u.tev_reg, sizeof(st.tev_reg)) == 0 &&
-          memcmp(st.tev_konst, u.tev_konst, sizeof(st.tev_konst)) == 0)) {
+          memcmp(st.tev_konst, u.tev_konst, sizeof(st.tev_konst)) == 0 && memcmp(bp + 0xF6, u.ksel, sizeof(u.ksel)) == 0)) {
         g_astat.tev++;
         GLint regs[16], kon[16];
         for (int r = 0; r < 4; r++) {
@@ -1818,9 +1955,12 @@ static void apply_state(const PixelState& st, int prim) {
             kon[r * 4 + 2] = kb & 0xFF; kon[r * 4 + 1] = (kb >> 12) & 0xFF;
         }
         glUniform4iv(pr.u_reg, 4, regs);
-        glUniform4iv(pr.u_konst, 4, kon);
+        GLint kstage[64];
+        stage_konsts(bp, kon, kstage);
+        glUniform4iv(pr.u_kstage, 16, kstage);
         memcpy(u.tev_reg, st.tev_reg, sizeof(st.tev_reg));
         memcpy(u.tev_konst, st.tev_konst, sizeof(st.tev_konst));
+        memcpy(u.ksel, bp + 0xF6, sizeof(u.ksel));
     }
     if (!(held && bp[0xF3] == u.aref)) {
         g_astat.aref++;
@@ -1863,6 +2003,11 @@ static void apply_state(const PixelState& st, int prim) {
         g_astat.fog++;
         float fog[4] = {fog_float(bp[0xEE]), fog_float(bp[0xF1]), (float)(bp[0xEF] & 0xFFFFFF), (float)(bp[0xF0] & 0x1F)};
         glUniform4fv(pr.u_fog, 1, fog);
+        // GXSetFog's type: fsel (bits 21-23) in the low three bits, and the projection bit
+        // (20, set for an orthographic one) on top. Until 2026-10-16 bits 20-23 were read as
+        // the type, the projection bit as its lowest: exponential fog (4) came out as none,
+        // linear (2) as exponential and exp2 (5) as an orthographic linear one.
+        glUniform1i(pr.u_fogmode, (int)(((bp[0xF1] >> 21) & 7) | (((bp[0xF1] >> 20) & 1) << 3)));
         float fogc[3] = {((bp[0xF2] >> 16) & 0xFF) / 255.0f, ((bp[0xF2] >> 8) & 0xFF) / 255.0f, (bp[0xF2] & 0xFF) / 255.0f};
         glUniform3fv(pr.u_fogcolor, 1, fogc);
         memcpy(u.fog, bp + 0xEE, sizeof(u.fog));
@@ -2066,6 +2211,11 @@ static void apply_state(const PixelState& st, int prim) {
         bool has_alpha = (bp[0x43] & 7) == 1;
         GLboolean cw = (bm >> 3) & 1, aw = ((bm >> 4) & 1) && has_alpha;
         glColorMask(cw, cw, cw, aw);
+    }
+    if (!same || !same_blend) {
+        const uint64_t state = (uint64_t)pr.prog << 32 ^ bp[0x41] ^ (uint64_t)(bp[0x43] & 7) << 16 ^
+                               (uint64_t)dst_alpha_mode(bp) << 20;
+        if (g_seen_states.insert(state).second) g_state_new = true;
     }
     // Depth. In an eye the HUD is a quad out in the world rather than something laid over
     // the finished image, so the game's depth state no longer places it: the scene it is

@@ -130,10 +130,10 @@ thousand of them at 15-40 ms each on a Quest 3, while the file grew to 60 MB tha
 read. If the startup line is missing, look for that message.
 
 **Keys are canonical** (`canonicalize_shader_key`): everything `gen_pixel_shader` does not
-read is cleared before a key is used -- the konstant selectors and order of stages past the
-last, swap tables no stage refers to, an indirect command's matrix and format where no
-indirect stage stands behind it, the projection bit of no fog, the comparisons of an alpha
-test that always passes. The registers keep whatever a game last wrote to those parts, and
+read is cleared before a key is used -- the order of stages past the last, swap tables no
+stage refers to, an indirect command's matrix and format where no indirect stage stands
+behind it, the comparisons of an alpha test that always passes (always AND always, always
+OR anything, and the rest). The registers keep whatever a game last wrote to those parts, and
 keyed raw a game that sets up only the stages it uses gets a program per leftover: one
 cache had 23,673 programs for 2,193 distinct keys (2,108 distinct sources), took 47 s to
 restore from binaries on a Quest 3 and held 133 MB. Keys read from an older file are made
@@ -144,6 +144,23 @@ generator starts reading a new field -- clear nothing it reads. A check over a c
 (generate each key raw and canonical, compare) is how it was established; the step that
 also lowered `num_texgens` to the coordinates used was dropped because it changed dead
 declarations in the source.
+
+**Some state is a uniform rather than a key**, because a game changes it with the scene and
+each change otherwise built every program on screen again, with nothing drawn differently:
+
+- *Fog*, all of it -- whether there is any, its function and its projection (`u_fogmode`).
+  Every program carries the fog code behind a branch on it. Keyed, a room whose fog came
+  and went, or changed from linear to exponential, rebuilt each program in view.
+- *The konstant each stage reads* (`u_kstage`, from `stage_konsts`), rather than its
+  selector. A game sets the selectors per material and leaves a stage's as it was when
+  the stage reads no konstant, and one object's program came in five variants that drew
+  alike.
+
+Over two sessions on a headset these took 494 programs built to 160. Fog in every program
+moved some polygon-edge pixels by a few levels on macOS's GL against the build before, in
+scenes with no fog at all: painting the fogged pixels a solid colour instead left the
+frames identical, so it is the fog depth becoming an input every program reads, not the
+fog being drawn.
 
 So many resident programs also slowed every texture the driver allocated. Texture uploads
 on ES now go through immutable storage (`glTexStorage2D`) and one pixel unpack buffer per
@@ -610,6 +627,24 @@ pointer to it. The guest's draw-done
 waits for the front end, so the CPU then finds the bytes there. Each one is a round trip
 through the transform and the renderer, which is why it is opt-in and per copy.
 
+## Programs built in the background
+
+Where the GL can build programs in parallel (`KHR_parallel_shader_compile`) and the
+frontend asks for it (`render_set_async_shaders`; `GCN_ASYNC_SHADERS=0|1` overrides), a key
+the cache does not hold is compiled and linked without waiting: `get_program` returns
+nothing until `GL_COMPLETION_STATUS_KHR` says the program is done, and a draw that needs
+it is left out of the frame (`g_draw_skip`). Something new on screen then appears a few
+frames late instead of the frame stopping for the build. Only the headset frontends ask:
+replays and benchmarks keep every draw.
+
+ANGLE already built programs on worker threads. What stalled was asking for the result:
+the renderer read `GL_LINK_STATUS` straight after `glLinkProgram`, and any query of a
+program waits for its build. ANGLE's default thread count is unlimited, so nothing has to
+be set. A link failure is still fatal, found when the program completes.
+
+The `[stall]` line (`render_report_frame`) counts the programs started in a frame of more
+than 50 ms, the first draws of a program and blend state, and the draws left out.
+
 ## Fog's type
 
 BP 0xF1 holds the fog's C in its low 20 bits, then the projection bit (20: set for an
@@ -619,7 +654,8 @@ into that type. Until 2026-10-16 it took bits 20-23 as the type, so the projecti
 landed as the function's lowest bit and the function was read one bit up: exponential fog
 (4) came out as no fog at all, linear (2) as exponential and exp2 (5) as an orthographic
 linear one. A game that fogs a room with linear fog was drawn too dense, and one whose fog
-is exponential (water, say) was clear. `GCN_DRAWLOG_VERBOSE` prints each fogged draw's
+is exponential (water, say) was clear. The type is now a uniform (`u_fogmode`), not part
+of the key. `GCN_DRAWLOG_VERBOSE` prints each fogged draw's
 type, registers, colour and, for a perspective fog, the start and end distances they make.
 
 ## Constant destination alpha

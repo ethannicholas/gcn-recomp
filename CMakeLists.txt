@@ -536,7 +536,7 @@ function(gcn_add_game)
     set(GCN_APPLE_TEAM "" CACHE STRING "The Apple development team that signs the visionOS app")
     set(VOS_SOURCES ${CORE_SOURCES} ${RT}/audio.cpp ${RT}/gx/render_gl.cpp ${RT}/gx/shadergen.cpp
       ${RT}/gx/gl_load.cpp ${RT}/png.cpp ${GLAD_SOURCE} ${GCN_RECOMP_DIR}/openxr/xr_frontend.cpp
-      ${VOS_DIR}/xr_runtime.mm ${VOS_DIR}/angle.mm ${VOS_DIR}/visionos_main.mm ${VOS_DIR}/audio_coreaudio.cpp
+      ${VOS_DIR}/xr_runtime.mm ${VOS_DIR}/angle.mm ${VOS_DIR}/visionos_main.mm ${VOS_DIR}/audio_coreaudio.mm
       ${VOS_DIR}/App.swift
       ${G_SOURCES})
     list(REMOVE_ITEM VOS_SOURCES ${RT}/audio_stub.cpp)
@@ -546,7 +546,7 @@ function(gcn_add_game)
       ${GLAD_INCLUDE_DIR} ${GCN_OPENXR_INCLUDE} ${GCN_ANGLE_DIR}/include)
     target_link_libraries(${G_NAME} PRIVATE game_recomp
       "-framework CompositorServices" "-framework ARKit" "-framework Metal" "-framework GameController"
-      "-framework AudioToolbox" "-framework Foundation")
+      "-framework AudioToolbox" "-framework AVFAudio" "-framework Foundation")
     # On the C family's sources only: the Xcode generator does not split a target's
     # definitions by language, and Swift takes no valued ones.
     set(VOS_DEFS ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
