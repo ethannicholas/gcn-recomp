@@ -7,7 +7,8 @@
 
 // ---- virtual memory ----
 // Reserve `size` bytes of address space without committing it. Returns nullptr on failure.
-void* plat_reserve(size_t size);
+// With `at`, there and nowhere else (POSIX only; elsewhere `at` is ignored).
+void* plat_reserve(size_t size, void* at = nullptr);
 // Make [base, base+size) readable and writable within an existing reservation.
 bool plat_commit(void* base, size_t size);
 

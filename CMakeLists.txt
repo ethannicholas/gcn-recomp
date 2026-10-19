@@ -296,6 +296,12 @@ function(gcn_add_game)
     if(GCN_TRACE_CALLS)
       target_compile_definitions(game_recomp PUBLIC GCN_TRACE_CALLS)
     endif()
+    # Guest memory at a fixed address, so the generated code adds a constant rather than
+    # loading a pointer at every access: see GCN_MEM in runtime/recomp.h. Android only so
+    # far, where a 64-bit process's address space has room low down.
+    if(ANDROID)
+      target_compile_definitions(game_recomp PUBLIC GCN_MEM_BASE=0x2000000000ull)
+    endif()
     if(MSVC)
       # Generated code is enormous and machine-written: keep the optimizer honest about
       # aliasing and floating point, and silence the noise it legitimately produces.

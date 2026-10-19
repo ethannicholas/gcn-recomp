@@ -72,8 +72,43 @@ the front end inline on the guest thread again, `GCN_XF_SYNC=1` the transform; t
 diagnostics that read transformed vertices early select the latter themselves.
 
 Stores to the write-gather pipe's address are appended to its line buffer inline in the
-generated code (`gp_store32` in `recomp.h`) rather than through the MMIO decode; a game's
-CPU skinning stores every vertex that way.
+generated code (`gp_store32`, `gp_store16` and `gp_store8` in `recomp.h`) rather than
+through the MMIO decode; a game's CPU skinning stores every vertex that way, and a
+particle system every draw's opcode, count and indices.
+
+Each 32-byte line then goes through `gp_flush32`, which is per line rather than per
+command because when the guest sees a sync (a token, a draw-done, the CP's pointers and
+interrupts) has to stay exactly where it was. A scene of rain and fire measured 30,000
+lines a frame, nearly half of them into the game's own buffers with the pipe redirected. So
+the per-line path is kept short where that is exact by construction:
+
+- **A command still arriving is not parsed again.** `skim` reports the whole length of a
+  command it stopped short of, and `cp_feed` appends lines to it without calling the parser
+  until that many bytes are there (`g_pending_need`). About two thirds of the lines that land on
+  a partial command in that scene were skipped this way.
+- **A redirected pipe skips the drain.** While the CPU is unlinked from the GP's FIFO, the
+  CP's write pointer cannot move, so after a drain that read everything (`g_cp_settled`,
+  cleared by any CP register write) another drain would find nothing and rewrite every
+  register with what it already holds.
+
+The tempting larger step, draining every N lines instead of every line, is not exact: a
+sync in the stream raises its interrupt at the line that carries it, and the guest takes
+it at its next backward branch, so a drain made later delivers it later. Earlier attempts
+to drain at other points broke games' frame protocols outright (see `gp_flush_partial`).
+
+On the front end, `decode_vertex` used to copy each vertex's normal into the "last normal"
+the transform unit keeps for vertices without one. The reader had just stored those floats
+one at a time, and the wider load that copied them could not be forwarded from those
+stores, so the core waited for them to land: a tenth of the front end's time in that
+scene. The copy is now made once at the end of each draw (`g_last_nrm`), which is the same
+thing, since a draw's layout either carries normals or does not.
+
+**Guest memory at a fixed address.** On Android the 1 GB guest reservation is mapped at
+`GCN_MEM_BASE` (0x2000000000), and the generated code adds that constant rather than
+loading `g_mem`: compiled without strict aliasing, it had to reload the pointer after every
+store. That made 6% of the guest thread's time in a heavy room and under 1% in a
+particle-bound cutscene. `mem_init` stops with a message if the address is taken. Other
+platforms keep the variable.
 
 ## Shader cache
 

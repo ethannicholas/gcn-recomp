@@ -22,7 +22,7 @@
 #include <io.h>
 #include <process.h>
 
-void* plat_reserve(size_t size) {
+void* plat_reserve(size_t size, void*) {
     return VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
 }
 
@@ -208,9 +208,18 @@ bool plat_read_at(PlatFile* f, uint64_t offset, void* dst, uint32_t len) {
 #include <execinfo.h>
 #endif
 
-void* plat_reserve(size_t size) {
-    void* p = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
-    return p == MAP_FAILED ? nullptr : p;
+void* plat_reserve(size_t size, void* at) {
+    int flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+#ifdef MAP_FIXED_NOREPLACE
+    if (at) flags |= MAP_FIXED_NOREPLACE;
+#endif
+    void* p = mmap(at, size, PROT_NONE, flags, -1, 0);
+    if (p == MAP_FAILED) return nullptr;
+    if (at && p != at) {   // a kernel without MAP_FIXED_NOREPLACE takes the address as a hint
+        munmap(p, size);
+        return nullptr;
+    }
+    return p;
 }
 
 bool plat_commit(void* base, size_t size) {

@@ -125,8 +125,18 @@ static inline uint32_t guest_off_w(uint32_t a) {
     if (GCN_UNLIKELY(a - GCN_VM_LO < 0x80000000u - GCN_VM_LO)) return vm_translate(a, 1);
     return a & 0x3FFFFFFFu;
 }
-#define HOST(a) (g_mem + guest_off((uint32_t)(a)))
-#define HOST_W(a) (g_mem + guest_off_w((uint32_t)(a)))
+/* Where guest memory is. Every guest load and store adds this to an offset, and as a
+   variable it was loaded again for each of them: the generated code is compiled without
+   strict aliasing, so any store might, for all the compiler knows, have changed g_mem.
+   A platform that can map the reservation at a fixed address defines GCN_MEM_BASE, and
+   the generated code then adds a constant instead (mem_init puts it there or stops). */
+#ifdef GCN_MEM_BASE
+#define GCN_MEM ((uint8_t*)(uintptr_t)GCN_MEM_BASE)
+#else
+#define GCN_MEM g_mem
+#endif
+#define HOST(a) (GCN_MEM + guest_off((uint32_t)(a)))
+#define HOST_W(a) (GCN_MEM + guest_off_w((uint32_t)(a)))
 #define IS_MMIO(a) ((uint32_t)((a) - 0xC8000000u) < 0x08000000u)
 
 uint32_t mmio_read32(uint32_t a);
@@ -162,8 +172,8 @@ static inline uint64_t LD64(uint32_t a) {
    through it, and taking each of those stores through mmio_write32's register decode was a
    measurable part of a frame.
    A 32-bit store to the pipe's own address appends to the line buffer here, and a full
-   line goes to gp_flush_line(), exactly as gp_write32 does it; other widths, mirrors of
-   the address and call-tracing builds (which probe each word) keep the general path. */
+   line goes to gp_flush_line(), exactly as gp_write32 does it; mirrors of the address and
+   call-tracing builds (which probe each word) keep the general path. */
 extern uint8_t g_gp_buf[64];
 extern uint32_t g_gp_len;
 void gp_flush_line(void);
@@ -181,17 +191,37 @@ static inline int gp_store32(uint32_t a, uint32_t v) {
 #endif
     return 0;
 }
+/* The same for the narrower stores a game makes into the pipe: a draw's opcode and count,
+   and its vertices' indices, which go in as bytes and halfwords. */
+static inline int gp_store16(uint32_t a, uint32_t v) {
+    if ((a & 0xFFFFF000u) == 0xCC008000u) {
+        g_gp_buf[g_gp_len] = (uint8_t)(v >> 8);
+        g_gp_buf[g_gp_len + 1] = (uint8_t)v;
+        g_gp_len += 2;
+        if (g_gp_len >= 32) gp_flush_line();
+        return 1;
+    }
+    return 0;
+}
+static inline int gp_store8(uint32_t a, uint32_t v) {
+    if ((a & 0xFFFFF000u) == 0xCC008000u) {
+        g_gp_buf[g_gp_len++] = (uint8_t)v;
+        if (g_gp_len >= 32) gp_flush_line();
+        return 1;
+    }
+    return 0;
+}
 
 static inline void ST32(uint32_t a, uint32_t v) {
     if (UNLIKELY(IS_MMIO(a))) { if (gp_store32(a, v)) return; mmio_write32(a, v); return; }
     v = GCN_BSWAP32(v); memcpy(HOST_W(a), &v, 4);
 }
 static inline void ST16(uint32_t a, uint32_t v) {
-    if (UNLIKELY(IS_MMIO(a))) { mmio_write16(a, (uint16_t)v); return; }
+    if (UNLIKELY(IS_MMIO(a))) { if (gp_store16(a, v)) return; mmio_write16(a, (uint16_t)v); return; }
     uint16_t h = GCN_BSWAP16((uint16_t)v); memcpy(HOST_W(a), &h, 2);
 }
 static inline void ST8(uint32_t a, uint32_t v) {
-    if (UNLIKELY(IS_MMIO(a))) { mmio_write8(a, (uint8_t)v); return; }
+    if (UNLIKELY(IS_MMIO(a))) { if (gp_store8(a, v)) return; mmio_write8(a, (uint8_t)v); return; }
     *HOST_W(a) = (uint8_t)v;
 }
 static inline void ST32BR(uint32_t a, uint32_t v) { ST32(a, GCN_BSWAP32(v)); }

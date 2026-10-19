@@ -110,7 +110,11 @@ void set_copy_writeback(CopyWritebackFilter filter);
 
 enum class SkimSync { Token, TokenInt, Finish, Frame };
 using SkimSyncFn = void (*)(SkimSync kind, uint32_t value, std::vector<uint8_t>& out);
-uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync);
+// With partial_ok, stops at a command that runs past `len` and returns where it starts;
+// `need`, when given, is then set to that command's whole length (0 while even its header
+// is short), so a caller can tell how much more must arrive before it is worth calling again.
+uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync,
+              uint32_t* need = nullptr);
 
 // Set when the front end runs on its own thread: process() then leaves the PE signals and
 // the frame count to the guest thread's skim, which raises them at the same guest

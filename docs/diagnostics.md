@@ -253,6 +253,15 @@ sets the pace. `GCN_SWITCHLOG=1` prints, per frame, how often the baton passed b
 guest's host threads and what the handoffs cost, which neither a profile nor the stall
 counters see.
 
+To measure a change against the app's conditions without the app, run the harness with
+`taskset 38` (the three cores a Quest 3 app gets) and an input log, unpaced, and sample
+each thread's `utime + stime` from `/proc/<pid>/task/*/stat` every couple of seconds. The
+difference across a stretch of frames is each thread's CPU per frame there. It is the
+steadier figure: between identical runs a stretch's frame rate moves by 1-2 fps, its
+guest milliseconds per frame by about 2%. Check that a speed change is exact by dumping
+frames of the stretch (`GCN_DUMP_RANGE`) from both builds and comparing the files: they
+must be byte-identical, and the replay must not report that it parted.
+
 A replay in the app runs at its recording's pace, not its own: the recorded catch-up jumps
 are made and the pacer sleeps whenever the build is faster than the one that recorded, so
 its frame rate is the recording's. It still gives each thread's work per frame. For the

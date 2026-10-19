@@ -31,6 +31,10 @@ uint8_t g_gp_buf[64];
 uint32_t g_gp_len;
 }
 static std::vector<uint8_t> g_pending;  // unconsumed partial command bytes
+// The whole length of g_pending's first command, once its header has arrived (else 0). A
+// game streaming a skinned model writes draws of hundreds of vertices a line at a time, and
+// each line had the parser look at the draw again only to find it still short.
+static uint32_t g_pending_need;
 
 // CP control: bit1 = breakpoint enable, bit5 = breakpoint interrupt enable (Dolphin UCPCtrlReg)
 enum { CP_CR_READ = 1, CP_CR_BPEN = 2, CP_CR_OVFINT = 4, CP_CR_UNFINT = 8, CP_CR_LINK = 16, CP_CR_BPINT = 32 };
@@ -396,9 +400,9 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
     }
 }
 
-static uint32_t cp_consume(const uint8_t* data, uint32_t len) {
+static uint32_t cp_consume(const uint8_t* data, uint32_t len, uint32_t* need) {
     if (!fe_threaded()) return gx::process(data, len, true);
-    const uint32_t used = gx::skim(data, len, true, g_skim_out, skim_sync);
+    const uint32_t used = gx::skim(data, len, true, g_skim_out, skim_sync, need);
     // Handed over in batches: this runs for every 32-byte line out of the gather pipe, and
     // a hand-off per line would cost more than the line. The syncs and the end of a frame
     // hand over whatever is gathered regardless. Small ones, though: a game that reads a
@@ -417,20 +421,26 @@ static void cp_feed(const uint8_t* data, uint32_t len) {
     static FILE* index = [] { const char* p = getenv("GCN_FEED_DUMP"); if (!p) return (FILE*)nullptr; std::string s = std::string(p) + ".idx"; return fopen(s.c_str(), "w"); }();
     static uint64_t fed;
     if (dump) { fwrite(data, 1, len, dump); fflush(dump); fprintf(index, "%llX %08X %u\n", (unsigned long long)fed, (uint32_t)(data - g_mem), len); fflush(index); fed += len; }
+    uint32_t need = 0;
     if (g_pending.empty()) {
-        uint32_t used = cp_consume(data, len);
-        if (used < len) g_pending.assign(data + used, data + len);
+        uint32_t used = cp_consume(data, len, &need);
+        if (used < len) {
+            g_pending.assign(data + used, data + len);
+            g_pending_need = need;
+        }
         return;
     }
     g_pending.insert(g_pending.end(), data, data + len);
-    uint32_t used = cp_consume(g_pending.data(), (uint32_t)g_pending.size());
-    g_pending.erase(g_pending.begin(), g_pending.begin() + used);
     static size_t warned = 1 << 16;
     if (g_pending.size() > warned) {
         warned *= 4;
         LOG(LOG_GX, "FIFO parser waiting on a %zu-byte partial command (first bytes %02X %02X %02X %02X)", g_pending.size(),
             g_pending[0], g_pending[1], g_pending[2], g_pending[3]);
     }
+    if (g_pending.size() < g_pending_need) return;
+    uint32_t used = cp_consume(g_pending.data(), (uint32_t)g_pending.size(), &need);
+    g_pending.erase(g_pending.begin(), g_pending.begin() + used);
+    g_pending_need = g_pending.empty() ? 0 : need;
 }
 
 // Consume everything between the CP read pointer and the CPU write pointer (the GP
@@ -493,8 +503,17 @@ static void cp_follow_pi() {
     if (g_cp_cr & CP_CR_LINK) g_cp_wptr = pi_fifo_wptr();
 }
 
+// Set by a drain that read everything up to the CP's write pointer, and cleared by any CP
+// register write. While it holds and the CPU is unlinked from the GP's FIFO, nothing a line
+// out of the gather pipe does can change the CP: its write pointer moves only while linked,
+// so a drain would find nothing to read and set every register and status bit to what it
+// already holds. A game that redirects the pipe into its own buffers -- CPU skinning, a
+// display list built on the fly -- writes thousands of lines a frame that way.
+static bool g_cp_settled;
+
 // True when it got as far as checking the watermarks.
 static bool cp_drain() {
+    g_cp_settled = false;
     if (!(g_cp_cr & CP_CR_READ)) return false;
     uint32_t base = g_cp_base & 0x03FFFFE0, end = cp_end_excl();
     uint32_t wptr = g_cp_wptr & 0x03FFFFE0;
@@ -526,6 +545,7 @@ static bool cp_drain() {
     g_cp_rptr = r;
     g_cp_rwdist = wptr >= r ? wptr - r : (end - r) + (wptr - base);
     cp_watermarks();
+    g_cp_settled = r == wptr;
     return true;
 }
 
@@ -546,8 +566,10 @@ static void gp_flush32() {
     } else {
         wptr = (wptr & 0x04000000) | addr;
     }
-    cp_follow_pi();
-    if (!cp_drain()) cp_watermarks();  // cp_drain returns early while the GP is stopped, and the writer is not
+    if (!g_cp_settled || (g_cp_cr & CP_CR_LINK)) {  // else nothing to do: see g_cp_settled
+        cp_follow_pi();
+        if (!cp_drain()) cp_watermarks();  // cp_drain returns early while the GP is stopped, and the writer is not
+    }
     if (g_gp_len > 32) memmove(g_gp_buf, g_gp_buf + 32, g_gp_len - 32);
     g_gp_len -= 32;
 }
@@ -675,6 +697,7 @@ uint16_t cp_read16(uint32_t off) {
 }
 
 void cp_write16(uint32_t off, uint16_t v) {
+    g_cp_settled = false;
     switch (off & 0xFF) {
     case 0x00: g_cp_sr = v; break;
     case 0x02:

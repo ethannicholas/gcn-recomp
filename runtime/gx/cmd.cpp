@@ -238,13 +238,14 @@ static void skim_bp(uint32_t w, std::vector<uint8_t>& out, SkimSyncFn sync) {
     }
 }
 
-uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync) {
+uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<uint8_t>& out, SkimSyncFn sync, uint32_t* need_out) {
     uint32_t pos = 0;
+    uint32_t need = 0;
     while (pos < len) {
         const uint8_t* p = data + pos;
         const uint32_t avail = len - pos;
         const uint8_t cmd = p[0];
-        uint32_t need;
+        need = 0;
         switch (cmd) {
         case 0x00: case 0x48: case 0x44: need = 1; break;
         case 0x08:
@@ -294,6 +295,7 @@ uint32_t skim(const uint8_t* data, uint32_t len, bool partial_ok, std::vector<ui
         continue;
     partial:
         // A display list's truncated last command is dropped, as process() drops it.
+        if (need_out) *need_out = need;
         return partial_ok ? pos : len;
     }
     return pos;

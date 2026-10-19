@@ -386,6 +386,17 @@ static const uint8_t* attr_ptr(const uint8_t*& p, uint32_t desc, int array, uint
 // so they belong to the per-draw plan rather than to the CP-derived Layout.
 static uint8_t g_defpnmtx, g_deftex[8];
 
+// The normal, binormal and tangent the transform unit keeps from the last vertex that
+// carried them, as Dolphin has it, for a vertex without them. They were left
+// uninitialised, and an emboss texgen offset its coordinate by whatever the memory held --
+// bright streaks of a bump-mapped hull's own texture crawling over it.
+// Saved at the end of each draw (draw_impl) rather than after every vertex: a draw's layout
+// either carries them, and none of its vertices reads these, or does not, and none writes
+// them. Copied per vertex, the copy read back floats the reader had just stored one at a
+// time, which a core cannot forward to a wider load; waiting for them to land was a tenth
+// of the front end's time in a scene of skinned models.
+static float g_last_nrm[3] = {0, 0, 1}, g_last_bin[3] = {0, 0, 0}, g_last_tan[3] = {0, 0, 0};
+
 static void decode_vertex(const Layout& L, const uint8_t*& p, InVertex& v) {
     v.pnmtx = L.pnmtx ? *p++ : g_defpnmtx;
     memcpy(v.texmtx, g_deftex, sizeof(v.texmtx));
@@ -399,12 +410,9 @@ static void decode_vertex(const Layout& L, const uint8_t*& p, InVertex& v) {
         L.pos_rd(q, v.pos, L.pos_scale);
     }
     // A vertex without a normal, or with a normal but no binormal and tangent, has the
-    // last ones loaded: the transform unit keeps them, as Dolphin has it. They were left
-    // uninitialised, and an emboss texgen offset its coordinate by whatever the memory
-    // held -- bright streaks of a bump-mapped hull's own texture crawling over it.
-    static float last_nrm[3] = {0, 0, 1}, last_bin[3] = {0, 0, 0}, last_tan[3] = {0, 0, 0};
-    if (!L.nrm_desc) memcpy(v.nrm, last_nrm, sizeof(last_nrm));
-    if (!L.nrm_desc || !L.nbt) { memcpy(v.bin, last_bin, sizeof(last_bin)); memcpy(v.tan, last_tan, sizeof(last_tan)); }
+    // last ones loaded: see g_last_nrm.
+    if (!L.nrm_desc) memcpy(v.nrm, g_last_nrm, sizeof(v.nrm));
+    if (!L.nrm_desc || !L.nbt) { memcpy(v.bin, g_last_bin, sizeof(v.bin)); memcpy(v.tan, g_last_tan, sizeof(v.tan)); }
     if (L.nrm_desc) {
         const uint32_t csz = L.nrm_csz;
         if (L.nbt && L.idx3 && L.nrm_desc != 1) {
@@ -421,8 +429,6 @@ static void decode_vertex(const Layout& L, const uint8_t*& p, InVertex& v) {
                 L.nrm_rd(q + 6 * csz, v.tan, L.nrm_scale);
             }
         }
-        memcpy(last_nrm, v.nrm, sizeof(last_nrm));
-        if (L.nbt) { memcpy(last_bin, v.bin, sizeof(last_bin)); memcpy(last_tan, v.tan, sizeof(last_tan)); }
     }
     for (int ci = 0; ci < 2; ci++) {
         if (!L.col_desc[ci]) { v.col[ci] = 0xFFFFFFFF; continue; }
@@ -1382,6 +1388,11 @@ static void draw_impl(const DrawCall& dc) {
     pd.in.resize(first_in + dc.count);
     InVertex* const g_in = pd.in.data() + first_in;
     for (uint32_t i = 0; i < dc.count; i++) decode_vertex(L, p, g_in[i]);
+    if (L.nrm_desc) {
+        const InVertex& last = g_in[dc.count - 1];
+        memcpy(g_last_nrm, last.nrm, sizeof(g_last_nrm));
+        if (L.nbt) { memcpy(g_last_bin, last.bin, sizeof(g_last_bin)); memcpy(g_last_tan, last.tan, sizeof(g_last_tan)); }
+    }
     // GCN_VTXLOG=<frame> prints each draw of that frame as the front end sees it: the
     // primitive, vertex layout, the first vertices' raw indices and positions, and the
     // position matrix each of them selects -- what the renderer's draw log cannot show,

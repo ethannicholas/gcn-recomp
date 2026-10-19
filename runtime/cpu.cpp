@@ -78,8 +78,14 @@ void fatal(const char* fmt, ...) {
 // ---------------------------------------------------------------------------
 void mem_init() {
     const size_t reserve = 0x40000000;
+#ifdef GCN_MEM_BASE
+    // See GCN_MEM in recomp.h: the generated code was compiled for this address.
+    void* p = plat_reserve(reserve, (void*)(uintptr_t)GCN_MEM_BASE);
+    if (!p) fatal("could not reserve guest memory at %llX", (unsigned long long)GCN_MEM_BASE);
+#else
     void* p = plat_reserve(reserve);
     if (!p) fatal("mem reserve failed");
+#endif
     g_mem = (uint8_t*)p;
     // Plus a guard of zeros past the end: a read that runs a little beyond RAM (a
     // paired-single load at the top of the arena) gets nothing on the hardware and zeros
