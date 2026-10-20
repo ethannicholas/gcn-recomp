@@ -850,6 +850,15 @@ value + 1/n at its bottom right, as GX does. Points keep their size in EFB pixel
 
 ## Depth bands in an eye
 
+A viewport's far depth is clamped to the buffer's 24 bits before anything is made of it
+(`vp_far`), as GX clamps the depth it writes. A game can pin its sky to the back of the
+buffer with a viewport of no depth at 2^24 itself (scale 0, offset 16777216); GX writes
+0xFFFFFF there, which passes LEQUAL against a cleared buffer. Until 2026-10-20 the renderer
+took the offset as it was, put the sky a hair past the far plane, and GL clipped all of it:
+the clear colour stood behind the world, black on the screen and in the eyes, and in a
+scanner's view, which colours by ids in the frame's alpha, the eyes' leftover alpha there
+coloured the sky a different id every frame.
+
 GX has no depth-range call, but a viewport carries a z range, and a game can confine a draw
 to a band of the depth buffer with it, layer by layer. The flat path has always applied the
 viewport's z terms; an eye now maps its own depth into the draw's band too, which keeps the

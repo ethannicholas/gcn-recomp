@@ -1316,6 +1316,14 @@ static void note_fullscreen_copies(const Batch& b);
 // worked out itself: the water looked its refraction up two pixels out of register, which
 // stood a water-tinted second copy of the racer beside the real one, and the last two
 // columns and rows of every pass were never drawn.
+// The viewport's far depth, as GX writes it: a depth past the buffer's 24 bits is clamped
+// to its largest value. A game that pins a sky to the back of the buffer can give it a
+// viewport of no depth at 2^24 itself (scale 0, offset 16777216: a viewport from 1 to 1 of a
+// depth range); GX writes 0xFFFFFF, which passes LEQUAL against a cleared buffer. Taken as
+// it is, that depth is a hair past the far plane, and GL clipped the whole sky away, leaving
+// the clear colour behind the world.
+static float vp_far(const float* vp) { return std::min(vp[5], 16777215.0f); }
+
 static void scissor_offset(const uint32_t* bp, int& xoff, int& yoff) {
     xoff = (int)(bp[0x59] & 0x3FF) * 2;
     yoff = (int)((bp[0x59] >> 10) & 0x3FF) * 2;
@@ -1587,7 +1595,7 @@ static bool zfreeze_plane(const Batch& b, const Cmd& c, float out[4]) {
     int xoff, yoff;
     scissor_offset(st.bp, xoff, yoff);
     const float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
-    const float vpb[2] = {2.0f * vp[5] / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f};
+    const float vpb[2] = {2.0f * vp_far(vp) / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f};
     double X[3], Y[3], Z[3];
     for (int i = 0; i < 3; i++) {
         const float* v = b.verts[b.indices[c.first + c.count - 3 + i]].pos;
@@ -1911,7 +1919,7 @@ static void apply_state(const PixelState& st, int prim) {
                 const float sx = r[1] > r[0] ? 2.0f * kEyeScreenOverscan / (r[1] - r[0]) : 1.0f;
                 const float sy = r[3] > r[2] ? 2.0f * kEyeScreenOverscan / (r[3] - r[2]) : 1.0f;
                 const float cx = 0.5f * (r[0] + r[1]), cy = 0.5f * (r[2] + r[3]);
-                const float bx = 2.0f * st.viewport[5] / 16777215.0f - 1.0f, by = 2.0f * st.viewport[2] / 16777215.0f;
+                const float bx = 2.0f * vp_far(st.viewport) / 16777215.0f - 1.0f, by = 2.0f * st.viewport[2] / 16777215.0f;
                 for (int c = 0; c < 4; c++) {
                     M[c * 4 + 0] = sx * (P[c * 4 + 0] - cx * P[c * 4 + 3]);
                     M[c * 4 + 1] = sy * (P[c * 4 + 1] - cy * P[c * 4 + 3]);
@@ -2001,7 +2009,7 @@ static void apply_state(const PixelState& st, int prim) {
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
         g_astat.viewport++;
         float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
-        float vpb[4] = {2.0f * vp[5] / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f, 0, 0};
+        float vpb[4] = {2.0f * vp_far(vp) / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f, 0, 0};
         glUniform4fv(pr.u_vp_a, 1, vpa);
         glUniform4fv(pr.u_vp_b, 1, vpb);
         memcpy(u.viewport, vp, sizeof(st.viewport));
