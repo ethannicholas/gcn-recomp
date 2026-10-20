@@ -383,6 +383,11 @@ static inline void psq_store(CPU* c, uint32_t ea, int frs, int w, int gqr) {
     psq_store_quantised(c, ea, frs, w, gqr);
 }
 jmp_buf* hle_context_jmpbuf(CPU* c);
+/* The C library's setjmp and longjmp, when the game's special_calls.txt names them: a
+   setjmp call site records where to resume, and longjmp goes there once it has restored
+   the guest's registers. See runtime/threads.cpp. */
+jmp_buf* hle_setjmp_jmpbuf(CPU* c);
+void hle_longjmp_resume(CPU* c, uint32_t buf);
 
 /* The guest clock. Every backward branch in recompiled code passes through IRQ_CHECK,
    which counts it; with the virtual clock (the default) guest time *is* that count, so a
