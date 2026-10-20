@@ -224,6 +224,10 @@ uniform float u_point_size;
 //   4 = as 1, but the depth written within the draw's band is the game's own: a
 //       foreground layer (render_set_depth_layers), where the band is too thin for the
 //       eye's.
+//   6 = a 2D element over the whole picture on the HUD frame (EyeFrameScreen): u_proj
+//       puts it there, u_view puts it there with the frame stretched far out, for the
+//       vertices on the picture's edges, and u_crop is the game's own projection, which
+//       says which those are.
 uniform int u_vr;
 uniform mat4 u_view;       // eye transform, relative to the game's camera; under 3, fog's
 uniform mat4 u_crop;       // four clip distances, each linear in the vertex
@@ -298,6 +302,14 @@ void main() {
         // places the frame in the EFB, which an eye does not render into. Every term is
         // constant for the draw, so there is nothing left to do per vertex.
         gl_Position = u_proj * vec4(a_pos, 1.0);
+    } else if (u_vr == 6) {
+        // A 2D element over the whole picture whose inside lines up with the other 2D
+        // elements -- a hole cut for a window -- and whose edges must not show: on the
+        // HUD frame, but a vertex on the picture's edge goes far out along the frame's
+        // plane, past the eye's field, so the draw covers the view the frame leaves.
+        vec4 g = u_crop * vec4(a_pos, 1.0);
+        bool edge = abs(g.x) >= 0.98 * g.w || abs(g.y) >= 0.98 * g.w;
+        gl_Position = (edge ? u_view : u_proj) * vec4(a_pos, 1.0);
     } else if (u_vr == 3) {
         // Part way between theater and stereo (morph_chain). The depth bands are kept as
         // the eye keeps them (u_vr 1, above): without them a sky modelled a few tens of

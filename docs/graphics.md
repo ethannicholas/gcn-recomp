@@ -273,6 +273,16 @@ such a film by `EyeDrawFacts`' clip box and `clip_area`. The box alone also catc
 outline drawn into a whole-screen viewport, and a mesh of letterbox bars whose box is the
 whole picture.
 
+`EyeFrameScreen` (2026-10-20) is for a draw over the whole picture whose inside has to line
+up with the game's other 2D elements: a filter with a hole cut for a window the game draws
+on top of it, or a tint over that window's rect. Across the eye, the hole is where the eye's
+field puts the window's rect, which is not where the HUD frame puts the window -- the field
+is far wider than the frame -- and the two did not line up, nor did either eye's agree with
+the other's. Such a draw goes on the HUD frame like the window (`u_vr` 6), and a vertex on the
+picture's edge, as the game's own projection says, is taken `kFrameScreenReach` (40) times
+out along the frame's plane: the inside sits where the frame puts it and the outside still
+covers the view, with no edge in sight. The layer is `hud-frame(screen)`.
+
 `EyeRestore` is for a cut-away: a game copies part of the frame (no clear), draws
 something, then draws the copy back over the rect it came from, orthographically, at a
 chosen depth with a depth test, so that whatever it drew since nearer than that depth is

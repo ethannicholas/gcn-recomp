@@ -63,7 +63,7 @@ static inline void set_lod_bias(GLuint s, float bias) {
 struct UniformShadow {
     uint32_t gen = 0, view_gen = 0;
     float proj[7];
-    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen, restore, facing;
+    uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen, frame_screen, restore, facing;
     float hud_push;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
@@ -172,9 +172,14 @@ static bool g_cur_flat3d = false;
 // Likewise for an orthographic draw over the whole picture (EyeScreen), which an eye draws
 // across its whole field, fixed to the head: the game's frame mapped onto the eye's own clip
 // space, enlarged by this much so that its edges fall outside what the eye can see.
+// 1 per such state; 2 for one drawn on the HUD frame with its edges taken out past the
+// field (EyeFrameScreen).
 static std::vector<uint8_t> g_screen;
-static bool g_cur_screen = false;
+static uint8_t g_cur_screen = 0;
 static constexpr float kEyeScreenOverscan = 1.1f;
+// How far an EyeFrameScreen draw's edge vertices go along the HUD frame's plane, in the
+// frame's own half-sizes: far enough to be well past any eye's field.
+static constexpr float kFrameScreenReach = 40.0f;
 // And for a copy of part of the frame put back over itself with a depth test (EyeRestore):
 // per state, 1 for such a draw, with the box its draws cover in the game's clip space
 // (four floats a state), which an eye stretches over its whole field. g_restore_tex holds
@@ -1729,15 +1734,17 @@ static void apply_state(const PixelState& st, int prim) {
     // but mapped onto the eye's clip space directly. Orthographic, or a perspective effect
     // the game hangs just before its camera's lens, which the game's projection maps to its
     // frame just the same.
-    const bool screen = g_vr_active && g_cur_screen;
+    const bool screen = g_vr_active && g_cur_screen == 1;
+    // One on the HUD frame with its edges taken far out (EyeFrameScreen).
+    const bool frame_screen = g_vr_active && g_cur_screen == 2;
     // A copy of part of the frame put back over itself with a depth test (EyeRestore):
     // across the eye too, but at the game's depth and with its depth test.
     const bool restore = g_vr_active && g_cur_restore && g_cur_restore_box && !perspective;
     // A panel the game moved about its picture by its projection (EyeFacing): on the HUD
     // frame, turned to face the viewer.
-    const bool facing = g_vr_active && g_cur_facing && !perspective && !screen && !restore;
+    const bool facing = g_vr_active && g_cur_facing && !perspective && !screen && !restore && !frame_screen;
     const bool view_space_3d = perspective && view_space && vs3d && !flat3d;
-    const bool on_hud_frame = screen || flat3d || ((!perspective || view_space) && !view_space_3d);
+    const bool on_hud_frame = screen || frame_screen || flat3d || ((!perspective || view_space) && !view_space_3d);
     if (perspective) {
         P[0] = p[0]; P[8] = p[1]; P[5] = p[2]; P[9] = p[3]; P[10] = p[4]; P[14] = p[5]; P[11] = -1.0f;
     } else {
@@ -1799,7 +1806,7 @@ static void apply_state(const PixelState& st, int prim) {
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
                            foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer &&
-                           flat3d == u.flat3d && screen == u.screen && facing == u.facing && !restore && !u.restore &&
+                           flat3d == u.flat3d && screen == u.screen && frame_screen == u.frame_screen && facing == u.facing && !restore && !u.restore &&
                            hud_push == u.hud_push && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
@@ -1903,12 +1910,25 @@ static void apply_state(const PixelState& st, int prim) {
                 mat4_mul(facing ? faced : g_vr_hud_eff, P, a);   // the game's 2D frame, placed in view space
                 mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
                 mat4_mul(g_vr_proj, b, M);
+                if (frame_screen) {
+                    // The same with the picture stretched kFrameScreenReach times in x and
+                    // y before it goes on the frame, for the vertices on its edges; and
+                    // the game's projection, which tells the shader which those are.
+                    float K[16] = {kFrameScreenReach, 0, 0, 0, 0, kFrameScreenReach, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                    float KP[16], far_[16];
+                    mat4_mul(K, P, KP);
+                    mat4_mul(g_vr_hud_eff, KP, a);
+                    mat4_mul(g_vr_view, a, b);
+                    mat4_mul(g_vr_proj, b, far_);
+                    glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, far_);
+                    glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, P);
+                }
             }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
             if (flat3d) glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, flat_crop);
-            glUniform1i(pr.u_vr, flat3d ? 5 : 2);
+            glUniform1i(pr.u_vr, flat3d ? 5 : frame_screen ? 6 : 2);
             g_eye_layer_name = flat3d ? "hud-frame(3d)" : screen ? "eye-screen" : restore ? "eye-restore"
-                             : facing ? "hud-frame(facing)" : "hud-frame";
+                             : facing ? "hud-frame(facing)" : frame_screen ? "hud-frame(screen)" : "hud-frame";
         } else if (g_flat_eye != 0.0f && perspective &&
                    !(g_panel_band > 0.0f && band_hi > band_lo && band_hi <= g_panel_band)) {
             // One of a stereo pair on the panel (a draw in the panel band falls through to
@@ -1949,6 +1969,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.hud_layer = hud_layer;
         u.flat3d = flat3d;
         u.screen = screen;
+        u.frame_screen = frame_screen;
         u.restore = restore;
         u.facing = facing;
         u.hud_push = hud_push;
@@ -2962,9 +2983,9 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
             g_flat3d[c.state] = 1;
             continue;
         }
-        if (a == EyeScreen) {
+        if (a == EyeScreen || a == EyeFrameScreen) {
             if (g_screen.empty()) g_screen.assign(b.states.size(), 0);
-            g_screen[c.state] = 1;
+            g_screen[c.state] = a == EyeScreen ? 1 : 2;
             continue;
         }
         if (a == EyeFacing) {
@@ -3687,7 +3708,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 glClear(GL_DEPTH_BUFFER_BIT);
                 gl_state_invalidate();
             }
-            g_cur_screen = !g_screen.empty() && g_screen[c.state];
+            g_cur_screen = g_screen.empty() ? 0 : g_screen[c.state];
             g_cur_facing = !g_facing.empty() && g_facing[c.state];
             g_cur_true_scale = !g_true_scale.empty() && g_true_scale[c.state];
             g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
@@ -3695,7 +3716,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             g_cur_restore_box = restore_draw ? &g_restore_box[c.state * 4] : nullptr;
             apply_state(b.states[c.state], c.prim);
             g_cur_flat3d = false;
-            g_cur_screen = false;
+            g_cur_screen = 0;
             g_cur_facing = false;
             g_cur_true_scale = false;
             g_cur_hud_push = 1.0f;

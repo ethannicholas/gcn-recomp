@@ -119,6 +119,13 @@ struct PixelState {
 // (render_execute, render_execute_stereo_pair), which then asks the filter as well: for a
 // stray draw that is invisible on a television and not on a panel seen up close, such as a
 // pixel's quad.
+// EyeFrameScreen is for an orthographic draw over the whole picture whose inside has to
+// line up with the game's other 2D elements -- a filter with a hole cut for a window the
+// game draws on top, or a tint inside that window. Across the eye (EyeScreen) the hole is
+// where the eye's field puts it, not where the HUD frame puts the window. It is drawn on
+// the HUD frame like the window, but its vertices on the picture's edge are taken far out
+// along the frame's plane, so that it still covers the whole view and its edges do not
+// show; a lookup of a copy of the frame is still the eye's own grab.
 // Otherwise the flat view is untouched; a hidden draw's textures are kept alive. For a game that hides a model's materials (by TexData::hash, the same in
 // every run) or an effect that cannot be re-projected (a screen-space refraction of part
 // of the frame).
@@ -138,7 +145,7 @@ struct EyeDrawFacts {
     float clip_x0, clip_x1, clip_y0, clip_y1, clip_area;
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8, EyeHideEverywhere = 9 };
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8, EyeHideEverywhere = 9, EyeFrameScreen = 10 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };
