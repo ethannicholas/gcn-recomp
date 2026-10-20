@@ -225,10 +225,12 @@ uniform float u_point_size;
 //       foreground layer (render_set_depth_layers), where the band is too thin for the
 //       eye's.
 //   6 = a 2D element over the whole picture on the HUD frame (EyeFrameScreen): u_crop is
-//       the game's own projection, u_view takes the game's clip space onto the frame and
-//       into the eye, and u_proj.x is how far along the frame a vertex on the picture's
-//       edge is taken. u_uvgrad[i] is how texture coordinate i changes with the game's clip
-//       x and y over the draw (ds/dx, ds/dy, dt/dx, dt/dy), to carry it out with the vertex.
+//       the game's own projection; u_view takes the game's clip space onto the frame and
+//       into the eye, for a vertex on the picture's edge, taken 40 times out along it; and
+//       u_proj does the same for the others, onto the frame as a facing panel turns it
+//       (EyeFacing) when there is one. u_uvgrad[i] is how texture coordinate i changes with
+//       the game's clip x and y over the draw (ds/dx, ds/dy, dt/dx, dt/dy), to carry it out
+//       with the vertex.
 uniform int u_vr;
 uniform vec4 u_uvgrad[8];
 uniform mat4 u_view;       // eye transform, relative to the game's camera; under 3, fog's
@@ -318,13 +320,16 @@ void main() {
         // full-screen quad has every corner on the edge, and taken out without its
         // coordinates its texture was stretched as far -- a filter's scan lines, forty
         // times as wide, were gone.
+        // The inside -- a hole for a window, a tint over it -- goes where the window does,
+        // turned with it when it faces the viewer; the edges stay on the frame's plane, which
+        // the eye faces, so that taken far out they stay in front of it.
         vec4 g = u_crop * vec4(a_pos, 1.0);
-        float reach = u_proj[0][0];
         vec2 g0 = g.xy;
-        if (abs(g.x) >= 0.98 * g.w) g.x *= reach;
-        if (abs(g.y) >= 0.98 * g.w) g.y *= reach;
+        bool edge = false;
+        if (abs(g.x) >= 0.98 * g.w) { g.x *= 40.0; edge = true; }
+        if (abs(g.y) >= 0.98 * g.w) { g.y *= 40.0; edge = true; }
         push_d = (g.xy - g0) / g.w;
-        gl_Position = u_view * g;
+        gl_Position = (edge ? u_view : u_proj) * g;
     } else if (u_vr == 3) {
         // Part way between theater and stereo (morph_chain). The depth bands are kept as
         // the eye keeps them (u_vr 1, above): without them a sky modelled a few tens of

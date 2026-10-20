@@ -178,7 +178,8 @@ static std::vector<uint8_t> g_screen;
 static uint8_t g_cur_screen = 0;
 static constexpr float kEyeScreenOverscan = 1.1f;
 // How far an EyeFrameScreen draw's edge vertices go along the HUD frame's plane, in the
-// frame's own half-sizes: far enough to be well past any eye's field.
+// frame's own half-sizes: far enough to be well past any eye's field. The vertex shader
+// has it as a literal (u_vr 6).
 static constexpr float kFrameScreenReach = 40.0f;
 // Per EyeFrameScreen state, eight texture coordinates' gradients over the game's clip x
 // and y (ds/dx, ds/dy, dt/dx, dt/dy), fitted to the state's own vertices: what the shader
@@ -1344,9 +1345,15 @@ static void yaw_pitch_matrix(float yaw, float pitch, float m[16]) {
 // the panel goes back to the centre, and the frame is turned about the camera -- yaw, then
 // pitch, no roll -- from the direction of its centre to that of the point: the panel is
 // where it was, as far away as the frame's centre, square on to the camera.
+static void facing_frame_at(float cx, float cy, float out[16]);
 static void facing_frame(const float P[16], float out[16]) {
+    facing_frame_at(P[12], P[13], out);  // the panel's origin in clip space, w being 1
+}
+
+// The same for a panel whose origin is at (cx, cy) of the game's clip space, applied to
+// that clip space (no projection of its own).
+static void facing_frame_at(float cx, float cy, float out[16]) {
     const float* F = g_vr_hud_eff;
-    const float cx = P[12], cy = P[13];   // the panel's origin in clip space, w being 1
     const float C[3] = {F[12], F[13], F[14]};
     const float Q[3] = {F[0] * cx + F[4] * cy + F[12], F[1] * cx + F[5] * cy + F[13], F[2] * cx + F[6] * cy + F[14]};
     auto yaw = [](const float* v) { return atan2f(-v[0], -v[2]); };
@@ -1921,14 +1928,21 @@ static void apply_state(const PixelState& st, int prim) {
                     // The shader works in the game's clip space, which the game's own
                     // projection gives it, taking a vertex on the picture's edge
                     // kFrameScreenReach times out on that axis; then the frame and the
-                    // eye, without the projection. The reach goes in u_proj.
-                    float A[16];
+                    // eye, without the projection (u_view). The other vertices go onto the
+                    // frame as the frame's facing panel (the box of the EyeFacing draws,
+                    // about its centre) turns it, or onto the frame as it is (u_proj).
+                    float A[16], F[16];
                     mat4_mul(g_vr_view, g_vr_hud_eff, a);
                     mat4_mul(g_vr_proj, a, A);
                     glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, A);
                     glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, P);
-                    memset(M, 0, sizeof(M));
-                    M[0] = kFrameScreenReach;
+                    if (g_has_facing_box) {
+                        facing_frame_at(0.5f * (g_facing_box[0] + g_facing_box[1]), 0.5f * (g_facing_box[2] + g_facing_box[3]), F);
+                        mat4_mul(g_vr_view, F, a);
+                        mat4_mul(g_vr_proj, a, M);
+                    } else {
+                        memcpy(M, A, sizeof(M));
+                    }
                 }
             }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);

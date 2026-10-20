@@ -290,7 +290,11 @@ coordinates its texture -- a filter's scan lines -- was stretched forty times ov
 The renderer fits each coordinate's gradient over the game's clip x and y from the state's
 triangles that touch the edge (`fit_uv_gradients`), each exactly, and keeps it where they
 agree; a draw's triangles inside the picture, a window's rect among them, never move and
-are not asked. `GCN_EYELOG=1` prints the fits.
+are not asked. `GCN_EYELOG=1` prints the fits. When the frame has a facing panel (`EyeFacing`), the
+inner vertices -- the window's hole, a tint over it -- go onto the frame as the panel turns
+it, about the centre of the facing draws' box, so that they stay on a window that faces the
+viewer; the edge vertices stay on the flat frame, whose plane the eye faces, since on a
+turned plane taken that far out they would pass behind the eye.
 
 `EyeRestore` is for a cut-away: a game copies part of the frame (no clear), draws
 something, then draws the copy back over the rect it came from, orthographically, at a
