@@ -37,7 +37,11 @@ ShaderKey make_shader_key(const PixelState& st) {
     k.iref = nind ? bp[0x27] & ((1u << (6 * nind)) - 1) : 0;
     k.num_texgens = st.num_texgens;
     k.efb_has_alpha = (bp[0x43] & 7) == 1;
-    if ((bp[0xF5] >> 2) & 3) k.ztex = bp[0xF5] & 0xF;
+    // A Z texture changes the depth written only when the depth test comes after texturing:
+    // PE control's zcomploc clear, or the test off. With the test before texturing, the
+    // triangle's own depth is tested and written, and the Z texture has no say in it.
+    const bool early_z = ((bp[0x43] >> 6) & 1) && (bp[0x40] & 1);
+    if (((bp[0xF5] >> 2) & 3) && !early_z) k.ztex = bp[0xF5] & 0xF;
     k.dst_alpha = dst_alpha_mode(bp);
     uint32_t used = 0;
     for (uint32_t s = 0; s < nstages; s++) {

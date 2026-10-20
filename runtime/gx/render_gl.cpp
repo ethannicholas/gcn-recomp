@@ -4175,6 +4175,8 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         fprintf(stderr, "\n        st%u order=%06X cenv=%06X aenv=%06X ksel=%06X", i,
                                 bp[0x28 + i / 2], bp[0xC0 + 2 * i], bp[0xC1 + 2 * i], bp[0xF6 + i / 2]);
                     fprintf(stderr, "\n        alphafunc=%06X zmode=%06X blend=%06X dstalpha=%06X pecntrl=%06X", bp[0xF3], bp[0x40], bp[0x41], bp[0x42], bp[0x43]);
+                    // A Z texture's bias and its type and op (BP 0xF4-0xF5), when it is on.
+                    if ((bp[0xF5] >> 2) & 3) fprintf(stderr, " ztex=%06X,%06X", bp[0xF4], bp[0xF5]);
                     // The indirect stages: the matrices (BP 0x06-0x0E), the coordinate
                     // scales (0x25-0x26), the stage references (0x27) and each TEV
                     // stage's indirect command (0x10-0x1F).
