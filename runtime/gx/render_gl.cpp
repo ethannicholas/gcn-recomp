@@ -1725,9 +1725,11 @@ static void apply_state(const PixelState& st, int prim) {
     // drawn orthographically is the same thing: on the HUD frame either way, but without
     // this it had no depth test there, and its parts lay in the order they were drawn.
     const bool flat3d = g_vr_active && g_cur_flat3d;
-    // An orthographic draw over the whole picture the game asked to have across the eye
-    // (EyeScreen): on the HUD frame's path, but mapped onto the eye's clip space directly.
-    const bool screen = g_vr_active && g_cur_screen && !perspective;
+    // A draw the game asked to have across the eye (EyeScreen): on the HUD frame's path,
+    // but mapped onto the eye's clip space directly. Orthographic, or a perspective effect
+    // the game hangs just before its camera's lens, which the game's projection maps to its
+    // frame just the same.
+    const bool screen = g_vr_active && g_cur_screen;
     // A copy of part of the frame put back over itself with a depth test (EyeRestore):
     // across the eye too, but at the game's depth and with its depth test.
     const bool restore = g_vr_active && g_cur_restore && g_cur_restore_box && !perspective;
@@ -1735,7 +1737,7 @@ static void apply_state(const PixelState& st, int prim) {
     // frame, turned to face the viewer.
     const bool facing = g_vr_active && g_cur_facing && !perspective && !screen && !restore;
     const bool view_space_3d = perspective && view_space && vs3d && !flat3d;
-    const bool on_hud_frame = flat3d || ((!perspective || view_space) && !view_space_3d);
+    const bool on_hud_frame = screen || flat3d || ((!perspective || view_space) && !view_space_3d);
     if (perspective) {
         P[0] = p[0]; P[8] = p[1]; P[5] = p[2]; P[9] = p[3]; P[10] = p[4]; P[14] = p[5]; P[11] = -1.0f;
     } else {
@@ -4035,6 +4037,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         (int)st.proj[6] == 0 ? 'p' : 'o', st.proj[0], st.proj[1], st.proj[2], st.proj[3], st.proj[4], st.proj[5],
                         zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi, st.clip_disable ? " noclip" : "",
                         at_origin, slivers, sliver_text.c_str());
+                if (st.tag) fprintf(stderr, " tag=%u", st.tag);   // set_draw_tag
                 if (slivers) fprintf(stderr, "\n       ");
                 // Each texture by id and, for a decoded one, by its content hash, which is
                 // the same in every run (TexData::hash); an EFB copy is starred.

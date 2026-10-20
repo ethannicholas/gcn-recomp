@@ -81,7 +81,11 @@ struct PixelState {
 // a visor or a lens, steam or rain or a flash -- which on the HUD frame is a panel whose
 // edges are plain to see: it is drawn across the whole of each eye instead, fixed to the
 // head and a little past the eye's field (kEyeScreenOverscan), with the HUD frame's lack
-// of depth. EyeRestore is for an orthographic draw that puts a copy of part of the frame,
+// of depth. A perspective draw so called is the same thing made another way: an effect
+// the game hangs just in front of its camera, so that it lands on the same place of the
+// picture whatever the camera does -- drops or splashes on a visor. In the world, with the
+// head free of the camera, it would stay put as the head turned; its place on the game's
+// picture is mapped onto the eye's field instead, as an orthographic one's is. EyeRestore is for an orthographic draw that puts a copy of part of the frame,
 // taken earlier in it, back over the place it came from with a depth test: a cut-away,
 // which erases whatever was drawn since nearer than the draw's own depth and leaves the
 // scene that was behind it. In an eye the copy is of the flat view, so on the HUD frame it

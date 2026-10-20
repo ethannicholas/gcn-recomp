@@ -254,7 +254,7 @@ can be called `EyeFlat` too. It went on the HUD frame anyway, as every ortho dra
 there with no depth test, so its parts lay in the order they were drawn: eyes drawn after a
 face showed through it. Until 2026-10-15 `EyeFlat` applied only to a perspective draw.
 
-`EyeScreen` is for an orthographic draw over the whole picture: a film on a visor or a lens
+`EyeScreen` is mainly for an orthographic draw over the whole picture: a film on a visor or a lens
 (steam, rain, a flash). On the HUD frame such a draw is a panel at the HUD's distance and
 size, and its edges show. An `EyeScreen` draw goes on the HUD frame's path (`u_vr` 2, no
 depth test), but its matrix maps the game's clip space straight onto the eye's, with no view
@@ -263,7 +263,12 @@ or frame between them. It covers the eye's whole field, fixed to the head, enlar
 the game's 4:3 picture is stretched over a field several times as wide, so a film's texture
 reads coarser than on a television. The draw log names its layer `eye-screen`. In the morph
 between theater and stereo it goes from the panel to that placement, blended in the eye's clip
-space (`MorphKind::Screen`), and not to the HUD frame like other 2D draws. A filter can tell
+space (`MorphKind::Screen`), and not to the HUD frame like other 2D draws. Since 2026-10-19
+a perspective draw can be called `EyeScreen` too: an effect a game hangs just in front of
+its camera so that it stays on one place of the picture -- drops or splashes on a visor.
+In the world it stays where the camera faces, and a head turned away from the camera sees
+it slide the other way; through the same matrix (the game's projection, then its frame
+onto the eye's) it lands where the game's picture has it, fixed to the head. A filter can tell
 such a film by `EyeDrawFacts`' clip box and `clip_area`. The box alone also catches an
 outline drawn into a whole-screen viewport, and a mesh of letterbox bars whose box is the
 whole picture.
