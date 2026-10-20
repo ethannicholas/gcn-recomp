@@ -357,7 +357,14 @@ from such a pass:
 - The grab is the eye's colour, while the game's copy was converted from it, as intensity
   for one. A substituted lookup is converted the same way in the shader (`EfbConv` in
   `shadergen.h`: I4 with its truncation to four bits, I8, IA), so a filter that indexes a
-  palette by the copy's intensity gets the index the copy would have given.
+  palette by the copy's intensity gets the index the copy would have given. So is a copy of
+  one channel or two (A8, R4, R8, G8, B8, RG8, GB8, and RGB565's opaque alpha), as
+  `kCopyFS` makes them. Until 2026-10-20 only the intensity copies were: a game that draws
+  object ids into the frame's alpha, copies the whole frame as A8 and draws it back through
+  a palette to colour what it marked (a scanner's view) had the eye's colour index the
+  palette instead, and each eye a different noise of colour over the whole view, which
+  the eyes could not fuse. The eye's own alpha holds the ids, since it replays the draws
+  that write them.
 
 ## PC VR: OpenXR on desktop GL
 

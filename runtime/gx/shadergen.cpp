@@ -111,11 +111,26 @@ void canonicalize_shader_key(ShaderKey& k) {
 }
 
 EfbConv efb_conv_for(uint32_t copy_fmt) {
-    if (!(copy_fmt & 0x10)) return EfbConvNone;
+    if (copy_fmt & 0x10) {
+        switch (copy_fmt & 15) {
+        case 0: return EfbConvI4;
+        case 1: return EfbConvI8;
+        case 2: case 3: return EfbConvIA;
+        default: return EfbConvNone;
+        }
+    }
+    // The same as kCopyFS takes them without the intensity bit. A game that draws ids into
+    // the frame's alpha and copies the whole frame as A8 to colour what it marked, through a
+    // palette, would otherwise have the eye's colour indexing the palette.
     switch (copy_fmt & 15) {
-    case 0: return EfbConvI4;
-    case 1: return EfbConvI8;
-    case 2: case 3: return EfbConvIA;
+    case 0: return EfbConvR4;
+    case 1: case 8: return EfbConvR8;
+    case 4: return EfbConvOpaque;
+    case 7: return EfbConvA8;
+    case 9: return EfbConvG8;
+    case 10: return EfbConvB8;
+    case 11: return EfbConvRG8;
+    case 12: return EfbConvGB8;
     default: return EfbConvNone;
     }
 }
@@ -545,10 +560,19 @@ std::string gen_pixel_shader(const ShaderKey& k) {
             W("    vec4 tf = texture(u_tex[%u], snap_tex(%u, tc) / u_texsize[%u]);\n", map, map, map);
             if (conv != EfbConvNone) {
                 W("    if ((u_screen_uv & %u) != 0) {\n", cbit);
-                W("      float y = clamp(dot(tf.rgb, vec3(0.257, 0.504, 0.098)) + 16.0 / 255.0, 0.0, 1.0);\n");
+                if (conv == EfbConvI4 || conv == EfbConvI8 || conv == EfbConvIA)
+                    W("      float y = clamp(dot(tf.rgb, vec3(0.257, 0.504, 0.098)) + 16.0 / 255.0, 0.0, 1.0);\n");
                 if (conv == EfbConvI4) W("      tf = vec4(floor(floor(y * 255.0 + 0.5) / 16.0) / 15.0);\n");
                 else if (conv == EfbConvI8) W("      tf = vec4(y);\n");
-                else W("      tf = vec4(vec3(y), tf.a);\n");
+                else if (conv == EfbConvIA) W("      tf = vec4(vec3(y), tf.a);\n");
+                else if (conv == EfbConvA8) W("      tf = vec4(tf.a);\n");
+                else if (conv == EfbConvR4) W("      tf = vec4(floor(tf.r * 15.0 + 0.5) / 15.0);\n");
+                else if (conv == EfbConvR8) W("      tf = vec4(tf.r);\n");
+                else if (conv == EfbConvG8) W("      tf = vec4(tf.g);\n");
+                else if (conv == EfbConvB8) W("      tf = vec4(tf.b);\n");
+                else if (conv == EfbConvRG8) W("      tf = vec4(tf.g, tf.g, tf.g, tf.r);\n");
+                else if (conv == EfbConvGB8) W("      tf = vec4(tf.b, tf.b, tf.b, tf.g);\n");
+                else if (conv == EfbConvOpaque) W("      tf.a = 1.0;\n");
                 W("    }\n");
             }
             if (pal_bits)

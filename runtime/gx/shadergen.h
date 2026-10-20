@@ -43,8 +43,14 @@ struct ShaderKeyHash {
 
 // The conversions an EFB colour copy makes that the shader repeats on an eye's grab:
 // none, a 4-bit intensity (I4), an 8-bit one (I8), or intensity with the frame's alpha
-// (IA4, IA8). See kCopyFS in render_gl.cpp, which makes them for the copy itself.
-enum EfbConv : uint32_t { EfbConvNone = 0, EfbConvI4 = 1, EfbConvI8 = 2, EfbConvIA = 3 };
+// (IA4, IA8); or one channel of the frame's -- its alpha (A8), its red at 4 bits (R4) or 8
+// (R8), its green or blue -- in every component, or two of them read back as IA8 (RG8, GB8),
+// or the colour made opaque (RGB565). See kCopyFS in render_gl.cpp, which makes them for
+// the copy itself.
+enum EfbConv : uint32_t {
+    EfbConvNone = 0, EfbConvI4 = 1, EfbConvI8 = 2, EfbConvIA = 3, EfbConvA8 = 4, EfbConvR4 = 5, EfbConvR8 = 6,
+    EfbConvG8 = 7, EfbConvB8 = 8, EfbConvRG8 = 9, EfbConvGB8 = 10, EfbConvOpaque = 11,
+};
 EfbConv efb_conv_for(uint32_t copy_fmt);
 ShaderKey make_shader_key(const PixelState& st);
 // Clears what gen_pixel_shader does not read, so that keys generating the same source are
