@@ -386,6 +386,7 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
             fe_wait_until(at, gx::Stall::FeFull);
         }
         gx::g_frames_submitted++;
+        gx::copy_writebacks_land(gx::g_frames_submitted.load());
         stall_report(gx::g_frames_submitted);
         if (g_tok_latest_at) {
             g_tok_frame_valid = true;

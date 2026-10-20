@@ -151,12 +151,15 @@ struct EfbCopyCmd {
     uint32_t clear_rgba;                   // 0xRRGGBBAA
     uint32_t clear_z_value;                // 24-bit
     bool writeback;                        // write it to RAM too (set_copy_writeback in gx.h)
+    uint32_t writeback_ticket;             // which, for copy_writeback_done
 };
 
-// Copies written back so far (EfbCopyCmd::writeback), counted by the renderer as each
-// lands in RAM; the front end waits on it. g_renderer_writes_back is set by a renderer that
-// will do them -- without one, none is asked for.
-extern std::atomic<uint32_t> g_copy_writebacks_done;
+// A copy written back (EfbCopyCmd::writeback): the renderer hands over its bytes, encoded
+// in the copy's texture format, and the guest thread puts them in RAM a couple of frames
+// later (set_copy_writeback in gx.h). Empty bytes for a format it cannot encode.
+// g_renderer_writes_back is set by a renderer that will do them -- without one, none is
+// asked for.
+void copy_writeback_done(uint32_t ticket, std::vector<uint8_t>&& bytes);
 extern std::atomic<bool> g_renderer_writes_back;
 
 struct Cmd {

@@ -415,7 +415,9 @@ use, which every lookup prolonged.
 - `GCN_COPYLOG=1` also says how many draw commands the batch holds since its last copy
   and the front end's running draw count (`draws=`, `seq=`): a copy with nothing drawn
   before it, or a count that does not move between copies, means the draws never
-  reached the parser.
+  reached the parser. It also prints each copy written back to RAM
+  (`gx::set_copy_writeback`) as the guest thread lands it, or drops it because the game no
+  longer wants it, with how many of its bytes are not zero.
 - The draw log's verbose form (`GCN_DRAWLOG_VERBOSE=1`) also prints the pixel format and
   each bound map's mode register (wrap, filters, LOD bias) and image format; for an EFB
   copy, the format it was copied in and whether it is read through a palette

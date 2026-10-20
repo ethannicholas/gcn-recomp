@@ -2368,9 +2368,9 @@ static uint32_t g_present_count;
 // A texture copy written to RAM (EfbCopyCmd::writeback), in GX's tiled layout: read back
 // from the copy's texture, which the copy fbo still holds, one sample from the middle of
 // each hardware pixel's block, and encoded as the format the game asked for. The hardware
-// writes whole tiles; rows and columns past the rect repeat its edge here. Counted done
-// whatever happens, so the front end, which waits on it, never waits on a format this does
-// not encode.
+// writes whole tiles; rows and columns past the rect repeat its edge here. The bytes go to
+// copy_writeback_done, for the guest thread to put in RAM; a format this does not encode is
+// handed over empty, so that nothing waits on it.
 //
 // The copy shader has already written each texel as the game will read it (kCopyFS), so a
 // format is only a matter of packing: the one-byte formats (I8, A8, R8, G8, B8, and the
@@ -2390,7 +2390,7 @@ static void copy_writeback(const EfbCopyCmd& c) {
     if (!known || (c.dest & 0x01FFFFFF) + bytes > RAM_SIZE) {
         static bool warned;
         if (!warned) { warned = true; fprintf(stderr, "[copy] write-back of format %X%s not done\n", c.format, c.depth ? " (depth)" : ""); }
-        g_copy_writebacks_done++;
+        copy_writeback_done(c.writeback_ticket, {});
         return;
     }
     std::vector<uint8_t> px((size_t)w * s * h * s * 4);
@@ -2401,7 +2401,8 @@ static void copy_writeback(const EfbCopyCmd& c) {
         y = std::min(y, h - 1);
         return &px[(((size_t)y * s + s / 2) * w * s + (size_t)x * s + s / 2) * 4];
     };
-    uint8_t* out = phys_ptr(c.dest);
+    std::vector<uint8_t> encoded(bytes);
+    uint8_t* out = encoded.data();
     for (uint32_t by = 0; by < bh; by++)
         for (uint32_t bx = 0; bx < bw; bx++) {
             uint8_t* blk = out + ((size_t)by * bw + bx) * (fmt == 6 ? 64 : 32);
@@ -2428,8 +2429,7 @@ static void copy_writeback(const EfbCopyCmd& c) {
                 blk[2 * i + 1] = (uint8_t)v;
             }
         }
-    debug_guard_dma("EFB copy write-back", c.dest, bw * bh * (fmt == 6 ? 64 : 32));
-    g_copy_writebacks_done++;
+    copy_writeback_done(c.writeback_ticket, std::move(encoded));
 }
 
 static void do_efb_copy(const EfbCopyCmd& c) {

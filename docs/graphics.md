@@ -639,21 +639,38 @@ go of (`Batch::dead_textures`), and the renderer deletes it a batch later; it no
 anything itself.
 
 **Copies a game's CPU reads.** A game that copies the frame out and then moves or reads
-the bytes with the CPU needs the copy in RAM, in its texture format, by its next
-draw-done. `gx::set_copy_writeback` takes a filter from the game; a copy it accepts is
-flagged, the front end hands the batch so far to the renderer and waits for it, and the
-renderer reads the copy back and encodes it (whole tiles, edges repeated) at the
-destination (`copy_writeback` in `render_gl.cpp`). It encodes RGB565, RGB5A3 and RGBA8 from
-colour, and the one-byte (I8, A8, R8, G8, B8; Z8, Z8M, Z8L) and two-byte (IA8, RG8, GB8;
-Z16, Z16L) formats from colour or depth: the copy texture already holds each texel as the
-game reads it back ("Copies read back in another format" above), so these are only packed,
-the one-byte formats in 8x4 tiles and the two-byte ones, alpha byte first, in 4x4. A game
-that draws object ids into the EFB and reads a small block of them back with the CPU, to
-find what is under the crosshair, uses A8 for the ids and Z16 and Z8L for their depths.
-The filter's `dest` is the physical address the copy register holds, not the game's
-pointer to it. The guest's draw-done
-waits for the front end, so the CPU then finds the bytes there. Each one is a round trip
-through the transform and the renderer, which is why it is opt-in and per copy.
+the bytes with the CPU needs the copy in RAM, in its texture format. `gx::set_copy_writeback`
+takes a filter from the game; a copy it accepts is flagged, the renderer reads it back as it
+makes it and encodes it (whole tiles, edges repeated; `copy_writeback` in `render_gl.cpp`),
+and the guest thread puts the bytes at the destination at a later display copy
+(`copy_writebacks_land` in `xf.cpp`). It encodes RGB565, RGB5A3 and RGBA8 from colour, and
+the one-byte (I8, A8, R8, G8, B8; Z8, Z8M, Z8L) and two-byte (IA8, RG8, GB8; Z16, Z16L)
+formats from colour or depth: the copy texture already holds each texel as the game reads it
+back ("Copies read back in another format" above), so these are only packed, the one-byte
+formats in 8x4 tiles and the two-byte ones, alpha byte first, in 4x4. A game that draws
+object ids into the EFB and reads a small block of them back with the CPU, to find what is
+under the crosshair, uses A8 for the ids and Z16 and Z8L for their depths. The filter's
+`dest` is the physical address the copy register holds, not the game's pointer to it.
+
+On the hardware the bytes are there by the game's next draw-done, and that is how it was
+first done: at such a copy the front end sent the batch so far to the renderer and waited
+for the bytes. But a frontend takes a batch as a frame. Each write-back cut the frame in
+two, and every piece was drawn and shown as a frame of its own: a game copying three such
+buffers a frame -- the ids, and two of depth -- went to a headset as four pieces, the scene
+before the copies, two empty frames and the HUD after them, each held for a display frame,
+so the game flickered between them at a quarter of its speed and the eyes never saw a
+whole frame. (The flat window hid it: it presents only at the display copy.) Now a copy
+does not end its batch. The renderer hands its bytes over (`copy_writeback_done`), and the
+guest thread lands the copies of each frame at the display copy two after the one ending
+that frame (`kWritebackLag`), where the renderer has had a frame's time to make them and in
+practice is never waited on. The guest thread lands them at the same guest instruction in a
+replay, so replays stay exact. The price is that the game reads its copy a few frames old,
+which suits a buffer it reads every frame, like the ids under a crosshair, and would not
+suit one it reads once, straight after making it. Before landing, the filter is asked again,
+with `clear` false, whether the copy is still wanted: in the frames since, the game may have
+freed that memory, and the bytes are dropped rather than written over its new owner.
+`GCN_COPYLOG=1` prints each write-back as it lands or is dropped, with how many of its bytes
+are not zero.
 
 ## Programs built in the background
 

@@ -1713,11 +1713,82 @@ static bool display_copy_ends_frame(const EfbCopyCmd& cc) {
     return true;
 }
 
-std::atomic<uint32_t> g_copy_writebacks_done{0};
+// Copies a game's CPU reads (set_copy_writeback in gx.h). The front end lists each as it
+// meets it, with the display copies made before it; the renderer hands over its bytes as it
+// makes it (copy_writeback_done); and the guest thread lands them in RAM at the display
+// copy kWritebackLag after the copy's own frame's (copy_writebacks_land).
+//
+// It used to be done at once: the front end sent the batch so far to the renderer and waited
+// for the bytes, so that the guest's next draw-done found them. But a frontend draws a batch
+// as a frame, so each such copy cut the frame in two, and every piece became a frame of its
+// own: a headset showed the frame before the copy, then the frame after it, each in a display
+// frame of its own, and a game copying three buffers a frame flickered through four pieces at
+// a quarter of its speed, the eyes never seeing the frame whole. Landing them later keeps the
+// frame whole and never waits in practice: two display copies on, the renderer has had a
+// frame's time to make them. The guest thread lands them at the same guest instruction in
+// a replay, so replays stay exact.
+struct Writeback {
+    uint32_t ticket, frame, dest, w, h, format;
+    bool ready = false;
+    std::vector<uint8_t> bytes;
+};
+static std::mutex g_wb_mutex;
+static std::condition_variable g_wb_cv;
+static std::deque<Writeback> g_wb;
+static uint32_t g_wb_ticket;
+static constexpr uint32_t kWritebackLag = 2;
+
 std::atomic<bool> g_renderer_writes_back{false};
 static CopyWritebackFilter g_copy_writeback;
-static uint32_t g_copy_writebacks_asked;
 void set_copy_writeback(CopyWritebackFilter filter) { g_copy_writeback = filter; }
+
+void copy_writeback_done(uint32_t ticket, std::vector<uint8_t>&& bytes) {
+    std::lock_guard<std::mutex> lk(g_wb_mutex);
+    for (auto& w : g_wb)
+        if (w.ticket == ticket) {
+            w.bytes = std::move(bytes);
+            w.ready = true;
+            break;
+        }
+    g_wb_cv.notify_all();
+}
+
+// On the guest thread, at the display copy that makes `frames` of them. A copy made after
+// the display copy numbered f (its Writeback::frame) belongs to frame f + 1, and lands now
+// if f + 1 + kWritebackLag <= frames. The filter is asked again first: in the frames since,
+// the game may have let the memory go -- left the room whose buffers they were, say -- and
+// the bytes are then dropped rather than written over whatever has it now.
+void copy_writebacks_land(uint32_t frames) {
+    std::unique_lock<std::mutex> lk(g_wb_mutex);
+    while (!g_wb.empty() && g_wb.front().frame + 1 + kWritebackLag <= frames) {
+        Writeback& w = g_wb.front();
+        if (!w.ready) {
+            StallTimer stall(Stall::Finish);
+            if (!g_wb_cv.wait_for(lk, std::chrono::seconds(2), [&w] { return w.ready; })) {
+                fprintf(stderr, "[copy] write-back of %08X not done after 2 s; going on without it\n", w.dest);
+                g_wb.pop_front();
+                continue;
+            }
+        }
+        const uint32_t phys = w.dest & 0x01FFFFFF;
+        const bool land = !w.bytes.empty() && phys + w.bytes.size() <= RAM_SIZE && g_copy_writeback &&
+                          g_copy_writeback(w.dest, w.w, w.h, w.format, false);
+        if (land) {
+            memcpy(phys_ptr(w.dest), w.bytes.data(), w.bytes.size());
+            debug_guard_dma("EFB copy write-back", w.dest, (uint32_t)w.bytes.size());
+        }
+        // GCN_COPYLOG: each write-back as it lands, or is dropped, with how many of its bytes
+        // are not zero (an id buffer with nothing in it is all zero).
+        static const bool copylog = getenv("GCN_COPYLOG") != nullptr;
+        if (copylog) {
+            size_t nz = 0;
+            for (uint8_t b : w.bytes) nz += b != 0;
+            fprintf(stderr, "[copy] write-back of %08X from frame %u %s at %u: %zu bytes, %zu not zero\n", w.dest,
+                    w.frame + 1, land ? "landed" : "dropped", frames, w.bytes.size(), nz);
+        }
+        g_wb.pop_front();
+    }
+}
 
 void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
     const uint32_t* bp = g_state.bp;
@@ -1773,24 +1844,19 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
     Cmd c{};
     c.type = CmdType::EfbCopy;
     c.copy = cc;
-    batch().cmds.push_back(c);
     if (cc.writeback) {
-        // Everything up to the copy goes to the renderer now, and the front end waits for
-        // the bytes: the guest's next draw-done waits for the front end, so the CPU reads
-        // them only once they are there. The rest of the frame goes in a batch of its own.
-        const uint32_t ticket = ++g_copy_writebacks_asked;
-        g_have_last_state = false;
-        flush_batch();
-        const auto t0 = std::chrono::steady_clock::now();
-        while ((int32_t)(g_copy_writebacks_done.load() - ticket) < 0) {
-            if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(2)) {
-                fprintf(stderr, "[copy] write-back of %08X not done after 2 s; going on without it\n", dest_addr);
-                g_copy_writebacks_asked = g_copy_writebacks_done.load();
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
-        }
+        std::lock_guard<std::mutex> lk(g_wb_mutex);
+        c.copy.writeback_ticket = ++g_wb_ticket;
+        Writeback w;
+        w.ticket = g_wb_ticket;
+        w.frame = g_frame_counter;
+        w.dest = dest_addr;
+        w.w = cc.dst_w;
+        w.h = cc.dst_h;
+        w.format = cc.format;
+        g_wb.push_back(std::move(w));
     }
+    batch().cmds.push_back(c);
     static int trace_frame = getenv("GCN_TRACE_FRAME") ? atoi(getenv("GCN_TRACE_FRAME")) : -1;
     if ((int)g_frame_counter == trace_frame) {
         Batch& bb = batch();
@@ -1872,6 +1938,7 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
         // skim does them where the guest issued the copy: see SkimSync::Frame in fifo.cpp.
         if (!g_fe_threaded) {
             g_frames_submitted++;
+            copy_writebacks_land(g_frames_submitted.load());
             debug_guest_check("frame");
             heap_trace_frame(g_frames_submitted.load());
         }

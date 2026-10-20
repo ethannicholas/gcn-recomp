@@ -98,15 +98,21 @@ void set_draw_sync_lag(bool on);
 
 // Texture copies a game's CPU reads. An EFB copy is made on the GPU and never reaches RAM,
 // which is all a game drawing with it needs; one that copies the frame out and then moves
-// or reads the bytes with the CPU -- to keep a still of the screen through a load, say --
-// moves whatever RAM held there before. A game names those copies with a filter, called
-// for every texture copy; each it accepts is written to RAM in its texture format, and
-// the front end waits for that before going on, so a draw-done after the copy finds the
-// bytes in place, as on the hardware. It costs a round trip to the renderer per copy, so
-// keep the filter narrow. Ignored without a renderer. `dest` is the physical address the
-// copy register holds.
+// or reads the bytes with the CPU -- to find what is under a crosshair from ids drawn into
+// the frame, say -- reads whatever RAM held there before. A game names those copies with a
+// filter, called for every texture copy; each it accepts is written to RAM in its texture
+// format, but late: at the display copy two after the one that ends the copy's own frame
+// (copy_writebacks_land, on the guest thread, so a replay lands them at the same guest
+// instruction). The hardware has them there by the next draw-done; making a frontend wait
+// for that cut the frame in pieces (xf.cpp has the story), so this suits a copy the game
+// reads every frame and can take a few frames old, not one it reads once, straight after.
+// Before the bytes land the filter is asked again, with `clear` false, whether the copy is
+// still wanted: the game may have freed the memory in between. Ignored without a renderer.
+// `dest` is the physical address the copy register holds.
 using CopyWritebackFilter = bool (*)(uint32_t dest, uint32_t w, uint32_t h, uint32_t format, bool clear);
 void set_copy_writeback(CopyWritebackFilter filter);
+// The guest thread's part, at each display copy, with the count of them so far.
+void copy_writebacks_land(uint32_t frames);
 
 enum class SkimSync { Token, TokenInt, Finish, Frame };
 using SkimSyncFn = void (*)(SkimSync kind, uint32_t value, std::vector<uint8_t>& out);
