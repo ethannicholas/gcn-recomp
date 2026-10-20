@@ -85,7 +85,7 @@ struct Program {
     GLuint prog;
     GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_indmtx, u_indscale,
         u_alpharef, u_fog, u_fogmode, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
-    GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple;
+    GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple, u_uvgrad;
     GLint u_points, u_point_off;
     mutable UniformShadow shadow;
 };
@@ -180,6 +180,12 @@ static constexpr float kEyeScreenOverscan = 1.1f;
 // How far an EyeFrameScreen draw's edge vertices go along the HUD frame's plane, in the
 // frame's own half-sizes: far enough to be well past any eye's field.
 static constexpr float kFrameScreenReach = 40.0f;
+// Per EyeFrameScreen state, eight texture coordinates' gradients over the game's clip x
+// and y (ds/dx, ds/dy, dt/dx, dt/dy), fitted to the state's own vertices: what the shader
+// carries a coordinate out by with its vertex. Zero for a coordinate that is not linear in
+// position over the draw, which then stays as it is. g_cur_uvgrad is the current draw's.
+static std::vector<float> g_frame_grad;
+static const float* g_cur_uvgrad = nullptr;
 // And for a copy of part of the frame put back over itself with a depth test (EyeRestore):
 // per state, 1 for such a draw, with the box its draws cover in the game's clip space
 // (four floats a state), which an eye stretches over its whole field. g_restore_tex holds
@@ -544,6 +550,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_vr = glGetUniformLocation(p, "u_vr");
     pr.u_view = glGetUniformLocation(p, "u_view");
     pr.u_crop = glGetUniformLocation(p, "u_crop");
+    pr.u_uvgrad = glGetUniformLocation(p, "u_uvgrad");
     pr.u_zproj = glGetUniformLocation(p, "u_zproj");
     pr.u_screen_uv = glGetUniformLocation(p, "u_screen_uv");
     pr.u_screen_px = glGetUniformLocation(p, "u_screen_px");
@@ -1911,17 +1918,17 @@ static void apply_state(const PixelState& st, int prim) {
                 mat4_mul(g_vr_view, a, b);  // that frame seen from this eye
                 mat4_mul(g_vr_proj, b, M);
                 if (frame_screen) {
-                    // The same with the picture stretched kFrameScreenReach times in x and
-                    // y before it goes on the frame, for the vertices on its edges; and
-                    // the game's projection, which tells the shader which those are.
-                    float K[16] = {kFrameScreenReach, 0, 0, 0, 0, kFrameScreenReach, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-                    float KP[16], far_[16];
-                    mat4_mul(K, P, KP);
-                    mat4_mul(g_vr_hud_eff, KP, a);
-                    mat4_mul(g_vr_view, a, b);
-                    mat4_mul(g_vr_proj, b, far_);
-                    glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, far_);
+                    // The shader works in the game's clip space, which the game's own
+                    // projection gives it, taking a vertex on the picture's edge
+                    // kFrameScreenReach times out on that axis; then the frame and the
+                    // eye, without the projection. The reach goes in u_proj.
+                    float A[16];
+                    mat4_mul(g_vr_view, g_vr_hud_eff, a);
+                    mat4_mul(g_vr_proj, a, A);
+                    glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, A);
                     glUniformMatrix4fv(pr.u_crop, 1, GL_FALSE, P);
+                    memset(M, 0, sizeof(M));
+                    M[0] = kFrameScreenReach;
                 }
             }
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, M);
@@ -1974,6 +1981,8 @@ static void apply_state(const PixelState& st, int prim) {
         u.facing = facing;
         u.hud_push = hud_push;
     }
+    // Per state, whatever the projection: see g_frame_grad.
+    if (frame_screen && g_cur_uvgrad && pr.u_uvgrad >= 0) glUniform4fv(pr.u_uvgrad, 8, g_cur_uvgrad);
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
     if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
         g_astat.viewport++;
@@ -2916,6 +2925,70 @@ static void filter_answers(const Batch& b, const std::vector<uint8_t>* skip, std
     }
 }
 
+// An EyeFrameScreen state's texture coordinates as functions of the game's clip x and y,
+// where the shader takes them out: only a vertex on the picture's edge moves, so only the
+// triangles with one matter. Each gives its gradients exactly (three points make a plane),
+// and they are kept where all of those triangles agree. A whole-draw fit failed on a
+// filter that draws a full-screen quad and a window's rect in one draw with different
+// mappings: the rect never moves, and its mapping is nothing to the quad's.
+static void fit_uv_gradients(const Batch& b, uint32_t state, float out[32]) {
+    memset(out, 0, 32 * sizeof(float));
+    const PixelState& st = b.states[state];
+    float grad[32];
+    bool have = false, agree[8][2];
+    for (int i = 0; i < 8; i++) agree[i][0] = agree[i][1] = true;
+    for (const Cmd& c : b.cmds) {
+        if (c.type != CmdType::Draw || c.state != state || c.prim != 0) continue;
+        for (uint32_t t = 0; t + 2 < c.count; t += 3) {
+            const GpuVertex* v[3];
+            float x[3], y[3];
+            bool edge = false;
+            for (int j = 0; j < 3; j++) {
+                v[j] = &b.verts[b.indices[c.first + t + j]];
+                x[j] = st.proj[0] * v[j]->pos[0] + st.proj[1];
+                y[j] = st.proj[2] * v[j]->pos[1] + st.proj[3];
+                edge |= fabsf(x[j]) >= 0.98f || fabsf(y[j]) >= 0.98f;
+            }
+            if (!edge) continue;
+            const float dx1 = x[1] - x[0], dy1 = y[1] - y[0], dx2 = x[2] - x[0], dy2 = y[2] - y[0];
+            const float det = dx1 * dy2 - dx2 * dy1;
+            if (fabsf(det) < 1e-8f) continue;
+            float g[32];
+            for (int i = 0; i < 8; i++)
+                for (int k = 0; k < 2; k++) {
+                    const float d1 = v[1]->tex[i][k] - v[0]->tex[i][k], d2 = v[2]->tex[i][k] - v[0]->tex[i][k];
+                    g[i * 4 + k * 2] = (d1 * dy2 - d2 * dy1) / det;
+                    g[i * 4 + k * 2 + 1] = (dx1 * d2 - dx2 * d1) / det;
+                }
+            if (!have) {
+                memcpy(grad, g, sizeof(grad));
+                have = true;
+                continue;
+            }
+            for (int i = 0; i < 8; i++)
+                for (int k = 0; k < 2; k++)
+                    for (int e = 0; e < 2; e++) {
+                        const float a0 = grad[i * 4 + k * 2 + e], a1 = g[i * 4 + k * 2 + e];
+                        if (fabsf(a0 - a1) > 1e-3f * (1.0f + fabsf(a0))) agree[i][k] = false;
+                    }
+        }
+    }
+    if (!have) return;
+    for (int i = 0; i < 8; i++)
+        for (int k = 0; k < 2; k++)
+            if (agree[i][k]) {
+                out[i * 4 + k * 2] = grad[i * 4 + k * 2];
+                out[i * 4 + k * 2 + 1] = grad[i * 4 + k * 2 + 1];
+            }
+    // GCN_EYELOG: what was fitted, per coordinate the state uses.
+    static const bool log = getenv("GCN_EYELOG") != nullptr;
+    if (log)
+        for (int i = 0; i < st.num_texgens && i < 8; i++)
+            fprintf(stderr, "[eye] frame-screen state %u coord %d: s %s %.4f %.4f, t %s %.4f %.4f\n", state, i,
+                    agree[i][0] ? "kept" : "dropped", grad[i * 4], grad[i * 4 + 1], agree[i][1] ? "kept" : "dropped",
+                    grad[i * 4 + 2], grad[i * 4 + 3]);
+}
+
 // Where the eye stands and what it leaves out, for the batch about to be drawn: the chase
 // camera with its pitch taken out (as the game's pitch hook says, if it has one), unless
 // first person is on and the game's eye hook has somewhere better to put it
@@ -2926,6 +2999,7 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_late.clear();
     g_flat3d.clear();
     g_screen.clear();
+    g_frame_grad.clear();
     g_restore.clear();
     g_restore_tex.clear();
     g_facing.clear();
@@ -2985,6 +3059,10 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         }
         if (a == EyeScreen || a == EyeFrameScreen) {
             if (g_screen.empty()) g_screen.assign(b.states.size(), 0);
+            if (a == EyeFrameScreen && g_screen[c.state] != 2) {
+                if (g_frame_grad.empty()) g_frame_grad.assign(b.states.size() * 32, 0.0f);
+                fit_uv_gradients(b, c.state, &g_frame_grad[c.state * 32]);
+            }
             g_screen[c.state] = a == EyeScreen ? 1 : 2;
             continue;
         }
@@ -3709,6 +3787,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
                 gl_state_invalidate();
             }
             g_cur_screen = g_screen.empty() ? 0 : g_screen[c.state];
+            g_cur_uvgrad = g_cur_screen == 2 && !g_frame_grad.empty() ? &g_frame_grad[c.state * 32] : nullptr;
             g_cur_facing = !g_facing.empty() && g_facing[c.state];
             g_cur_true_scale = !g_true_scale.empty() && g_true_scale[c.state];
             g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
@@ -3717,6 +3796,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             apply_state(b.states[c.state], c.prim);
             g_cur_flat3d = false;
             g_cur_screen = 0;
+            g_cur_uvgrad = nullptr;
             g_cur_facing = false;
             g_cur_true_scale = false;
             g_cur_hud_push = 1.0f;

@@ -224,11 +224,13 @@ uniform float u_point_size;
 //   4 = as 1, but the depth written within the draw's band is the game's own: a
 //       foreground layer (render_set_depth_layers), where the band is too thin for the
 //       eye's.
-//   6 = a 2D element over the whole picture on the HUD frame (EyeFrameScreen): u_proj
-//       puts it there, u_view puts it there with the frame stretched far out, for the
-//       vertices on the picture's edges, and u_crop is the game's own projection, which
-//       says which those are.
+//   6 = a 2D element over the whole picture on the HUD frame (EyeFrameScreen): u_crop is
+//       the game's own projection, u_view takes the game's clip space onto the frame and
+//       into the eye, and u_proj.x is how far along the frame a vertex on the picture's
+//       edge is taken. u_uvgrad[i] is how texture coordinate i changes with the game's clip
+//       x and y over the draw (ds/dx, ds/dy, dt/dx, dt/dy), to carry it out with the vertex.
 uniform int u_vr;
+uniform vec4 u_uvgrad[8];
 uniform mat4 u_view;       // eye transform, relative to the game's camera; under 3, fog's
 uniform mat4 u_crop;       // four clip distances, each linear in the vertex
 // The game's own projection reduced to what depth needs, as a function of view-space z:
@@ -263,6 +265,7 @@ void main() {
     // which fogs exactly as the flat view does whatever the head is doing.
     static const bool eye_fog_z = !(getenv("GCN_EYE_FOGZ") && atoi(getenv("GCN_EYE_FOGZ")) == 0);
     s += "    vec2 gx_clip = vec2(1.0);\n";
+    s += "    vec2 push_d = vec2(0.0);\n";
     s += "    v_gdepth = vec2(-1.0, 1.0);\n";
     s += eye_fog_z ? "    float fz = (u_vr == 1 || u_vr == 3 || u_vr == 4) ? (u_view * vec4(a_pos, 1.0)).z : a_pos.z;\n"
                    : "    float fz = a_pos.z;\n";
@@ -307,9 +310,21 @@ void main() {
         // elements -- a hole cut for a window -- and whose edges must not show: on the
         // HUD frame, but a vertex on the picture's edge goes far out along the frame's
         // plane, past the eye's field, so the draw covers the view the frame leaves.
+        // Each axis on its own: a vertex at the picture's left edge and the window's top
+        // goes out to the left and stays at the window's top. Taken out in both, the
+        // bands above and below a window went out of sight, and those beside it were
+        // stretched into slanting wedges.
+        // The texture coordinates go out with it, by how they change over the draw: a
+        // full-screen quad has every corner on the edge, and taken out without its
+        // coordinates its texture was stretched as far -- a filter's scan lines, forty
+        // times as wide, were gone.
         vec4 g = u_crop * vec4(a_pos, 1.0);
-        bool edge = abs(g.x) >= 0.98 * g.w || abs(g.y) >= 0.98 * g.w;
-        gl_Position = (edge ? u_view : u_proj) * vec4(a_pos, 1.0);
+        float reach = u_proj[0][0];
+        vec2 g0 = g.xy;
+        if (abs(g.x) >= 0.98 * g.w) g.x *= reach;
+        if (abs(g.y) >= 0.98 * g.w) g.y *= reach;
+        push_d = (g.xy - g0) / g.w;
+        gl_Position = u_view * g;
     } else if (u_vr == 3) {
         // Part way between theater and stereo (morph_chain). The depth bands are kept as
         // the eye keeps them (u_vr 1, above): without them a sky modelled a few tens of
@@ -364,7 +379,9 @@ void main() {
     v_col1 = a_col1;
 )";
     for (int i = 0; i < 8; i++) {
-        snprintf(buf, sizeof(buf), "    v_tex[%d] = a_tex%d;\n", i, i);
+        snprintf(buf, sizeof(buf),
+                 "    v_tex[%d] = a_tex%d + vec3(dot(u_uvgrad[%d].xy, push_d), dot(u_uvgrad[%d].zw, push_d), 0.0);\n",
+                 i, i, i, i);
         s += buf;
     }
     s += "}\n";

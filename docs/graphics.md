@@ -281,7 +281,16 @@ is far wider than the frame -- and the two did not line up, nor did either eye's
 the other's. Such a draw goes on the HUD frame like the window (`u_vr` 6), and a vertex on the
 picture's edge, as the game's own projection says, is taken `kFrameScreenReach` (40) times
 out along the frame's plane: the inside sits where the frame puts it and the outside still
-covers the view, with no edge in sight. The layer is `hud-frame(screen)`.
+covers the view, with no edge in sight. The layer is `hud-frame(screen)`. Only the axis on
+the edge moves: at first both did, and a band above a window, whose corner is on the left
+edge at the window's top, went out of sight with its inner edge, while the bands beside it
+were stretched into slanting wedges. Texture coordinates go out with their vertex (`u_uvgrad`
+in the vertex shader): a full-screen quad has every corner on the edge, and moved without its
+coordinates its texture -- a filter's scan lines -- was stretched forty times over and gone.
+The renderer fits each coordinate's gradient over the game's clip x and y from the state's
+triangles that touch the edge (`fit_uv_gradients`), each exactly, and keeps it where they
+agree; a draw's triangles inside the picture, a window's rect among them, never move and
+are not asked. `GCN_EYELOG=1` prints the fits.
 
 `EyeRestore` is for a cut-away: a game copies part of the frame (no clear), draws
 something, then draws the copy back over the rect it came from, orthographically, at a
