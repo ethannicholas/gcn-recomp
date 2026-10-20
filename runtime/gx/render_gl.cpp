@@ -2845,6 +2845,56 @@ static void apply_view_turn(const Batch& b) {
     compose_world_view();
 }
 
+// The game's draw filter's answer for each state the batch's draws use (-1 for a state no
+// draw outside `skip` uses), and what each orthographic state's draws cover together, in its
+// clip space (x = p0*x + p1, y = p2*y + p3 for GX's orthographic projection), four floats a
+// state, for EyeDrawFacts' box. A draw's facts are the state's, so each state is asked once
+// and its answer stands for its draws.
+static void filter_answers(const Batch& b, const std::vector<uint8_t>* skip, std::vector<int8_t>& answer,
+                           std::vector<float>& box) {
+    note_fullscreen_copies(b);
+    box.assign(b.states.size() * 4, 0.0f);
+    std::vector<float> area(b.states.size(), 0.0f);
+    std::vector<uint8_t> boxed(b.states.size(), 0);
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || (skip && (*skip)[i])) continue;
+        const PixelState& st = b.states[c.state];
+        if ((int)st.proj[6] == 0) continue;
+        float* r = &box[c.state * 4];
+        for (uint32_t v = 0; v < c.count; v++) {
+            const float* pos = b.verts[b.indices[c.first + v]].pos;
+            const float x = st.proj[0] * pos[0] + st.proj[1], y = st.proj[2] * pos[1] + st.proj[3];
+            if (!boxed[c.state]) { r[0] = r[1] = x; r[2] = r[3] = y; boxed[c.state] = 1; }
+            r[0] = std::min(r[0], x); r[1] = std::max(r[1], x);
+            r[2] = std::min(r[2], y); r[3] = std::max(r[3], y);
+        }
+        if (c.prim != 0) continue;  // lines and points cover nothing
+        auto clip = [&](uint32_t v, float& x, float& y) {
+            const float* pos = b.verts[b.indices[c.first + v]].pos;
+            x = st.proj[0] * pos[0] + st.proj[1];
+            y = st.proj[2] * pos[1] + st.proj[3];
+        };
+        for (uint32_t t = 0; t + 2 < c.count; t += 3) {
+            float x0, y0, x1, y1, x2, y2;
+            clip(t, x0, y0); clip(t + 1, x1, y1); clip(t + 2, x2, y2);
+            area[c.state] += 0.5f * fabsf((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+        }
+    }
+    answer.assign(b.states.size(), -1);
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || (skip && (*skip)[i])) continue;
+        int8_t& a = answer[c.state];
+        if (a >= 0) continue;
+        EyeDrawFacts f = draw_facts(b.states[c.state]);
+        const float* r = &box[c.state * 4];
+        f.clip_x0 = r[0]; f.clip_x1 = r[1]; f.clip_y0 = r[2]; f.clip_y1 = r[3];
+        f.clip_area = area[c.state];
+        a = (int8_t)g_eye_filter(b.states[c.state], f);
+    }
+}
+
 // Where the eye stands and what it leaves out, for the batch about to be drawn: the chase
 // camera with its pitch taken out (as the game's pitch hook says, if it has one), unless
 // first person is on and the game's eye hook has somewhere better to put it
@@ -2895,54 +2945,18 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         if (g_pitch_hook) g_pitch_hook(b, &g_world_pitch);
         world_pitch_matrix(g_world_xform);
     }
-    // The game's draw filter, on top of whatever the eye hook hid. A draw's facts are
-    // the state's, so each state is asked once and its answer stands for its draws.
+    // The game's draw filter, on top of whatever the eye hook hid.
     if (!g_eye_filter) return;
-    note_fullscreen_copies(b);
-    // What each orthographic state's draws cover together, in its clip space (x = p0*x + p1,
-    // y = p2*y + p3 for GX's orthographic projection), for EyeDrawFacts' box.
-    std::vector<float> box(b.states.size() * 4, 0.0f), area(b.states.size(), 0.0f);
-    std::vector<uint8_t> boxed(b.states.size(), 0);
-    for (size_t i = 0; i < b.cmds.size(); i++) {
-        const Cmd& c = b.cmds[i];
-        if (c.type != CmdType::Draw || skip[i]) continue;
-        const PixelState& st = b.states[c.state];
-        if ((int)st.proj[6] == 0) continue;
-        float* r = &box[c.state * 4];
-        for (uint32_t v = 0; v < c.count; v++) {
-            const float* pos = b.verts[b.indices[c.first + v]].pos;
-            const float x = st.proj[0] * pos[0] + st.proj[1], y = st.proj[2] * pos[1] + st.proj[3];
-            if (!boxed[c.state]) { r[0] = r[1] = x; r[2] = r[3] = y; boxed[c.state] = 1; }
-            r[0] = std::min(r[0], x); r[1] = std::max(r[1], x);
-            r[2] = std::min(r[2], y); r[3] = std::max(r[3], y);
-        }
-        if (c.prim != 0) continue;  // lines and points cover nothing
-        auto clip = [&](uint32_t v, float& x, float& y) {
-            const float* pos = b.verts[b.indices[c.first + v]].pos;
-            x = st.proj[0] * pos[0] + st.proj[1];
-            y = st.proj[2] * pos[1] + st.proj[3];
-        };
-        for (uint32_t t = 0; t + 2 < c.count; t += 3) {
-            float x0, y0, x1, y1, x2, y2;
-            clip(t, x0, y0); clip(t + 1, x1, y1); clip(t + 2, x2, y2);
-            area[c.state] += 0.5f * fabsf((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
-        }
-    }
-    std::vector<int8_t> answer(b.states.size(), -1);
+    std::vector<int8_t> answer;
+    std::vector<float> box;
+    filter_answers(b, &skip, answer, box);
     std::vector<uint8_t> hidden_mtx;   // EyeHideObject: the position matrices to clear of draws
     std::vector<uint8_t> late_mtx;     // EyeLateObject: those whose draws go last
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
         if (c.type != CmdType::Draw || skip[i]) continue;
-        int8_t& a = answer[c.state];
-        if (a < 0) {
-            EyeDrawFacts f = draw_facts(b.states[c.state]);
-            const float* r = &box[c.state * 4];
-            f.clip_x0 = r[0]; f.clip_x1 = r[1]; f.clip_y0 = r[2]; f.clip_y1 = r[3];
-            f.clip_area = area[c.state];
-            a = (int8_t)g_eye_filter(b.states[c.state], f);
-        }
-        if (a == EyeKeep) continue;
+        const int8_t a = answer[c.state];
+        if (a == EyeKeep || a < 0) continue;
         if (a == EyeFlat) {
             if (g_flat3d.empty()) g_flat3d.assign(b.states.size(), 0);
             g_flat3d[c.state] = 1;
@@ -4230,9 +4244,25 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
     return presented;
 }
 
+// The flat view shows everything the eyes leave out, but what the game's filter says to
+// leave out everywhere (EyeHideEverywhere).
+static void panel_hide(const Batch& b) {
+    g_hide.clear();
+    if (!g_eye_filter) return;
+    std::vector<int8_t> answer;
+    std::vector<float> box;
+    filter_answers(b, nullptr, answer, box);
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || answer[c.state] != EyeHideEverywhere) continue;
+        if (g_hide.empty()) g_hide.assign(b.cmds.size(), 0);
+        g_hide[i] = 1;
+    }
+}
+
 bool render_execute(Batch& b) {
     frame_observe(b, nullptr);
-    g_hide.clear();   // the flat view shows everything, whatever the eyes leave out
+    panel_hide(b);
     return execute_batch(b, true);
 }
 
@@ -4241,7 +4271,7 @@ void render_set_panel_band(float band) { g_panel_band = band; }
 bool render_execute_stereo_pair(Batch& b, unsigned fbo_l, unsigned fbo_r, float eye_sep,
                                 float panel_width) {
     frame_observe(b, nullptr);
-    g_hide.clear();
+    panel_hide(b);
     const GLuint out = g_output_fbo;
     g_flat_halfw = panel_width > 0.0f ? 0.5f * panel_width : 1.0f;
     g_flat_eye = -0.5f * eye_sep;

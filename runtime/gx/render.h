@@ -113,8 +113,13 @@ struct PixelState {
 // puts in a near layer's depth band only so that it is drawn over everything -- a marker
 // on a target, a reticle out where the aim is: the layer's scale towards the camera
 // (render_set_depth_layers) would bring it near, where the eyes cannot fuse it with what
-// it marks. It is drawn at its modelled distance and keeps its band's depth. The flat view is untouched; a hidden draw's textures are
-// kept alive. For a game that hides a model's materials (by TexData::hash, the same in
+// it marks. It is drawn at its modelled distance and keeps its band's depth.
+// EyeHideEverywhere leaves a draw out of the eyes as EyeHideDraw does, and out of the flat
+// view too wherever a frontend has installed the filter -- a headset's panel
+// (render_execute, render_execute_stereo_pair), which then asks the filter as well: for a
+// stray draw that is invisible on a television and not on a panel seen up close, such as a
+// pixel's quad.
+// Otherwise the flat view is untouched; a hidden draw's textures are kept alive. For a game that hides a model's materials (by TexData::hash, the same in
 // every run) or an effect that cannot be re-projected (a screen-space refraction of part
 // of the frame).
 struct EyeDrawFacts {
@@ -133,7 +138,7 @@ struct EyeDrawFacts {
     float clip_x0, clip_x1, clip_y0, clip_y1, clip_area;
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8 };
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8, EyeHideEverywhere = 9 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };

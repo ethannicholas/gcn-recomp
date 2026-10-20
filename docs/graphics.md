@@ -456,6 +456,14 @@ frame, and the right image was whole because the left pass's display copy had cl
 EFB. EFB copies are still dropped at a change of scale, so a copy made before the change
 and sampled after it is missing for a frame.
 
+
+**What the panel leaves out.** The panel is the flat frame, so the game's eye filter has no
+say over it, with one exception: a draw it calls `EyeHideEverywhere` is left out of the
+panel too (`render_execute` and `render_execute_stereo_pair` ask the filter, where a
+frontend has installed one, and hide those draws). That is for a stray draw that a
+television never shows and a panel seen up close does -- a quad a pixel across at the
+centre of the screen, drawn every frame, was a speck in the middle of every menu and map.
+
 ## What the render thread spends a stereo frame on
 
 A stereo frame is the batch drawn three times: a flat pass into the EFB, then each eye
