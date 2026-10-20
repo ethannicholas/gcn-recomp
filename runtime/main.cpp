@@ -249,6 +249,7 @@ int main(int argc, char** argv) {
     if (iso_default.empty()) iso_default = plat_find_file("rom", ".ciso");
     const char* iso = iso_default.c_str();
     bool headless = false, hidden = false, input_log = true, first_person = false, fast = false, vr = false;
+    uint32_t exit_after = 0;  // --exit-after=N: quit once N frames have been presented
     std::string input_log_dir, replay_dir;
     // --record=<file>[ --record-size=WxH]: a movie of the window with the game's audio (record.h).
     const char* record_to = nullptr;
@@ -281,6 +282,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--headless")) headless = true;
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
         else if (!strcmp(argv[i], "--fast")) fast = true;
+        else if (!strncmp(argv[i], "--exit-after=", 13)) exit_after = (uint32_t)strtoul(argv[i] + 13, nullptr, 10);
         else if (!strcmp(argv[i], "--cull-swap")) gx::g_cull_swap = true;
         else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--dump-dir=", 11)) gx::g_dump_dir = argv[i] + 11;
@@ -418,6 +420,7 @@ int main(int argc, char** argv) {
 
     bool running = true;
     uint32_t frames = 0;
+    uint32_t presented_total = 0;
     const float theater_stereo_m = getenv("GCN_THEATER_STEREO") ? (float)atof(getenv("GCN_THEATER_STEREO")) : 0.0f;
     auto t0 = std::chrono::steady_clock::now();
     while (running) {
@@ -478,6 +481,8 @@ int main(int argc, char** argv) {
             }
             SDL_GL_SwapWindow(win);
             frames++;
+            // The window-close path: the loop ends and the shutdown below runs as usual.
+            if (exit_after && ++presented_total >= exit_after) running = false;
             auto now = std::chrono::steady_clock::now();
             double secs = std::chrono::duration<double>(now - t0).count();
             if (secs >= 2.0) {
