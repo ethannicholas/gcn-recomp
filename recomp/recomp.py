@@ -312,6 +312,18 @@ def main():
 
     os.makedirs(outdir, exist_ok=True)
 
+    # Every configure runs this, and a file rewritten with what it already held is still
+    # newer than its object: after any change to a project's CMake, the whole game would
+    # compile again. Only a file whose text differs is written.
+    def write(fn, text):
+        path = os.path.join(outdir, fn)
+        try:
+            if open(path).read() == text:
+                return
+        except OSError:
+            pass
+        open(path, 'w').write(text)
+
     def cname(addr):
         return f'fn_{addr:08X}'
 
@@ -509,7 +521,7 @@ def main():
                 table.append(f'\t{{0x{e:08X}u, {cname(e)}, "{nm}"}},')
         fn = f'recomp_{k // FUNCS_PER_FILE:03d}.c'
         files.append(fn)
-        open(os.path.join(outdir, fn), 'w').write('\n'.join(out) + '\n')
+        write(fn, '\n'.join(out) + '\n')
 
     # tail calls to f.end for the very last function may reference an unknown symbol
     table.append('};')
@@ -540,9 +552,9 @@ def main():
                      ', '.join(f'{{{s}u, 0x{c:08X}u, 0x{sz:X}u, {int(e)}u}}' for s, c, sz, e in secs) + '}},')
     table.append('\t{0, 0, 0, {{0, 0, 0, 0}}}};')
     table.append(f'const uint32_t g_recomp_rel_count = {len(rels)};')
-    open(os.path.join(outdir, 'recomp_funcs.h'), 'w').write('\n'.join(header) + '\n')
-    open(os.path.join(outdir, 'recomp_table.c'), 'w').write('\n'.join(table) + '\n')
-    open(os.path.join(outdir, 'sources.cmake'), 'w').write(
+    write('recomp_funcs.h', '\n'.join(header) + '\n')
+    write('recomp_table.c', '\n'.join(table) + '\n')
+    write('sources.cmake',
         'set(RECOMP_SOURCES\n' + '\n'.join(f'  ${{RECOMP_GEN_DIR}}/{f}' for f in files + ['recomp_table.c']) + '\n)\n')
 
     print(f'functions: {len(funcs)}  jumptable targets: {jt_count}  extra indirect targets: {extra_targets}', file=sys.stderr)

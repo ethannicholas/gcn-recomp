@@ -59,6 +59,67 @@ macro(_gcn_fetch_openxr_headers)
   set(GCN_OPENXR_INCLUDE ${openxr_headers_SOURCE_DIR}/include)
 endmacro()
 
+# SDL2 for Windows, which has no prebuilt ARM64 binaries: built from source once per
+# compiler and configuration into GCN_SDL2_PREFIX (under %LOCALAPPDATA%\gcn-recomp), which
+# every project's desktop builds share. Built inside each build directory, it was half of
+# a desktop build's compile time on a two-core machine. A lock keeps two configures from
+# building it at once; delete the directory to build it again.
+function(_gcn_sdl2_shared out_target)
+  set(_ver 2.30.9)
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_config Debug)  # the debug C runtime, which a library built for release cannot share
+  else()
+    set(_config Release)
+  endif()
+  string(MAKE_C_IDENTIFIER "${CMAKE_C_COMPILER_ID}${CMAKE_C_COMPILER_VERSION}_${CMAKE_SYSTEM_PROCESSOR}_${_config}" _tag)
+  set(_root "$ENV{LOCALAPPDATA}/gcn-recomp")
+  if(NOT DEFINED ENV{LOCALAPPDATA})
+    set(_root ${CMAKE_BINARY_DIR})
+  endif()
+  file(TO_CMAKE_PATH "${_root}" _root)
+  set(GCN_SDL2_PREFIX "${_root}/SDL2-${_ver}-${_tag}" CACHE PATH "SDL2 built once for this compiler, shared by every project")
+  set(_prefix ${GCN_SDL2_PREFIX})
+  if(NOT EXISTS ${_prefix}/built)
+    file(MAKE_DIRECTORY ${_root})
+    file(LOCK ${_prefix}.lock GUARD FUNCTION TIMEOUT 3600)
+    if(NOT EXISTS ${_prefix}/built)
+      message(STATUS "Building SDL2 ${_ver} into ${_prefix} (once for every project)")
+      set(_work ${_prefix}-work)
+      file(REMOVE_RECURSE ${_work} ${_prefix})
+      file(DOWNLOAD https://github.com/libsdl-org/SDL/releases/download/release-${_ver}/SDL2-${_ver}.tar.gz
+           ${_work}/SDL2.tar.gz
+           EXPECTED_HASH SHA256=24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beba4
+           STATUS _st)
+      list(GET _st 0 _code)
+      if(NOT _code EQUAL 0)
+        message(FATAL_ERROR "downloading SDL2 failed: ${_st}")
+      endif()
+      file(ARCHIVE_EXTRACT INPUT ${_work}/SDL2.tar.gz DESTINATION ${_work})
+      set(_args -S ${_work}/SDL2-${_ver} -B ${_work}/build -G ${CMAKE_GENERATOR}
+                -DCMAKE_BUILD_TYPE=${_config} -DCMAKE_INSTALL_PREFIX=${_prefix}
+                -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+                -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF)
+      foreach(v CMAKE_MAKE_PROGRAM CMAKE_RC_COMPILER CMAKE_MSVC_RUNTIME_LIBRARY)
+        if(${v})
+          list(APPEND _args -D${v}=${${v}})
+        endif()
+      endforeach()
+      execute_process(COMMAND ${CMAKE_COMMAND} ${_args} RESULT_VARIABLE _r OUTPUT_QUIET)
+      if(_r EQUAL 0)
+        execute_process(COMMAND ${CMAKE_COMMAND} --build ${_work}/build --target install RESULT_VARIABLE _r OUTPUT_QUIET)
+      endif()
+      if(NOT _r EQUAL 0)
+        message(FATAL_ERROR "building SDL2 in ${_work} failed")
+      endif()
+      file(REMOVE_RECURSE ${_work})
+      file(WRITE ${_prefix}/built "${_ver}\n")
+    endif()
+    file(LOCK ${_prefix}.lock RELEASE)
+  endif()
+  find_package(SDL2 ${_ver} EXACT CONFIG REQUIRED PATHS ${_prefix} NO_DEFAULT_PATH)
+  set(${out_target} SDL2::SDL2-static PARENT_SCOPE)
+endfunction()
+
 # The OpenXR loader, from Khronos' SDK source at the version the Android build's AAR is.
 # Static, and nothing but the loader.
 macro(_gcn_fetch_openxr_loader)
@@ -314,6 +375,15 @@ function(gcn_add_game)
     else()
       target_compile_options(game_recomp PRIVATE -O2 -fno-strict-aliasing -Wno-unused-label -Wno-unused-variable
                              -Wno-parentheses-equality -ffp-contract=off)
+      # Line tables only, where the build has debug info at all: a crash's frames still
+      # resolve to a line (addr2line, a symbolized backtrace), and nobody reads a
+      # recompiled function's locals. Full debug info took about 15% longer to compile and
+      # made the binaries nearly twice the size (110 MB against 63 for an Android build).
+      if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(game_recomp PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:-gline-tables-only>)
+      else()
+        target_compile_options(game_recomp PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:-g1>)
+      endif()
     endif()
   endif()
 
@@ -381,21 +451,11 @@ function(gcn_add_game)
   endif()
 
   # SDL2: pkg-config where it exists; on Windows there are no prebuilt ARM64 binaries,
-  # so build it from source.
+  # so it is built from source, once for all projects (_gcn_sdl2_shared).
   if(GCN_BENCH_ONLY OR GCN_VISIONOS)
     set(GCN_SDL_TARGET "")
   elseif(WIN32)
-    include(FetchContent)
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
-    set(SDL_TEST OFF CACHE BOOL "" FORCE)
-    set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
-    FetchContent_Declare(SDL2
-      URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9.tar.gz
-      URL_HASH SHA256=24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beba4
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-    FetchContent_MakeAvailable(SDL2)
-    set(GCN_SDL_TARGET SDL2::SDL2-static)
+    _gcn_sdl2_shared(GCN_SDL_TARGET)
   else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
@@ -422,26 +482,52 @@ function(gcn_add_game)
     list(APPEND GCN_PLATFORM_LIBS OpenGL::GL)
   endif()
 
-  # What the runtime knows about the game it was built for.
+  # What the runtime knows about the game it was built for. The image, the label and the
+  # frame rate are read only by the entry points (GCN_ENTRY_DEFS), which every target
+  # compiles for itself; with them out of the rest, the runtime below the frontends is
+  # compiled once for all of a build's targets (gcn_core), and changing one of them
+  # compiles no more than the entry points again.
   set(GCN_GAME_DEFS
-    GCN_DEFAULT_ISO="${GAME_ISO}"
     GCN_GAME_TITLE="${G_TITLE}"
-    GCN_APP_LABEL="${G_LABEL}"
-    GCN_DISC_ID="${G_DISC_ID}"
-    GCN_GAME_FPS=${G_FPS})
+    GCN_DISC_ID="${G_DISC_ID}")
   if(GCN_GUEST_CHECKS)
     list(APPEND GCN_GAME_DEFS GCN_GUEST_CHECKS)
+  endif()
+  set(GCN_ENTRY_DEFS
+    GCN_DEFAULT_ISO="${GAME_ISO}"
+    GCN_APP_LABEL="${G_LABEL}"
+    GCN_GAME_FPS=${G_FPS})
+
+  # CORE_SOURCES but the audio stub, as objects every target links: the benchmark, the
+  # desktop executable, the harness and the headset app each compiled their own copy
+  # before, two or three times the work for the same objects.
+  if(HAVE_GAME_ISO AND NOT GCN_VISIONOS)
+    set(GCN_CORE_OBJ_SOURCES ${CORE_SOURCES})
+    list(REMOVE_ITEM GCN_CORE_OBJ_SOURCES ${RT}/audio_stub.cpp)
+    add_library(gcn_core OBJECT ${GCN_CORE_OBJ_SOURCES})
+    _gcn_set_standards(gcn_core)
+    target_include_directories(gcn_core PRIVATE ${RT} ${RECOMP_GEN_DIR})
+    # For game_recomp's public definitions: the CPU struct's layout and the memory base.
+    target_link_libraries(gcn_core PRIVATE game_recomp)
+    target_compile_options(gcn_core PRIVATE ${GCN_RUNTIME_WARNINGS})
+    target_compile_definitions(gcn_core PRIVATE ${GCN_GAME_DEFS})
+    if(ANDROID)
+      # The headset app is a shared library.
+      set_target_properties(gcn_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endif()
   endif()
 
   # Headless benchmark: reports how fast the guest advances, with no graphics or audio
   # in the way. Used to compare host CPUs.
   if(HAVE_GAME_ISO AND NOT GCN_VISIONOS)
-    add_executable(${G_NAME}_bench ${BENCH_SOURCES} ${G_SOURCES})
+    set(_bench_sources ${BENCH_SOURCES})
+    list(REMOVE_ITEM _bench_sources ${GCN_CORE_OBJ_SOURCES})
+    add_executable(${G_NAME}_bench ${_bench_sources} ${G_SOURCES})
     _gcn_set_standards(${G_NAME}_bench)
     target_include_directories(${G_NAME}_bench PRIVATE ${RT} ${RECOMP_GEN_DIR})
-    target_link_libraries(${G_NAME}_bench PRIVATE game_recomp)
+    target_link_libraries(${G_NAME}_bench PRIVATE gcn_core game_recomp)
     target_compile_options(${G_NAME}_bench PRIVATE ${GCN_RUNTIME_WARNINGS})
-    target_compile_definitions(${G_NAME}_bench PRIVATE ${GCN_GAME_DEFS})
+    target_compile_definitions(${G_NAME}_bench PRIVATE ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS})
     if(WIN32)
       target_link_libraries(${G_NAME}_bench PRIVATE dbghelp ws2_32)
     endif()
@@ -461,16 +547,18 @@ function(gcn_add_game)
     target_include_directories(runtime_check PRIVATE ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR})
     target_link_libraries(runtime_check PRIVATE ${GCN_SDL_TARGET})
     target_compile_options(runtime_check PRIVATE ${GCN_RUNTIME_WARNINGS})
-    target_compile_definitions(runtime_check PRIVATE ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
+    target_compile_definitions(runtime_check PRIVATE ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS} ${GCN_GL_DEFS})
   endif()
 
   if(HAVE_GAME_ISO AND NOT GCN_BENCH_ONLY AND NOT GCN_VISIONOS)
-    add_executable(${G_NAME} ${RUNTIME_SOURCES} ${G_SOURCES})
+    set(_desktop_sources ${RUNTIME_SOURCES})
+    list(REMOVE_ITEM _desktop_sources ${GCN_CORE_OBJ_SOURCES})
+    add_executable(${G_NAME} ${_desktop_sources} ${G_SOURCES})
     _gcn_set_standards(${G_NAME})
     target_include_directories(${G_NAME} PRIVATE ${GLAD_INCLUDE_DIR})
-    target_link_libraries(${G_NAME} PRIVATE game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS})
+    target_link_libraries(${G_NAME} PRIVATE gcn_core game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS})
     target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
-    target_compile_definitions(${G_NAME} PRIVATE ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
+    target_compile_definitions(${G_NAME} PRIVATE ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS} ${GCN_GL_DEFS})
 
     # PC VR (--vr): the headset frontend in openxr/, on the window's own GL context. The
     # loader is Khronos' own, built from source and linked statically, so the executable
@@ -491,21 +579,29 @@ function(gcn_add_game)
   # prebuilt libopenxr_loader.so, so nothing has to be committed as a binary.
   if(ANDROID AND HAVE_GAME_ISO AND G_ANDROID_PACKAGE)
     set(AND_DIR ${GCN_RECOMP_DIR}/android)
-    set(ANDROID_SOURCES ${CORE_SOURCES} ${RT}/audio.cpp ${AND_DIR}/audio_aaudio.cpp
+    set(ANDROID_DEFS ${GCN_GAME_DEFS} ${GCN_GL_DEFS} GCN_LOG_TAG="${G_NAME}")
+
+    # What the harness and the app share past gcn_core -- the mix and its AAudio device, the
+    # renderer and the game's sources -- compiled once for both.
+    add_library(${G_NAME}_android OBJECT ${RT}/audio.cpp ${AND_DIR}/audio_aaudio.cpp
       ${RT}/gx/render_gl.cpp ${RT}/gx/shadergen.cpp ${RT}/gx/gl_load.cpp ${RT}/png.cpp
       ${GLAD_SOURCE} ${G_SOURCES})
-    list(REMOVE_ITEM ANDROID_SOURCES ${RT}/audio_stub.cpp)
-    set(ANDROID_DEFS ${GCN_GAME_DEFS} ${GCN_GL_DEFS} GCN_LOG_TAG="${G_NAME}")
+    _gcn_set_standards(${G_NAME}_android)
+    target_include_directories(${G_NAME}_android PRIVATE ${AND_DIR} ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR})
+    target_link_libraries(${G_NAME}_android PRIVATE game_recomp)
+    target_compile_options(${G_NAME}_android PRIVATE ${GCN_RUNTIME_WARNINGS})
+    target_compile_definitions(${G_NAME}_android PRIVATE ${ANDROID_DEFS})
+    set_target_properties(${G_NAME}_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
     # Headless EGL frontend: the real renderer, offscreen, writing frames as PNGs. Not an
     # APK: it validates the GL ES renderer on a device over adb, and shows the stereo path
     # without anyone wearing the headset.
-    add_executable(${G_NAME}_egl ${ANDROID_SOURCES} ${AND_DIR}/egl_main.cpp)
+    add_executable(${G_NAME}_egl ${AND_DIR}/egl_main.cpp)
     _gcn_set_standards(${G_NAME}_egl)
     target_include_directories(${G_NAME}_egl PRIVATE ${AND_DIR} ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR})
-    target_link_libraries(${G_NAME}_egl PRIVATE game_recomp EGL log aaudio)
+    target_link_libraries(${G_NAME}_egl PRIVATE gcn_core ${G_NAME}_android game_recomp EGL log aaudio)
     target_compile_options(${G_NAME}_egl PRIVATE ${GCN_RUNTIME_WARNINGS})
-    target_compile_definitions(${G_NAME}_egl PRIVATE ${ANDROID_DEFS})
+    target_compile_definitions(${G_NAME}_egl PRIVATE ${ANDROID_DEFS} ${GCN_ENTRY_DEFS})
 
     include(FetchContent)
     FetchContent_Declare(openxr_aar
@@ -524,13 +620,13 @@ function(gcn_add_game)
     # The installable app: android.app.NativeActivity loads lib<name>.so and calls
     # android_main(), so there is no Java source at all. The library name must match the
     # manifest's android.app.lib_name, which the template below fills in.
-    add_library(${G_NAME} SHARED ${ANDROID_SOURCES} ${AND_DIR}/openxr_main.cpp ${GCN_RECOMP_DIR}/openxr/xr_frontend.cpp)
+    add_library(${G_NAME} SHARED ${AND_DIR}/openxr_main.cpp ${GCN_RECOMP_DIR}/openxr/xr_frontend.cpp)
     _gcn_set_standards(${G_NAME})
     target_include_directories(${G_NAME} PRIVATE ${AND_DIR} ${GCN_RECOMP_DIR}/openxr ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR} ${OPENXR_INCLUDE})
-    target_link_libraries(${G_NAME} PRIVATE game_recomp native_app_glue ${OPENXR_LIB} EGL android log aaudio)
+    target_link_libraries(${G_NAME} PRIVATE gcn_core ${G_NAME}_android game_recomp native_app_glue ${OPENXR_LIB} EGL android log aaudio)
     target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
     # No default image: the app finds game.iso or game.ciso in its own files directory.
-    set(APP_DEFS ${ANDROID_DEFS})
+    set(APP_DEFS ${ANDROID_DEFS} ${GCN_ENTRY_DEFS})
     list(FILTER APP_DEFS EXCLUDE REGEX "^GCN_DEFAULT_ISO=")
     target_compile_definitions(${G_NAME} PRIVATE ${APP_DEFS} GCN_DEFAULT_ISO="")
     # NativeActivity resolves this symbol by name; without it the linker drops the glue.
@@ -573,7 +669,7 @@ function(gcn_add_game)
       "-framework AudioToolbox" "-framework AVFAudio" "-framework Foundation")
     # On the C family's sources only: the Xcode generator does not split a target's
     # definitions by language, and Swift takes no valued ones.
-    set(VOS_DEFS ${GCN_GAME_DEFS} ${GCN_GL_DEFS})
+    set(VOS_DEFS ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS} ${GCN_GL_DEFS})
     list(FILTER VOS_DEFS EXCLUDE REGEX "^GCN_DEFAULT_ISO=")
     list(APPEND VOS_DEFS GCN_DEFAULT_ISO="")
     set(VOS_C_SOURCES ${VOS_SOURCES})
@@ -617,6 +713,6 @@ function(gcn_add_game)
   set(GCN_GLAD_INCLUDE_DIR ${GLAD_INCLUDE_DIR} PARENT_SCOPE)
   set(GCN_GLAD_SOURCE ${GLAD_SOURCE} PARENT_SCOPE)
   set(GCN_RUNTIME_WARNINGS ${GCN_RUNTIME_WARNINGS} PARENT_SCOPE)
-  set(GCN_GAME_DEFS ${GCN_GAME_DEFS} PARENT_SCOPE)
+  set(GCN_GAME_DEFS ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS} PARENT_SCOPE)
   set(GCN_GL_DEFS ${GCN_GL_DEFS} PARENT_SCOPE)
 endfunction()

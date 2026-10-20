@@ -87,5 +87,6 @@ The game project provides:
 
 ## Requirements
 
-CMake 3.20+, Ninja, Python 3, a C++20 compiler, SDL2 (via pkg-config; built from source on
-Windows). On macOS: `brew install cmake ninja sdl2 python`.
+CMake 3.20+, Ninja, Python 3, a C++20 compiler, SDL2 (via pkg-config; on Windows built from
+source by the first configure, into `%LOCALAPPDATA%\gcn-recomp`, and shared by every
+project's builds after that). On macOS: `brew install cmake ninja sdl2 python`.
