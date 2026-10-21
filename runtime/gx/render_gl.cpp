@@ -3381,6 +3381,28 @@ static bool is_fullscreen_copy(const EfbCopyCmd& c, uint32_t dw, uint32_t dh) {
 // its own. Treating every copy as ending a pass instead throws away whatever draws
 // happen to sit in front of the first grab, and the water surface is among them: the
 // ocean disappeared the moment the racer was fast enough to throw spray.
+//
+// Nor does a clearing copy make a pass off-screen when the pass drew outside the rect it
+// copies. GX clears only that rect, so a game can lift a piece of the finished scene and
+// clear it to draw something of its own there -- a light's glow, say -- with the rest of
+// the frame left standing. Taken as an off-screen pass, everything drawn before such a
+// copy, the whole world and the arm in front of it, was missing from the eyes while the
+// flat frame showed it all. A pass is off-screen only if every draw in it stays inside
+// the copied rect (its viewport within its scissor, a pixel either way allowed).
+static bool draw_inside_rect(const PixelState& st, const EfbCopyCmd& c) {
+    int xoff, yoff;
+    scissor_offset(st.bp, xoff, yoff);
+    const float vw = 2.0f * fabsf(st.viewport[0]), vh = 2.0f * fabsf(st.viewport[1]);
+    const float vx = st.viewport[3] - xoff - 0.5f * vw, vy = st.viewport[4] - yoff - 0.5f * vh;
+    const float sx0 = (float)((int)(st.bp[0x20] >> 12 & 0x7FF) - xoff), sy0 = (float)((int)(st.bp[0x20] & 0x7FF) - yoff);
+    const float sx1 = (float)((int)(st.bp[0x21] >> 12 & 0x7FF) - xoff + 1), sy1 = (float)((int)(st.bp[0x21] & 0x7FF) - yoff + 1);
+    const float x0 = std::max(vx, sx0), y0 = std::max(vy, sy0);
+    const float x1 = std::min(vx + vw, sx1), y1 = std::min(vy + vh, sy1);
+    if (x1 <= x0 || y1 <= y0) return true;   // draws nothing
+    return x0 >= (float)c.src_x - 1.0f && y0 >= (float)c.src_y - 1.0f &&
+           x1 <= (float)(c.src_x + c.src_w) + 1.0f && y1 <= (float)(c.src_y + c.src_h) + 1.0f;
+}
+
 static void mark_offscreen_passes(const Batch& b, std::vector<uint8_t>& skip) {
     uint32_t dw, dh;
     display_size(b, dw, dh);
@@ -3389,7 +3411,10 @@ static void mark_offscreen_passes(const Batch& b, std::vector<uint8_t>& skip) {
     for (size_t i = 0; i < b.cmds.size(); i++) {
         if (b.cmds[i].type != CmdType::EfbCopy) continue;
         const EfbCopyCmd& c = b.cmds[i].copy;
-        if (!c.to_xfb && c.clear && !is_fullscreen_copy(c, dw, dh))
+        bool offscreen = !c.to_xfb && c.clear && !is_fullscreen_copy(c, dw, dh);
+        for (size_t j = pass_start; offscreen && j < i; j++)
+            if (b.cmds[j].type == CmdType::Draw && !draw_inside_rect(b.states[b.cmds[j].state], c)) offscreen = false;
+        if (offscreen)
             for (size_t j = pass_start; j <= i; j++) skip[j] = 1;
         pass_start = i + 1;
     }

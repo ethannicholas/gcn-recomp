@@ -11,7 +11,10 @@
 //                   [--dump-dir=DIR] [--dump-every=N] [path/to/game.iso]
 //
 // The VR settings are the headset's: the game's defaults (vr::GameHooks::config_defaults)
-// with ./vr.txt, if there is one, read over them.
+// with ./vr.txt, if there is one, read over them. With --eye the EFB's scale is theirs too
+// (stereo_scale) unless --scale says otherwise, as the app's is in stereo: a game that
+// reads its own frame back (an id buffer it picks a target from) sees other pixels at
+// another scale, and a replay of a headset session at scale 1 parted from its recording.
 #include "runtime.h"
 #include "platform.h"
 #include "gx/render.h"
@@ -396,7 +399,7 @@ static bool egl_init() {
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     std::string iso = GCN_DEFAULT_ISO;
-    int scale = 1, frames_wanted = 0, seconds = 120;
+    int scale = 0, frames_wanted = 0, seconds = 120;
     for (int i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--frames=", 9)) frames_wanted = atoi(argv[i] + 9);
@@ -432,6 +435,7 @@ int main(int argc, char** argv) {
 
     plat_install_crash_handlers(on_interrupt, on_fault);
     g_vrcfg = vr::load_config(".");
+    if (scale <= 0) scale = g_eye_mode ? g_vrcfg.stereo_scale : 1;
 
     mem_init();
     timing_init();

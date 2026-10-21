@@ -226,7 +226,12 @@ outermost function of its inline chain -- the recompiled function a guest load w
 into, rather than `LD32`. Symbolise against the binary that was profiled: any other build
 puts samples in the wrong functions. Both device tools take `GCN_REPLAY=<dir>` to drive a run
 with an input log, and the harness `--fast` to run unpaced; `GCN_INPUT_LOG=<dir>` has the
-harness record its own run's log, as the app does.
+harness record its own run's log, as the app does. A log's directory holds the card the run
+started with (`memcard_a.raw`), and a replay uses it: copy the directory, not just the log.
+With `--eye` the harness draws the EFB at the game's `stereo_scale`, as the app does in
+stereo, unless `--scale` says otherwise. A game that reads its own frame back -- an id
+buffer it picks a scan target from -- sees other pixels at another scale and goes another
+way; a headset session replayed at scale 1 parted from its recording a few minutes in.
 
 The GX front end runs on a thread of its own and the vertex transform on worker threads (see
 "Threads" in `graphics.md`). `GCN_GX_SYNC=1` puts the front end back on the guest thread,

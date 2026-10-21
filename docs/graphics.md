@@ -209,6 +209,14 @@ eye and the eye's colour grab sampled as the map, which lit everything the light
 solid yellow. Depth copies are now render targets like any other: a clearing one ends an
 off-screen pass, which the flat pass draws once and the eyes sample.
 
+A clearing copy ends an off-screen pass only if the pass drew inside the rect it copies
+(each draw's viewport within its scissor; `draw_inside_rect`). GX clears only that rect, so
+a game can lift a small piece of the finished scene -- around a light, to draw its glow
+there -- clear it, and leave the rest of the frame standing. Until 2026-10-20 any clearing
+copy smaller than the screen ended a pass, and in a room that did this every frame the
+whole world and everything in front of it were left out of the eyes: the eyes showed the
+HUD on black while the flat frame was whole.
+
 `render_set_frame_hook` is the other half: a game's look at every batch the renderer is given,
 flat or stereo, before anything is drawn from it and before the eye hook, with the off-screen
 passes marked. A game that follows something on screen in every view -- its player's vehicle,
