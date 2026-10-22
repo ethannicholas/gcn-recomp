@@ -315,7 +315,6 @@ void android_main(android_app* app) {
     static const std::string shader_cache = dir + "/shaders.bin";
     gx::render_set_shader_cache(shader_cache.c_str());
     gx::render_set_shader_cache_deferred(true);
-    gx::render_set_async_shaders(true);
     gx::render_init(cfg.start_in_stereo ? cfg.stereo_scale : cfg.theater_scale);
     int pw, ph;
     xrf::panel_size(&pw, &ph);

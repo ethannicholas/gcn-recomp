@@ -30,7 +30,9 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total);
 // whose program is not built yet is left out of the frame, and drawn once it is. Through
 // ANGLE on Metal a program takes about 90 ms to build, so on a headset each new one was a
 // visible freeze; this trades it for something appearing a few frames late, the first
-// time it is seen. Set before render_init; GCN_ASYNC_SHADERS=0 or 1 overrides it.
+// time it is seen. Set before render_init; GCN_ASYNC_SHADERS=0 or 1 overrides it. No
+// frontend asks for it since games ship their keys: a missing draw looked more broken than
+// the frame its build holds up (graphics.md, "Programs built in the background").
 void render_set_async_shaders(bool on);
 // Keys a game ships (gcn_add_game's SHADER_KEYS, made by tools/shader_keys.cpp), built
 // with the cache's own the first time: on a fresh install the programs a play-through

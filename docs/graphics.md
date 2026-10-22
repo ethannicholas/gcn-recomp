@@ -725,8 +725,17 @@ frontend asks for it (`render_set_async_shaders`; `GCN_ASYNC_SHADERS=0|1` overri
 the cache does not hold is compiled and linked without waiting: `get_program` returns
 nothing until `GL_COMPLETION_STATUS_KHR` says the program is done, and a draw that needs
 it is left out of the frame (`g_draw_skip`). Something new on screen then appears a few
-frames late instead of the frame stopping for the build. Only the headset frontends ask:
-replays and benchmarks keep every draw.
+frames late instead of the frame stopping for the build. Replays and benchmarks never
+asked: they keep every draw.
+
+The headset frontends asked from 2026-10-19 to 2026-10-22, when builds were frequent: a
+fresh install compiled every program at first use, and each held its frame about 90 ms
+through ANGLE. Since games ship their keys (`SHADER_KEYS`, compiled before the first game)
+and the cache keeps everything built since, a build mid-play is rare. What a skip left was
+then the more visible fault: on the Vision Pro, a racing game's sea vanished for a frame or
+two mid-race, and draws went missing in a first-person game too. A frame held a tenth of a
+second reads as a hitch; a missing sea reads as the game broken. So no frontend asks now, and a missing program is built in the frame that
+needs it, as it is on a desktop. `GCN_ASYNC_SHADERS=1` still turns it on.
 
 ANGLE already built programs on worker threads. What stalled was asking for the result:
 the renderer read `GL_LINK_STATUS` straight after `glLinkProgram`, and any query of a

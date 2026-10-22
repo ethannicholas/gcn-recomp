@@ -148,8 +148,11 @@ Each of these was a belief or an omission that the first runs on a headset overt
 - **Stutter is shader builds.** Through ANGLE on Metal a program takes about 90 ms to
   build; one restored from a binary costs nothing (345 in 89 ms). Every frame of more than
   50 ms in a first playthrough held one or two builds, hence `render_set_async_shaders`
-  (graphics.md, "Programs built in the background"). The first draw of a new program and
-  blend combination, where Metal makes a pipeline, costs a further 10-20 ms.
+  (graphics.md, "Programs built in the background"), which left a draw out until its
+  program was built. Since games ship their keys a build mid-play is rare, and a missing
+  draw looked worse than the hitch, so since 2026-10-22 the frame waits again. The first
+  draw of a new program and blend combination, where Metal makes a pipeline, costs a
+  further 10-20 ms.
 - **A start that stays black.** Twice the space opened and stayed black, with no sound:
   the layer never reached the running state, and in one case ARKit's providers sat paused.
   A relaunch (once immediately, once later) cured it; the cause is not known. The app logs
