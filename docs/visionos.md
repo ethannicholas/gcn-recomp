@@ -86,12 +86,17 @@ The core is written against OpenXR, and the alternative to emulating the part of
 core uses was a second core. What a runtime does for the core, `xr_runtime.mm` does the
 same way:
 
-- **Frames.** `xrWaitFrame` takes a `cp_frame` through its update phase, waits for the
-  compositor's optimal input time and queries the frame's drawables;
-  `predictedDisplayTime` is the drawable's presentation time. `xrEndFrame` composites the
-  submitted layers into every drawable with one Metal pipeline (a textured unit quad) and
-  presents them. A frame `xrWaitFrame` could not get a drawable for has `shouldRender`
-  false.
+- **Frames** are a compositor thread's (`compositor_main`), as a real runtime's are its
+  own process's. Every display frame it takes a `cp_frame` through its update phase,
+  waits for the optimal input time and queries the drawables, then hands the render
+  thread the frame's pose and views (a `Tick`: `xrWaitFrame` waits for the next one,
+  `xrLocateViews` reads it). It waits for that frame's layers until 2 ms before the frame's
+  rendering deadline, then composites whatever was submitted last into every drawable
+  with one Metal pipeline (a textured unit quad) and presents them. `xrEndFrame` makes the
+  GPU sync on the render thread and hands the layers over as a `Submission`, each image
+  fixed by index; the compositor holds an image's `in_flight` count from taking the
+  submission until the GPU has read it, so the render thread never draws into one on show.
+  See "A render thread held up", below.
 - **The head.** ARKit world tracking: the device anchor at the drawable's trackable anchor
   time. `xrLocateViews` composes it with each `cp_view`'s transform, and takes each eye's
   field from `cp_drawable_compute_projection`.
@@ -206,3 +211,29 @@ vr.txt) are `eye_scale` 1 and `gpu_budget_ms` 0. That championship ran at 60 wit
 2432x2368 an eye and msaa 4. A real GPU burst is
 therefore unprotected here: the fix for that is a measure of the eyes' own time (Metal's
 counter sample buffers, or timing the eyes' command buffer alone), not the budget.
+
+## A render thread held up (2026-10-22)
+
+The belief had been that a frame held up by a shader build only cost a hitch. On the
+device, two apps were ended by the system (`SIGKILL`, termination namespace `0x28`, no
+exception) with their render thread inside Metal's compiler: one waiting for a program's
+link (`finish_program`, since the frontends stopped leaving such draws out), the other
+building a pipeline at a draw's first use. Every other thread was waiting on the render
+thread, and in one the log's once-a-second line stopped about three seconds before the
+kill. The render thread was also the one presenting frames, so no frame reached the system
+for those seconds. Which limit the system applies, and what namespace 0x28 is, is not known.
+
+So the frames are now the compositor thread's (above): a render thread held up leaves the
+last images on show, reprojected to the head from the pose they were drawn at, and the log
+says so when it comes back:
+
+```
+[vos] the render thread was away 448 display frames (5000 ms); its last images were shown meanwhile
+```
+
+That line is from `GCN_VOS_STALL=5000` in `gcn_env.txt`, which holds the render thread up
+that long once, 20 s of frames in. Worn, the picture held still and the head kept tracking,
+and the game carried on after; the compositor presented at 90 frames a second throughout.
+A render thread that is merely late (past the deadline less 2 ms) now has its layers shown a
+display frame later rather than the frame presented late.
+

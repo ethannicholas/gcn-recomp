@@ -2,8 +2,14 @@
 // (openxr/xr_frontend.cpp), over the platform's own frameworks, so that a Vision Pro runs
 // the same core a Quest does. See vos_runtime.h for why this exists at all.
 //
-//   frames       CompositorServices. xrWaitFrame walks a cp_frame up to its drawable;
-//                xrEndFrame composites the submitted layers into it with Metal.
+//   frames       CompositorServices, on a compositor thread of the runtime's own: every
+//                display frame it takes a cp_frame to its drawables, tells the render
+//                thread the frame's pose (xrWaitFrame), waits for its layers until just
+//                before the frame's deadline (xrEndFrame), and composites whatever layers
+//                were submitted last into the drawables with Metal. A render thread held up
+//                -- a shader built in the frame that first needs it, through ANGLE on Metal,
+//                once took seconds -- leaves the last images on show, reprojected to the
+//                head, where the system ended an app that stopped presenting.
 //   head         ARKit's world tracking: the device anchor at the drawable's anchor time.
 //   controllers  ARKit's accessory tracking for where a spatial controller (the PS VR2
 //                Sense) is, GameController for its buttons, laid out as the Touch
@@ -38,10 +44,13 @@
 #import <GameController/GameController.h>
 #import <Metal/Metal.h>
 #include <simd/simd.h>
+#include <mach/mach_time.h>
+#include <pthread.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -113,6 +122,43 @@ struct XrSwapchain_T {
 
 namespace {
 
+// A display frame as the render thread sees it: what xrLocateViews and the release of an
+// image need of the frame the compositor thread is on.
+struct Tick {
+    uint64_t n = 0;  // display frames, from 1
+    double presentation = 0, period = 1.0 / 90.0;
+    bool anchor_valid = false;
+    ar_device_anchor_t anchor = nil;
+    size_t views = 0;
+    simd_float4x4 device_from_view[2];
+    simd_float4x4 projection[2];
+};
+
+// An image a layer shows, fixed when xrEndFrame hands the layers over: the swapchain's
+// released image may move on while the compositor still shows this one.
+struct Shown {
+    XrSwapchain_T* sc = nullptr;
+    int image = -1;
+    XrRect2Di rect{};
+};
+
+// What xrEndFrame hands the compositor.
+struct Submission {
+    uint64_t tick = 0;            // the display frame it was rendered for
+    uint64_t rendered_value = 0;  // the renderer's work on its images, signalled on `rendered`
+    bool synced = false;
+    ar_device_anchor_t anchor = nil;  // the pose the projection layer's images hold
+    uint32_t proj_views = 0;
+    Shown proj[2];
+    struct Quad {
+        Shown s;
+        XrPosef pose;
+        XrExtent2Df size;
+        XrEyeVisibility eye;
+    };
+    std::vector<Quad> quads;
+};
+
 struct Runtime {
     // From the shell.
     cp_layer_renderer_t layer = nil;
@@ -142,15 +188,28 @@ struct Runtime {
     std::vector<cp_drawable_t> drawables;
     ar_device_anchor_t anchor = nil;   // the head at this frame's anchor time
     bool anchor_valid = false;
-    bool have_local = false;
+    std::atomic<bool> have_local{false};
     int proj_frames = 0;
     simd_float4x4 origin_from_local = matrix_identity_float4x4;
     simd_float4x4 local_from_origin = matrix_identity_float4x4;
     double last_presentation = 0;
+
+    // Between the compositor thread and the render thread, under `fm`: the display frame the
+    // compositor is on, and the layers submitted last.
+    std::mutex fm;
+    std::condition_variable tick_cv, submit_cv;
+    Tick tick;
+    Submission latest;
+    uint64_t submitted_tick = 0;
+    bool compositor_started = false;
+    // The render thread's own: the display frame its xrWaitFrame took, or none.
+    Tick rt_tick;
+    bool rt_frame = false;
     int view_w = 0, view_h = 0;  // a view's size in the drawable: the most an eye is given
     int tex_w = 0, tex_h = 0;    // its texture's, which is less when foveated: the recommendation
 
     // Session lifecycle.
+    std::mutex ev_mutex;
     std::deque<XrEventDataBuffer> events;
     bool began = false;
     std::atomic<bool> alive{true};
@@ -463,6 +522,7 @@ Binding binding_of(const std::string& path) {
 // Frames.
 // ---------------------------------------------------------------------------
 void push_state(XrSessionState s) {
+    std::lock_guard<std::mutex> lk(g.ev_mutex);
     XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
     auto* sc = (XrEventDataSessionStateChanged*)&ev;
     sc->type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED;
@@ -571,10 +631,10 @@ struct DrawU {
     simd_float4x4 mvp;
     simd_float4 rect;
 };
-DrawU draw_u(simd_float4x4 mvp, const XrSwapchainSubImage& si) {
-    const float w = (float)si.swapchain->w, h = (float)si.swapchain->h;
-    return {mvp, simd_make_float4(si.imageRect.offset.x / w, si.imageRect.offset.y / h,
-                                  si.imageRect.extent.width / w, si.imageRect.extent.height / h)};
+DrawU draw_u(simd_float4x4 mvp, const Shown& s) {
+    const float w = (float)s.sc->w, h = (float)s.sc->h;
+    return {mvp, simd_make_float4(s.rect.offset.x / w, s.rect.offset.y / h, s.rect.extent.width / w,
+                                  s.rect.extent.height / h)};
 }
 
 
@@ -594,7 +654,7 @@ void probe_pixel(id<MTLCommandBuffer> cb, id<MTLTexture> tex) {
 }
 
 simd_float4x4 mvp_for_quad(cp_drawable_t d, size_t view, simd_float4x4 origin_from_device,
-                           const XrCompositionLayerQuad& q) {
+                           const Submission::Quad& q) {
     cp_view_t v = cp_drawable_get_view(d, view);
     const simd_float4x4 origin_from_view = simd_mul(origin_from_device, cp_view_get_transform(v));
     const simd_float4x4 view_from_local = simd_mul(simd_inverse(origin_from_view), g.origin_from_local);
@@ -603,6 +663,170 @@ simd_float4x4 mvp_for_quad(cp_drawable_t d, size_t view, simd_float4x4 origin_fr
     local_from_quad.columns[1] *= q.size.height;
     const simd_float4x4 proj = cp_drawable_compute_projection(d, cp_axis_direction_convention_right_up_back, view);
     return simd_mul(proj, simd_mul(view_from_local, local_from_quad));
+}
+
+// Composites a submission into this frame's drawables and presents them. Its images'
+// in_flight counts were raised when it was taken; they drop once the GPU is done reading.
+void composite(const Submission& s, bool fresh) {
+    // The pose everything in this frame is drawn for. A projection layer's images carry
+    // the anchor they were rendered at, and the drawable takes that one, so the compositor
+    // reprojects an old image from where it was drawn; a quad is drawn for the same pose.
+    ar_device_anchor_t anchor = s.anchor ? s.anchor : (g.anchor_valid ? g.anchor : nil);
+    const simd_float4x4 origin_from_device =
+        anchor ? ar_device_anchor_get_origin_from_anchor_transform(anchor) : g.origin_from_local;
+
+    id<MTLCommandBuffer> cb = [g.queue commandBuffer];
+    if (s.synced) [cb encodeWaitForEvent:g.rendered value:s.rendered_value];
+
+    // The first stereo frames, and a few seconds in: past any fade.
+    const int proj_n = fresh && s.proj_views ? ++g.proj_frames : 0;
+    if ((proj_n == 1 || proj_n == 90 || proj_n == 450) && s.proj[0].sc) {
+        LOGI("projection layer: %dx%d images, rect %dx%d", s.proj[0].sc->w, s.proj[0].sc->h,
+             s.proj[0].rect.extent.width, s.proj[0].rect.extent.height);
+        probe_pixel(cb, s.proj[0].sc->images[s.proj[0].image]->mtl);
+    }
+
+    for (cp_drawable_t d : g.drawables) {
+        cp_drawable_set_device_anchor(d, anchor);
+        const size_t nviews = cp_drawable_get_view_count(d);
+        for (size_t v = 0; v < nviews; v++) {
+            cp_view_texture_map_t map = cp_view_get_view_texture_map(cp_drawable_get_view(d, v));
+            const size_t ti = cp_view_texture_map_get_texture_index(map);
+            MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor new];
+            rp.colorAttachments[0].texture = cp_drawable_get_color_texture(d, ti);
+            rp.colorAttachments[0].slice = cp_view_texture_map_get_slice_index(map);
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.depthAttachment.texture = cp_drawable_get_depth_texture(d, ti);
+            rp.depthAttachment.slice = cp_view_texture_map_get_slice_index(map);
+            rp.depthAttachment.loadAction = MTLLoadActionClear;
+            // Black, far away, where nothing is drawn: see far_depth.
+            rp.depthAttachment.clearDepth = far_depth(d, v);
+            rp.depthAttachment.storeAction = MTLStoreActionStore;
+            // Foveated: the view's viewport and projection are in the rate map's screen
+            // space, which it rasterizes into the smaller texture densest where the viewer
+            // looks.
+            if (v < cp_drawable_get_rasterization_rate_map_count(d))
+                rp.rasterizationRateMap = cp_drawable_get_rasterization_rate_map(d, v);
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setViewport:cp_view_texture_map_get_viewport(map)];
+            [enc setRenderPipelineState:g.pipe];
+            [enc setFragmentSamplerState:g.sampler atIndex:0];
+            [enc setCullMode:MTLCullModeNone];
+
+            // The projection layer's image for this eye, across the whole view, far away:
+            // its depth is unknown, so the compositor reprojects it for rotation only.
+            if (v < s.proj_views && s.proj[v].sc) {
+                simd_float4x4 full = matrix_identity_float4x4;
+                full.columns[0].x = 2.0f;
+                full.columns[1].y = 2.0f;
+                full.columns[2].z = 0.0f;
+                full.columns[3].z = far_depth(d, v);
+                const DrawU u = draw_u(full, s.proj[v]);
+                [enc setDepthStencilState:g.depth_always];
+                [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
+                [enc setFragmentTexture:s.proj[v].sc->images[s.proj[v].image]->srgb atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+            }
+            // Quads, in the room, with their depth.
+            for (const Submission::Quad& q : s.quads) {
+                if ((q.eye == XR_EYE_VISIBILITY_LEFT && v != 0) || (q.eye == XR_EYE_VISIBILITY_RIGHT && v != 1))
+                    continue;
+                const DrawU u = draw_u(mvp_for_quad(d, v, origin_from_device, q), q.s);
+                [enc setDepthStencilState:g.depth_greater];
+                [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
+                [enc setFragmentTexture:q.s.sc->images[q.s.image]->srgb atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+            }
+            [enc endEncoding];
+        }
+        cp_drawable_encode_present(d, cb);
+    }
+    std::vector<XrSwapchain_T::Image*> used;
+    for (uint32_t v = 0; v < s.proj_views; v++)
+        if (s.proj[v].sc) used.push_back(s.proj[v].sc->images[s.proj[v].image].get());
+    for (const Submission::Quad& q : s.quads) used.push_back(q.s.sc->images[q.s.image].get());
+    [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+        for (XrSwapchain_T::Image* img : used) img->in_flight--;
+    }];
+    [cb commit];
+    cp_frame_end_submission(g.frame);
+    g.frame = nullptr;
+    g.drawables.clear();
+}
+
+double mach_seconds(uint64_t t) {
+    static mach_timebase_info_data_t tb = [] {
+        mach_timebase_info_data_t i;
+        mach_timebase_info(&i);
+        return i;
+    }();
+    return (double)t * tb.numer / tb.denom * 1e-9;
+}
+
+// The compositor thread: one display frame at a time, whatever the render thread is doing.
+void compositor_main() {
+    pthread_setname_np("compositor");
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    uint64_t n = 0, last_fresh = 0;
+    int repeats = 0;  // display frames in a row shown with no new submission
+    double away_since = 0;
+    while (g.alive) {
+        if (!next_frame()) continue;
+        cp_drawable_t d = g.drawables[0];
+        cp_frame_timing_t timing = cp_drawable_get_frame_timing(d);
+        Tick t;
+        t.n = ++n;
+        t.presentation = cp_time_to_cf_time_interval(cp_frame_timing_get_presentation_time(timing));
+        t.period = g.last_presentation > 0 && t.presentation > g.last_presentation ? t.presentation - g.last_presentation
+                                                                                   : 1.0 / 90.0;
+        g.last_presentation = t.presentation;
+        t.anchor_valid = g.anchor_valid;
+        t.anchor = g.anchor;
+        t.views = std::min<size_t>(2, cp_drawable_get_view_count(d));
+        for (size_t v = 0; v < t.views; v++) {
+            t.device_from_view[v] = cp_view_get_transform(cp_drawable_get_view(d, v));
+            t.projection[v] = cp_drawable_compute_projection(d, cp_axis_direction_convention_right_up_back, v);
+        }
+        {
+            std::lock_guard<std::mutex> lk(g.fm);
+            g.tick = t;
+        }
+        g.tick_cv.notify_all();
+
+        // This frame's layers, if the render thread hands them over before the frame's
+        // deadline, less a margin for the compositing; else the last it did.
+        const uint64_t deadline = cp_frame_timing_get_rendering_deadline(timing).cp_mach_abs_time;
+        const double margin_s = 0.002;
+        Submission s;
+        bool fresh;
+        {
+            std::unique_lock<std::mutex> lk(g.fm);
+            while (g.submitted_tick < t.n && g.alive &&
+                   mach_seconds(deadline) - mach_seconds(mach_absolute_time()) > margin_s)
+                g.submit_cv.wait_for(lk, std::chrono::microseconds(500));
+            s = g.latest;
+            fresh = s.tick != last_fresh;
+            last_fresh = s.tick;
+            // Held from here until the GPU is done, so the render thread cannot take these
+            // images back to draw into while they are being shown.
+            for (uint32_t v = 0; v < s.proj_views; v++)
+                if (s.proj[v].sc) s.proj[v].sc->images[s.proj[v].image]->in_flight++;
+            for (const Submission::Quad& q : s.quads) q.s.sc->images[q.s.image]->in_flight++;
+        }
+        if (fresh || s.tick == 0) {
+            if (repeats >= 30)
+                LOGI("the render thread was away %d display frames (%.0f ms); its last images were shown meanwhile",
+                     repeats, (t.presentation - away_since) * 1000.0);
+            repeats = 0;
+        } else if (repeats++ == 0) {
+            away_since = t.presentation;
+        }
+        composite(s, fresh);
+    }
+    // The render thread may be waiting on a frame that will not come.
+    g.tick_cv.notify_all();
 }
 
 }  // namespace
@@ -759,6 +983,12 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance, const XrSessionCreate
 
 XRAPI_ATTR XrResult XRAPI_CALL xrBeginSession(XrSession, const XrSessionBeginInfo*) {
     g.began = true;
+    // From here the compositor thread owns the frames; xrCreateSession's were its own.
+    // Detached: the app ends by exiting, with the thread still running.
+    if (!g.compositor_started) {
+        g.compositor_started = true;
+        std::thread(compositor_main).detach();
+    }
     push_state(XR_SESSION_STATE_SYNCHRONIZED);
     push_state(XR_SESSION_STATE_VISIBLE);
     push_state(XR_SESSION_STATE_FOCUSED);
@@ -771,6 +1001,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndSession(XrSession) {
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL xrPollEvent(XrInstance, XrEventDataBuffer* ev) {
+    std::lock_guard<std::mutex> lk(g.ev_mutex);
     if (g.events.empty()) return XR_EVENT_UNAVAILABLE;
     *ev = g.events.front();
     g.events.pop_front();
@@ -882,36 +1113,51 @@ XRAPI_ATTR XrResult XRAPI_CALL xrWaitSwapchainImage(XrSwapchain sc, const XrSwap
 
 XRAPI_ATTR XrResult XRAPI_CALL xrReleaseSwapchainImage(XrSwapchain sc, const XrSwapchainImageReleaseInfo*) {
     if (sc->acquired < 0) return XR_ERROR_CALL_ORDER_INVALID;
-    sc->images[sc->acquired]->anchor = g.anchor;
+    sc->images[sc->acquired]->anchor = g.rt_frame && g.rt_tick.anchor_valid ? g.rt_tick.anchor : nil;
     sc->released = sc->acquired;
     sc->acquired = -1;
     return XR_SUCCESS;
 }
 
-// Frames.
+// Frames. The compositor thread takes them from the system (compositor_main); the render
+// thread waits for the next, draws for its pose and hands its layers over.
 XRAPI_ATTR XrResult XRAPI_CALL xrWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* fs) {
     if (!g.alive) return XR_ERROR_SESSION_LOST;
-    if (!next_frame()) {
+    std::unique_lock<std::mutex> lk(g.fm);
+    // A display frame the render thread has not had yet: the latest, if it is behind.
+    const uint64_t seen = g.rt_tick.n;
+    g.tick_cv.wait_for(lk, std::chrono::milliseconds(100), [&] { return g.tick.n > seen || !g.alive; });
+    if (!g.alive) return XR_ERROR_SESSION_LOST;
+    g.rt_frame = g.tick.n > seen;
+    if (!g.rt_frame) {  // none: the space is paused, or not yet running
         fs->shouldRender = XR_FALSE;
-        fs->predictedDisplayTime = to_xr_time(g.last_presentation);
-        return g.alive ? XR_SUCCESS : XR_ERROR_SESSION_LOST;
+        fs->predictedDisplayTime = to_xr_time(g.rt_tick.presentation);
+        fs->predictedDisplayPeriod = to_xr_time(g.rt_tick.period);
+        return XR_SUCCESS;
     }
-    const double pt = cp_time_to_cf_time_interval(
-        cp_frame_timing_get_presentation_time(cp_drawable_get_frame_timing(g.drawables[0])));
-    fs->predictedDisplayPeriod = g.last_presentation > 0 && pt > g.last_presentation
-                                     ? to_xr_time(pt - g.last_presentation)
-                                     : to_xr_time(1.0 / 90.0);
-    g.last_presentation = pt;
-    fs->predictedDisplayTime = to_xr_time(pt);
-    fs->shouldRender = g.anchor_valid && g.have_local ? XR_TRUE : XR_FALSE;
+    g.rt_tick = g.tick;
+    fs->predictedDisplayTime = to_xr_time(g.rt_tick.presentation);
+    fs->predictedDisplayPeriod = to_xr_time(g.rt_tick.period);
+    fs->shouldRender = g.rt_tick.anchor_valid && g.have_local ? XR_TRUE : XR_FALSE;
     return XR_SUCCESS;
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL xrBeginFrame(XrSession, const XrFrameBeginInfo*) { return XR_SUCCESS; }
 
-// Composites the layers into this frame's drawables and presents them.
+// Hands the layers to the compositor thread, which shows them from the frame they were
+// drawn for until the next ones come.
 XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* fe) {
-    if (!g.frame) return XR_SUCCESS;  // xrWaitFrame found nothing to draw into
+    if (!g.rt_frame) return XR_SUCCESS;  // xrWaitFrame had no frame to give
+    g.rt_frame = false;
+    // GCN_VOS_STALL=<ms> (gcn_env.txt): the render thread held up that long, once, 20 s of
+    // frames in, as a shader build in the frame once held it: the compositor shows the last
+    // images meanwhile and says so in the log.
+    static const int stall_ms = getenv("GCN_VOS_STALL") ? atoi(getenv("GCN_VOS_STALL")) : 0;
+    static int frames = 0;
+    if (stall_ms > 0 && ++frames == 90 * 20) {
+        LOGI("GCN_VOS_STALL: holding the render thread for %d ms", stall_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
+    }
     // What the renderer drew into the images has to be finished before Metal reads them:
     // ANGLE signals the event once the work submitted so far is done, and the compositing
     // waits for it on the GPU.
@@ -926,116 +1172,40 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* fe) {
     glFlush();
     if (sync != EGL_NO_SYNC) vos::angle::DestroySync(vos::angle::display(), sync);
 
-    const XrCompositionLayerProjection* proj = nullptr;
-    std::vector<const XrCompositionLayerQuad*> quads;
-    for (uint32_t i = 0; i < fe->layerCount; i++) {
-        if (fe->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION)
-            proj = (const XrCompositionLayerProjection*)fe->layers[i];
-        else if (fe->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_QUAD)
-            quads.push_back((const XrCompositionLayerQuad*)fe->layers[i]);
-    }
-    // The pose everything in this frame is drawn for. A projection layer's images carry
-    // the anchor they were rendered at, and the drawable takes that one, so the compositor
-    // reprojects an old image from where it was drawn; a quad is drawn for the same pose.
-    ar_device_anchor_t anchor = g.anchor_valid ? g.anchor : nil;
-    if (proj && proj->viewCount >= 1) {
-        XrSwapchain sc = proj->views[0].subImage.swapchain;
-        if (sc && sc->released >= 0 && sc->images[sc->released]->anchor) anchor = sc->images[sc->released]->anchor;
-    }
-    const simd_float4x4 origin_from_device =
-        anchor ? ar_device_anchor_get_origin_from_anchor_transform(anchor) : g.origin_from_local;
-
-    id<MTLCommandBuffer> cb = [g.queue commandBuffer];
-    if (sync != EGL_NO_SYNC) [cb encodeWaitForEvent:g.rendered value:rendered_value];
-    std::vector<XrSwapchain_T::Image*> used;
-    auto image_of = [&](XrSwapchain sc) -> XrSwapchain_T::Image* {
-        if (!sc || sc->released < 0) return nullptr;
-        XrSwapchain_T::Image* img = sc->images[sc->released].get();
-        used.push_back(img);
-        img->in_flight++;
-        return img;
+    Submission s;
+    s.tick = g.rt_tick.n;
+    s.rendered_value = rendered_value;
+    s.synced = sync != EGL_NO_SYNC;
+    auto shown = [](const XrSwapchainSubImage& si, Shown& out) {
+        if (!si.swapchain || si.swapchain->released < 0) return false;
+        out.sc = si.swapchain;
+        out.image = si.swapchain->released;
+        out.rect = si.imageRect;
+        return true;
     };
-
-    // The first stereo frames, and a few seconds in: past any fade.
-    const int proj_n = proj ? ++g.proj_frames : 0;
-    if ((proj_n == 1 || proj_n == 90 || proj_n == 450) && proj->viewCount >= 1) {
-        const XrSwapchainSubImage& si = proj->views[0].subImage;
-        if (si.swapchain && si.swapchain->released >= 0) {
-            LOGI("projection layer: %dx%d images, rect %dx%d", si.swapchain->w, si.swapchain->h,
-                 si.imageRect.extent.width, si.imageRect.extent.height);
-            probe_pixel(cb, si.swapchain->images[si.swapchain->released]->mtl);
+    for (uint32_t i = 0; i < fe->layerCount; i++) {
+        if (fe->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            const auto* proj = (const XrCompositionLayerProjection*)fe->layers[i];
+            s.proj_views = std::min<uint32_t>(2, proj->viewCount);
+            for (uint32_t v = 0; v < s.proj_views; v++)
+                if (!shown(proj->views[v].subImage, s.proj[v])) s.proj[v] = Shown{};
+            if (s.proj[0].sc) s.anchor = s.proj[0].sc->images[s.proj[0].image]->anchor;
+        } else if (fe->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            const auto* q = (const XrCompositionLayerQuad*)fe->layers[i];
+            Submission::Quad sq;
+            if (!shown(q->subImage, sq.s)) continue;
+            sq.pose = q->pose;
+            sq.size = q->size;
+            sq.eye = q->eyeVisibility;
+            s.quads.push_back(sq);
         }
     }
-
-    for (cp_drawable_t d : g.drawables) {
-        cp_drawable_set_device_anchor(d, anchor);
-        const size_t nviews = cp_drawable_get_view_count(d);
-        for (size_t v = 0; v < nviews; v++) {
-            cp_view_texture_map_t map = cp_view_get_view_texture_map(cp_drawable_get_view(d, v));
-            const size_t ti = cp_view_texture_map_get_texture_index(map);
-            MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor new];
-            rp.colorAttachments[0].texture = cp_drawable_get_color_texture(d, ti);
-            rp.colorAttachments[0].slice = cp_view_texture_map_get_slice_index(map);
-            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
-            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-            rp.depthAttachment.texture = cp_drawable_get_depth_texture(d, ti);
-            rp.depthAttachment.slice = cp_view_texture_map_get_slice_index(map);
-            rp.depthAttachment.loadAction = MTLLoadActionClear;
-            // Black, far away, where nothing is drawn: see far_depth.
-            rp.depthAttachment.clearDepth = far_depth(d, v);
-            rp.depthAttachment.storeAction = MTLStoreActionStore;
-            // Foveated: the view's viewport and projection are in the rate map's screen
-            // space, which it rasterizes into the smaller texture densest where the viewer
-            // looks.
-            if (v < cp_drawable_get_rasterization_rate_map_count(d))
-                rp.rasterizationRateMap = cp_drawable_get_rasterization_rate_map(d, v);
-            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-            [enc setViewport:cp_view_texture_map_get_viewport(map)];
-            [enc setRenderPipelineState:g.pipe];
-            [enc setFragmentSamplerState:g.sampler atIndex:0];
-            [enc setCullMode:MTLCullModeNone];
-
-            // The projection layer's image for this eye, across the whole view, far away:
-            // its depth is unknown, so the compositor reprojects it for rotation only.
-            if (proj && v < proj->viewCount) {
-                if (XrSwapchain_T::Image* img = image_of(proj->views[v].subImage.swapchain)) {
-                    simd_float4x4 full = matrix_identity_float4x4;
-                    full.columns[0].x = 2.0f;
-                    full.columns[1].y = 2.0f;
-                    full.columns[2].z = 0.0f;
-                    full.columns[3].z = far_depth(d, v);
-                    const DrawU u = draw_u(full, proj->views[v].subImage);
-                    [enc setDepthStencilState:g.depth_always];
-                    [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
-                    [enc setFragmentTexture:img->srgb atIndex:0];
-                    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-                }
-            }
-            // Quads, in the room, with their depth.
-            for (const XrCompositionLayerQuad* q : quads) {
-                if ((q->eyeVisibility == XR_EYE_VISIBILITY_LEFT && v != 0) ||
-                    (q->eyeVisibility == XR_EYE_VISIBILITY_RIGHT && v != 1))
-                    continue;
-                XrSwapchain_T::Image* img = image_of(q->subImage.swapchain);
-                if (!img) continue;
-                const DrawU u = draw_u(mvp_for_quad(d, v, origin_from_device, *q), q->subImage);
-                [enc setDepthStencilState:g.depth_greater];
-                [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
-                [enc setFragmentTexture:img->srgb atIndex:0];
-                [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-            }
-            [enc endEncoding];
-        }
-        cp_drawable_encode_present(d, cb);
+    {
+        std::lock_guard<std::mutex> lk(g.fm);
+        g.latest = std::move(s);
+        g.submitted_tick = g.rt_tick.n;
     }
-    [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
-        for (XrSwapchain_T::Image* img : used) img->in_flight--;
-    }];
-    [cb commit];
-    cp_frame_end_submission(g.frame);
-    g.frame = nullptr;
-    g.drawables.clear();
+    g.submit_cv.notify_all();
     return XR_SUCCESS;
 }
 
@@ -1044,20 +1214,19 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession, const XrViewLocateInfo*,
     *n = 2;
     vs->viewStateFlags = 0;
     if (cap < 2) return cap == 0 ? XR_SUCCESS : XR_ERROR_SIZE_INSUFFICIENT;
-    if (g.drawables.empty() || !g.anchor_valid || !g.have_local) return XR_SUCCESS;
-    cp_drawable_t d = g.drawables[0];
+    const Tick& t = g.rt_tick;
+    if (!g.rt_frame || !t.anchor_valid || !g.have_local) return XR_SUCCESS;
     const simd_float4x4 local_from_device =
-        simd_mul(g.local_from_origin, ar_device_anchor_get_origin_from_anchor_transform(g.anchor));
-    for (size_t v = 0; v < 2 && v < cp_drawable_get_view_count(d); v++) {
-        views[v].pose = pose_from(simd_mul(local_from_device, cp_view_get_transform(cp_drawable_get_view(d, v))));
-        views[v].fov = fov_from(cp_drawable_compute_projection(d, cp_axis_direction_convention_right_up_back, v));
+        simd_mul(g.local_from_origin, ar_device_anchor_get_origin_from_anchor_transform(t.anchor));
+    for (size_t v = 0; v < 2 && v < t.views; v++) {
+        views[v].pose = pose_from(simd_mul(local_from_device, t.device_from_view[v]));
+        views[v].fov = fov_from(t.projection[v]);
     }
     vs->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
                          XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
     return XR_SUCCESS;
 }
 
-// Paths.
 XRAPI_ATTR XrResult XRAPI_CALL xrStringToPath(XrInstance, const char* s, XrPath* p) {
     *p = path_of(s);
     return XR_SUCCESS;
