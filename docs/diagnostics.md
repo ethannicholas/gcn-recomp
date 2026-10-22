@@ -95,6 +95,11 @@ a log.
 presented frame as a PNG. `GCN_DUMP_RANGE=a-b` restricts that to a window of frames.
 `--headless` runs the guest with no renderer at all.
 
+`--exit-after=N` quits after the Nth presented frame, the way closing the window does: the
+frame loop ends, the input log and the movie are finished, and the exit status is 0. With
+`--hidden --fast` it makes a bounded unattended run; a dump on that frame is still written.
+It applies to the desktop window loop, not to `--vr`.
+
 ## Recording a movie
 
 `--record=<file>` makes a movie of what the window shows -- in a headset (`--vr`) that is
