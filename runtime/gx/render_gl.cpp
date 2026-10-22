@@ -597,6 +597,15 @@ struct CacheLoad {
     size_t pos = 0;
     std::vector<ShaderKey> shipped;  // the game's keys that are not in the file
     size_t shipped_pos = 0;
+    // Programs compiled from source are started a batch at a time and only then finished,
+    // so the GL's workers build the batch side by side; one at a time, through ANGLE on
+    // Metal, 745 took 58.5 s.
+    struct Started {
+        ShaderKey k;
+        std::string src;
+        GLuint prog, fs;
+    };
+    std::vector<Started> batch;
     bool active = false, same_driver = false, stale = false, binaries = false;
     int total = 0, done = 0, from_binary = 0, compiled = 0;
     std::chrono::steady_clock::time_point t0;
@@ -714,6 +723,31 @@ static void shader_cache_open() {
     L.active = !L.data.empty() || !L.shipped.empty();
 }
 
+static constexpr size_t kLoadBatch = 16;
+
+static void cache_load_start(CacheLoad& L, const ShaderKey& k, std::string src) {
+    CacheLoad::Started s{k, std::move(src), 0, 0};
+    s.prog = start_program(s.src, &s.fs);
+    L.batch.push_back(std::move(s));
+    L.compiled++;
+    L.stale = true;
+}
+
+static void cache_load_finish(CacheLoad& L) {
+    for (CacheLoad::Started& s : L.batch) {
+        finish_program(s.prog, s.fs, s.src);
+        register_program(s.k, s.prog);
+    }
+    L.batch.clear();
+}
+
+static bool cache_load_has(const CacheLoad& L, const ShaderKey& k) {
+    if (g_programs.count(k)) return true;
+    for (const CacheLoad::Started& s : L.batch)
+        if (s.k == k) return true;
+    return false;
+}
+
 bool render_shader_cache_step(double budget_ms, int* done, int* total) {
     CacheLoad& L = g_cache_load;
     if (L.active) {
@@ -732,26 +766,24 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
             // all but the first are dropped, and the rewrite keeps one. A binary stays good
             // under its canonical key: the source it was built from is the same.
             canonicalize_shader_key(r.k);
-            if (g_programs.count(r.k)) {
+            if (cache_load_has(L, r.k)) {
                 L.stale = true;  // a duplicate: written by a crash mid-append, or see above
             } else {
                 const auto t_rec = std::chrono::steady_clock::now();
                 std::string src = gen_pixel_shader(r.k);
                 const bool bin_ok = L.same_driver && r.len && program_src_hash(src.c_str()) == r.src_hash;
-                GLuint prog = bin_ok ? build_program(r.k, src, r.bin, r.fmt, r.len) : 0;
-                if (prog) {
+                if (GLuint prog = bin_ok ? build_program(r.k, src, r.bin, r.fmt, r.len) : 0) {
                     L.from_binary++;
+                    register_program(r.k, prog);
                 } else {
-                    prog = build_program(r.k, src, nullptr, 0, 0);
-                    L.compiled++;
-                    L.stale = true;
+                    cache_load_start(L, r.k, std::move(src));
                 }
-                register_program(r.k, prog);
+                if (L.batch.size() >= kLoadBatch) cache_load_finish(L);
                 // A load that hangs or crawls says where.
                 const double rec_ms = ms_since(t_rec);
                 if (rec_ms > 100.0)
                     fprintf(stderr, "[shaders] record %d of %d took %.0f ms (%s)\n", L.done, L.total, rec_ms,
-                            bin_ok ? "binary" : "compiled");
+                            bin_ok ? "binary" : "a batch compiled");
             }
             if (ms_since(t_step) >= budget_ms) break;
         }
@@ -765,12 +797,11 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
         while (p >= end && L.shipped_pos < L.shipped.size() && ms_since(t_step) < budget_ms) {
             const ShaderKey& k = L.shipped[L.shipped_pos++];
             L.done++;
-            if (g_programs.count(k)) continue;
-            register_program(k, build_program(k, gen_pixel_shader(k), nullptr, 0, 0));
-            L.compiled++;
-            L.stale = true;
+            if (!cache_load_has(L, k)) cache_load_start(L, k, gen_pixel_shader(k));
+            if (L.batch.size() >= kLoadBatch) cache_load_finish(L);
         }
         if (p >= end && L.shipped_pos == L.shipped.size()) {
+            cache_load_finish(L);
             // Anything that could not be used as stored is replaced: the whole file is
             // rewritten from the programs now in hand, with fresh binaries where the
             // driver gives them.

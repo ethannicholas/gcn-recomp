@@ -28,6 +28,13 @@ is killed part way can leave the copy service wedged -- the next one connects an
 nothing -- until `killall CoreDeviceService`. `log collect --device-udid` does not work over
 Wi-Fi ("Device not configured"); `log.txt` is the log to read.
 
+**Never pass `--remove-existing-content true` to `devicectl device copy to` an app's data
+container.** It empties the whole container, not the destination named: on 2026-10-22,
+meant to clear one cache folder (`Library/Caches/<bundle id>/com.apple.metal`), it deleted
+everything under the container, the disc image and the memory card with its save included.
+To clear a cache, copy an empty file over each file in it instead, after copying anything
+worth keeping off the headset first.
+
 ## Pieces
 
 | File | What it is |

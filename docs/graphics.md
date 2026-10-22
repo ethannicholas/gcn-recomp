@@ -737,6 +737,12 @@ two mid-race, and draws went missing in a first-person game too. A frame held a 
 second reads as a hitch; a missing sea reads as the game broken. So no frontend asks now, and a missing program is built in the frame that
 needs it, as it is on a desktop. `GCN_ASYNC_SHADERS=1` still turns it on.
 
+The startup build (`render_shader_cache_step`), which compiles what the cache cannot
+restore and the game's keys it lacks, starts programs sixteen at a time and only then
+finishes them, so ANGLE's workers build a batch side by side. On the Vision Pro, a cold
+start of a 968-key list (no cache, Metal's own shader cache emptied) took 23.3 s, where one
+at a time had taken 58.5 s for 745: 24 ms a program against 78.
+
 ANGLE already built programs on worker threads. What stalled was asking for the result:
 the renderer read `GL_LINK_STATUS` straight after `glLinkProgram`, and any query of a
 program waits for its build. ANGLE's default thread count is unlimited, so nothing has to
