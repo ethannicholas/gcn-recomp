@@ -822,6 +822,20 @@ eye's view of the camera, as apply_state draws it. Keeping the sky's own depth i
 hid everything past the dome: in a flight over a surface only the craft and the HUD were
 left.
 
+## Z texture
+
+A Z texture (`GXSetZTexture`) has a say in the depth only when the depth test comes after
+texturing: PE control's zcomploc (BP 0x43 bit 6) clear, or the test off. With zcomploc set
+and the test on, the triangle's own depth is tested and written before the texture is
+read, and the Z texture changes nothing. The shader key leaves the Z texture out in that
+case, so a draw that sets one while the test comes first keeps its own depth: a replace
+Z texture with a small texel would otherwise write a depth near the front of the buffer
+for a triangle that sits at the back, and every later draw would fail its test against
+it. This is a different key being asked for, not a changed meaning for an old one: the
+program a key names is the same, so caches and key lists made before stay valid. The
+verbose draw log prints the two registers as `ztex=<bias>,<type and op>` when a Z texture
+is on, as the game set them, even when the key ignores them.
+
 ## Frames rendered in parts
 
 A game whose EFB cannot hold its frame (anti-aliased, the EFB is 640x264) renders it in

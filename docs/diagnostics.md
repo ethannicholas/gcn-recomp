@@ -426,7 +426,9 @@ use, which every lookup prolonged.
 - The draw log's verbose form (`GCN_DRAWLOG_VERBOSE=1`) also prints the pixel format and
   each bound map's mode register (wrap, filters, LOD bias) and image format; for an EFB
   copy, the format it was copied in and whether it is read through a palette
-  (`fmt7=8(copy 10 pal4)`: a 4-bit intensity copy bound as CI4).
+  (`fmt7=8(copy 10 pal4)`: a 4-bit intensity copy bound as CI4). It prints the Z texture
+  registers (`ztex=<bias>,<type and op>`) when a Z texture is on, as the game set them,
+  even when the shader ignores them because the depth test runs before texturing.
 - `GCN_LIGHTLOG=<min verts>` prints, once per distinct lighting setup (channel controls,
   materials, ambients, light colours and attenuations; a light's position and direction
   move every frame and are not part of it), the channel and light registers of a draw of
