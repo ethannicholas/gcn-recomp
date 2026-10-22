@@ -337,7 +337,20 @@ def main():
             s += f'call_indirect(c, 0x{t:08X}u);'
         return s
 
+    # special_calls.txt: "ADDR NAME". Call sites of OSSaveContext become context resume
+    # points (runtime/threads.cpp). Two names mean the C library's pair instead: a call site
+    # of `setjmp` records a host resume point for the guest jmp_buf it fills, and `longjmp`
+    # runs as recompiled, restoring the guest's registers, then resumes there instead of
+    # returning to its own caller (hle_setjmp_jmpbuf, hle_longjmp_resume).
     special_calls = load_kv(os.path.join(tables, 'special_calls.txt'))
+    for a, n in special_calls.items():
+        if n in ('setjmp', 'longjmp'):
+            if a not in by_addr:
+                sys.exit(f'error: special_calls.txt: {a:08X} ({n}) is not the start of a function in the symbols')
+        elif n != 'OSSaveContext':
+            print(f'warning: special_calls.txt: {a:08X} is named {n}; treated as OSSaveContext '
+                  f'(setjmp and longjmp are the other names)', file=sys.stderr)
+    longjmps = {a for a, n in special_calls.items() if n == 'longjmp'}
     # idle.txt: addresses of backward branches that are the OS's "nothing to run" spin
     # (the SDK scheduler's wait for RunQueueBitmap). They poll through IDLE_CHECK, which
     # lets the runtime skip guest time forward to the next event instead of spinning.
@@ -417,7 +430,10 @@ def main():
             if br.kind in ('b', 'bc'):
                 t = br.target
                 if br.link:
-                    if t in special_calls:
+                    kind = special_calls.get(t)
+                    if kind == 'setjmp':
+                        call = (f'c->lr = 0x{pc + 4:08X}u; if (GCN_SETJMP(*hle_setjmp_jmpbuf(c)) == 0) {cname(t)}(c);')
+                    elif kind is not None and kind != 'longjmp':
                         # setjmp-style call site (OSSaveContext)
                         call = (f'c->lr = 0x{pc + 4:08X}u; if (GCN_SETJMP(*hle_context_jmpbuf(c)) == 0) {cname(t)}(c);')
                     else:
@@ -444,11 +460,13 @@ def main():
                 if br.link:
                     s += f'{{ uint32_t t = c->lr; c->lr = 0x{pc + 4:08X}u; '
                     s += f'if ({cond}) call_indirect(c, t); }}' if cond else 'call_indirect(c, t); }'
-                elif cond:
-                    s += f'if ({cond}) RET();'
                 else:
-                    s += 'RET();'
-                    last_uncond = True
+                    ret = 'hle_longjmp_resume(c, jb);' if f.addr in longjmps else 'RET();'
+                    if cond:
+                        s += f'if ({cond}) {ret}'
+                    else:
+                        s += ret
+                        last_uncond = True
             elif br.kind == 'bctr':
                 if br.link:
                     body = f'{{ uint32_t t = c->ctr; c->lr = 0x{pc + 4:08X}u; call_indirect(c, t); }}'
@@ -504,6 +522,10 @@ def main():
             else:
                 out.append(f'void {body_name}(CPU* c) {{')
                 out.append(f'\tENTER(0x{f.addr:08X}u);')
+            if f.addr in longjmps:
+                if multi:
+                    sys.exit(f'error: longjmp at {f.addr:08X} has more than one entry')
+                out.append('\tconst uint32_t jb = c->r[3];  /* the guest jmp_buf */')
             emit_body(f, out)
             out.append('}')
             if multi:
