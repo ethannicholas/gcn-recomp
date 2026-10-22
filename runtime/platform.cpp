@@ -299,6 +299,7 @@ bool plat_thread_start(void* (*fn)(void*), void* arg, size_t stack_size) {
     pthread_t th;
     int rc = pthread_create(&th, &attr, fn, arg);
     pthread_attr_destroy(&attr);
+    if (rc != 0) fprintf(stderr, "pthread_create: %s (a %zu MB stack)\n", strerror(rc), stack_size >> 20);
     return rc == 0;
 }
 

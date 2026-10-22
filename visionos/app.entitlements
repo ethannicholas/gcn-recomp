@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyLists/1.0.dtd">
+<!--
+  The app's entitlements (CODE_SIGN_ENTITLEMENTS; docs/visionos.md, "Address space").
+  Extended virtual addressing: an app's address space is otherwise about the size of a
+  game's recompiled code, its guest memory and the host threads' stacks together, and a game
+  whose code is mostly relocatable modules ran out of it starting a thread.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+</dict>
+</plist>

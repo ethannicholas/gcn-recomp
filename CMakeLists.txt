@@ -689,6 +689,7 @@ function(gcn_add_game)
       XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
       XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
       XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${GCN_APPLE_TEAM}"
+      XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS ${VOS_DIR}/app.entitlements
       XCODE_ATTRIBUTE_ENABLE_BITCODE NO
       # ANGLE is opened from the bundle's Frameworks directory (visionos/angle.mm), signed
       # as it is copied in.

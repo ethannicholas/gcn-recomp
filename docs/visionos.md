@@ -237,3 +237,18 @@ and the game carried on after; the compositor presented at 90 frames a second th
 A render thread that is merely late (past the deadline less 2 ms) now has its layers shown a
 display frame later rather than the frame presented late.
 
+## Address space (2026-10-22)
+
+A racing game ended at its countdown with `could not start host thread 217`: a new guest
+thread's host thread could not be created. Not a thread leak: 26 threads were alive. The
+crash report's VM summary put the app at about 5 GB of address space besides the system's
+own 385 GB guard: 1.8 GB of `__TEXT` (a game that is mostly relocatable modules, all of them
+recompiled), 1 GB untagged (guest memory among it), the libraries, mapped files, malloc and
+stacks. An app's address space is about that by default, and a 64 MB host stack
+(`threads.cpp`, `HOST_STACK`) had nowhere to go.
+
+The app now has `com.apple.developer.kernel.extended-virtual-addressing`
+(`visionos/app.entitlements`, through `CODE_SIGN_ENTITLEMENTS`); automatic signing adds the
+capability to the App ID itself. With it the same game played through races. A thread
+that cannot be started now logs `pthread_create`'s reason first.
+
