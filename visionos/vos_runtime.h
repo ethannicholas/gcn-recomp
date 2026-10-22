@@ -16,6 +16,11 @@ namespace vos {
 // the thread that will render by then.
 void set_layer_renderer(void* layer_renderer);
 
+// The render quality the drawables are made at, 0 to 1 (vr.txt's `render_quality`): how
+// many pixels the compositor gives each view. Set after set_layer_renderer, before
+// xrCreateSession, which waits for the views to settle at their new size.
+void set_render_quality(float quality);
+
 // Starts watching for controllers: gamepads, and spatial controllers along with their
 // tracking. Called once, early; their buttons are read from then on.
 void start_controllers();

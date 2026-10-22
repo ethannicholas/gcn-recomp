@@ -125,6 +125,6 @@ bool eye_views(EyeView out[2]);
 void set_gamepad_play(bool on);
 bool gamepad_play();
 
-// The defaults with the game's adjustments applied, then `dir`/vr.txt over them.
-VrConfig load_config(const std::string& dir);
+// The defaults with the game's adjustments applied, then the platform's, then `dir`/vr.txt over them.
+VrConfig load_config(const std::string& dir, void (*platform_defaults)(VrConfig&) = nullptr);
 }  // namespace vr

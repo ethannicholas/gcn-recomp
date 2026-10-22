@@ -5,7 +5,7 @@
 // disc image is there and is the right disc, the game starts at once. If not, the launcher
 // window opens over the empty space to say why and to copy one in from Files, and the game
 // starts once it has one. The space renders into a layer configured for xr_runtime.mm: a
-// texture per eye, no foveation, sRGB colour and reverse-Z float depth.
+// texture per eye, foveated, sRGB colour and reverse-Z float depth.
 import CompositorServices
 import SwiftUI
 import UIKit
@@ -15,9 +15,18 @@ struct GameLayerConfiguration: CompositorLayerConfiguration {
     func makeConfiguration(capabilities: LayerRenderer.Capabilities,
                            configuration: inout LayerRenderer.Configuration) {
         configuration.layout = .dedicated
-        configuration.isFoveationEnabled = false
+        // Foveated: the only way to more pixels than 1888x1792 a view, since the render
+        // quality (vr.txt's `render_quality`, xr_runtime.mm) is refused without it. Only
+        // the runtime's compositing pass draws through the rate map; the game's eyes are
+        // rendered uniformly into textures of their own and sampled through it.
+        configuration.isFoveationEnabled = capabilities.supportsFoveation
         configuration.colorFormat = .bgra8Unorm_srgb
         configuration.depthFormat = .depth32Float
+        // The drawables are allocated for the most the device offers; `render_quality`
+        // picks how much of that the views use.
+        if configuration.isFoveationEnabled {
+            configuration.maxRenderQuality = LayerRenderer.RenderQuality(1.0)
+        }
     }
 }
 

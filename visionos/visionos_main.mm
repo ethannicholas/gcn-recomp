@@ -161,6 +161,18 @@ const char* gcn_vos_check_image(void) {
     return why = "", why.c_str();
 }
 
+// What the Quest's numbers mean here, over the game's defaults and under vr.txt. The
+// recommended eye is the foveated texture's size (xr_runtime.mm), which an eye at
+// eye_scale 1 already fills on average; a racing game held 60 there through a full
+// championship. And ANGLE's timer queries add up each command buffer's span on the GPU,
+// which overlap and include the compositor's time: in that championship the eyes "took" over 17 ms a frame
+// in 107 seconds that still ran at 60, so a budget acted on them halved the eyes for
+// nothing.
+static void vos_defaults(VrConfig& c) {
+    c.eye_scale = 1.0f;
+    c.gpu_budget_ms = 0.0f;
+}
+
 // The game runs once per process, as on the Quest: the recompiled executable has no
 // shutdown path. Leaving the immersive space ends the app, and the next launch is a clean
 // console. A console reset (the game over screen does one) ends it too: visionOS gives an
@@ -176,7 +188,7 @@ void gcn_vos_run(void* layer_renderer) {
     const std::string iso = gcn_vos_find_image();
     if (iso.empty()) app_exit("no .iso or .ciso in Documents");
 
-    const VrConfig& cfg = xrf::configure(dir, dir);
+    const VrConfig& cfg = xrf::configure(dir, dir, vos_defaults);
 
     if (!vos::angle::load() || !vos::angle::create_context()) app_exit("no GL ES 3 context");
     const int glver = gl_load_with(gl_proc);
@@ -184,6 +196,7 @@ void gcn_vos_run(void* layer_renderer) {
     LOGI("GL %s / %s", (const char*)glGetString(GL_VERSION), (const char*)glGetString(GL_RENDERER));
 
     vos::set_layer_renderer(layer_renderer);
+    vos::set_render_quality(cfg.get("render_quality", 1.0f));
     vos::start_controllers();
 
     xrf::Platform plat;

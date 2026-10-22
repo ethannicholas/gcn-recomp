@@ -185,9 +185,10 @@ bool eye_views(EyeView out[2]) {
     return valid;
 }
 
-VrConfig load_config(const std::string& dir) {
+VrConfig load_config(const std::string& dir, void (*platform_defaults)(VrConfig&)) {
     VrConfig d;
     if (hooks().config_defaults) hooks().config_defaults(d);
+    if (platform_defaults) platform_defaults(d);
     const VrConfig c = vr_config_load(dir, d);
     if (hooks().config_loaded) hooks().config_loaded(c);
     return c;

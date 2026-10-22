@@ -1160,8 +1160,9 @@ void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms
 }  // namespace
 
 // ---------------------------------------------------------------------------
-const VrConfig& configure(const std::string& config_dir, const std::string& state_dir) {
-    g_vrcfg = vr::load_config(config_dir);
+const VrConfig& configure(const std::string& config_dir, const std::string& state_dir,
+                          void (*platform_defaults)(VrConfig&)) {
+    g_vrcfg = vr::load_config(config_dir, platform_defaults);
     g_view_path = state_dir + "/view.txt";
     gx::render_set_world_pitch(g_vrcfg.world_pitch_deg * 3.14159265f / 180.0f);
     gx::render_set_depth_layers(g_vrcfg.background_band, g_vrcfg.foreground_band, g_vrcfg.foreground_scale, g_vrcfg.hud_band, g_vrcfg.hud_band_scale);

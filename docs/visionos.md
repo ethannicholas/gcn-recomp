@@ -161,4 +161,38 @@ Each of these was a belief or an omission that the first runs on a headset overt
   process; visionOS gives an app no way to do that, so the viewer opens it again.
 - **A projection layer has no depth**, so the compositor reprojects stale eye images for
   rotation only. The eyes' depth buffer could be handed over as the drawable's depth.
-- **Foveation is off**, so the eyes render at a uniform resolution.
+
+## Resolution: foveation and render quality (2026-10-22)
+
+The belief was that with foveation off, the drawable was simply the display's size and the
+eyes would be as sharp as it allowed. The log said otherwise: each view was 1888x1792,
+fewer pixels than a Quest 3's eye (2064x2208), and in stereo dynamic resolution held the
+eyes at 0.50-0.55 of each side besides, so a race was drawn at about 1400x1330 an eye.
+
+- **Render quality needs foveation.** visionOS 26's render quality (the configuration's
+  `maxRenderQuality`, the layer's `renderQuality`, 0 to 1) is what makes the drawables
+  larger. Asked for with foveation off, the layer is refused and the app aborts as the space
+  opens (`Layer configuration not supported`; the SDK's error says foveation must be on).
+  So the layer is foveated now, and `render_quality` in vr.txt (default 1) sets the
+  quality.
+- **Only the compositing is foveated.** The game's eyes are still rendered uniformly by
+  ANGLE into the runtime's own swapchain textures; the one Metal pass that draws them into
+  the drawable is given the view's rasterization rate map, and the view's viewport and
+  projections are already in the map's screen space. At quality 1 a view is 6261x5023 in
+  screen space, stored in a 2432x2368 texture.
+- **The recommendation is the texture's size**, 2432x2368, not the view's: rendered
+  uniformly at the view's size an eye would be 31 megapixels. The view's size is the most
+  an eye can be.
+- **ANGLE's timer queries overstate the GPU.** ANGLE on Metal answers `GL_TIME_ELAPSED` by
+  adding up `GPUEndTime - GPUStartTime` of each command buffer committed inside the query.
+  Those spans overlap and include time the GPU spent on the compositor and the system.
+  Through a whole championship of a racing game with the budget not acted on, the eyes
+  read over 17 ms a frame in 107 seconds that still held 60 game frames a second, which
+  real GPU time could not do. The 0.50 the eyes had been held at was that reading, not the
+  GPU.
+
+So the platform's defaults (`vos_defaults` in `visionos_main.mm`, over the game's and under
+vr.txt) are `eye_scale` 1 and `gpu_budget_ms` 0. That championship ran at 60 with them, at
+2432x2368 an eye and msaa 4. A real GPU burst is
+therefore unprotected here: the fix for that is a measure of the eyes' own time (Metal's
+counter sample buffers, or timing the eyes' command buffer alone), not the budget.

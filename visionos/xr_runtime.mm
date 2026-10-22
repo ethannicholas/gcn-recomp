@@ -30,6 +30,7 @@
 #include "hw/pad.h"
 
 #include <openxr/openxr.h>
+#include <algorithm>
 
 #import <ARKit/ARKit.h>
 #import <CompositorServices/CompositorServices.h>
@@ -146,7 +147,8 @@ struct Runtime {
     simd_float4x4 origin_from_local = matrix_identity_float4x4;
     simd_float4x4 local_from_origin = matrix_identity_float4x4;
     double last_presentation = 0;
-    int view_w = 0, view_h = 0;  // a view's size in the drawable, for the recommendation
+    int view_w = 0, view_h = 0;  // a view's size in the drawable: the most an eye is given
+    int tex_w = 0, tex_h = 0;    // its texture's, which is less when foveated: the recommendation
 
     // Session lifecycle.
     std::deque<XrEventDataBuffer> events;
@@ -611,6 +613,17 @@ simd_float4x4 mvp_for_quad(cp_drawable_t d, size_t view, simd_float4x4 origin_fr
 namespace vos {
 
 void set_layer_renderer(void* layer) { g.layer = (__bridge cp_layer_renderer_t)layer; }
+
+void set_render_quality(float quality) {
+    if (!cp_layer_renderer_configuration_get_foveation_enabled(cp_layer_renderer_get_configuration(g.layer))) {
+        LOGI("no foveation, so no render quality: views at the compositor's default size");
+        return;
+    }
+    const float max_q = cp_layer_renderer_configuration_get_max_render_quality(cp_layer_renderer_get_configuration(g.layer));
+    const float q = std::clamp(quality, 0.0f, max_q);
+    cp_layer_renderer_set_render_quality(g.layer, q);
+    LOGI("render quality %.2f (at most %.2f)", q, max_q);
+}
 bool layer_alive() { return g.alive; }
 
 void start_controllers() {
@@ -713,7 +726,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance, const XrSessionCreate
         if (i % 40 == 39) LOGI("the immersive space is not running yet (layer state %d)", (int)cp_layer_renderer_get_state(g.layer));
         usleep(50000);
     }
-    for (int tries = 0; tries < 600 && g.view_w == 0; tries++) {
+    // A view's size follows the render quality, which the compositor eases towards rather
+    // than taking at once, so the size recommended is the one it holds for half a second.
+    for (int tries = 0, held = 0; tries < 900 && held < 45; tries++) {
         if (!next_frame()) {
             if (!g.alive) return XR_ERROR_SESSION_LOST;
             continue;
@@ -721,10 +736,18 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance, const XrSessionCreate
         cp_drawable_t d = g.drawables[0];
         cp_view_texture_map_t m = cp_view_get_view_texture_map(cp_drawable_get_view(d, 0));
         const MTLViewport vp = cp_view_texture_map_get_viewport(m);
-        g.view_w = (int)vp.width;
-        g.view_h = (int)vp.height;
-        LOGI("%zu views of %dx%d, in %zu texture(s)", cp_drawable_get_view_count(d), g.view_w, g.view_h,
-             cp_drawable_get_texture_count(d));
+        if ((int)vp.width == g.view_w && (int)vp.height == g.view_h) {
+            held++;
+        } else {
+            held = 0;
+            g.view_w = (int)vp.width;
+            g.view_h = (int)vp.height;
+            id<MTLTexture> t = cp_drawable_get_color_texture(d, cp_view_texture_map_get_texture_index(m));
+            g.tex_w = (int)t.width;
+            g.tex_h = (int)t.height;
+            LOGI("%zu views of %dx%d, in %zu texture(s) of %dx%d", cp_drawable_get_view_count(d), g.view_w, g.view_h,
+                 cp_drawable_get_texture_count(d), g.tex_w, g.tex_h);
+        }
         present_black();
     }
     if (g.view_w == 0) return XR_ERROR_INITIALIZATION_FAILED;
@@ -775,10 +798,14 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateViewConfigurationViews(XrInstance, XrS
     if (cap == 0) return XR_SUCCESS;
     if (cap < 2) return XR_ERROR_SIZE_INSUFFICIENT;
     for (int i = 0; i < 2; i++) {
-        v[i].recommendedImageRectWidth = (uint32_t)g.view_w;
-        v[i].recommendedImageRectHeight = (uint32_t)g.view_h;
-        v[i].maxImageRectWidth = (uint32_t)g.view_w * 2;
-        v[i].maxImageRectHeight = (uint32_t)g.view_h * 2;
+        // Foveated, a view is far larger in screen space (6261x5023 at render quality 1)
+        // than the texture it is stored in (2432x2368), which holds that density only where
+        // the viewer looks. An eye rendered uniformly at the texture's size is what the
+        // texture holds on average; at the view's it would be 31 megapixels.
+        v[i].recommendedImageRectWidth = (uint32_t)std::min(g.view_w, g.tex_w);
+        v[i].recommendedImageRectHeight = (uint32_t)std::min(g.view_h, g.tex_h);
+        v[i].maxImageRectWidth = (uint32_t)std::max(g.view_w, g.tex_w * 2);
+        v[i].maxImageRectHeight = (uint32_t)std::max(g.view_h, g.tex_h * 2);
         v[i].recommendedSwapchainSampleCount = 1;
         v[i].maxSwapchainSampleCount = 1;
     }
@@ -958,6 +985,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* fe) {
             // Black, far away, where nothing is drawn: see far_depth.
             rp.depthAttachment.clearDepth = far_depth(d, v);
             rp.depthAttachment.storeAction = MTLStoreActionStore;
+            // Foveated: the view's viewport and projection are in the rate map's screen
+            // space, which it rasterizes into the smaller texture densest where the viewer
+            // looks.
+            if (v < cp_drawable_get_rasterization_rate_map_count(d))
+                rp.rasterizationRateMap = cp_drawable_get_rasterization_rate_map(d, v);
             id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
             [enc setViewport:cp_view_texture_map_get_viewport(map)];
             [enc setRenderPipelineState:g.pipe];

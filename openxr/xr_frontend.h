@@ -57,8 +57,11 @@ struct Platform {
 
 // The game's defaults with `config_dir`/vr.txt read over them, applied to the renderer.
 // `state_dir` is where the frontend keeps what it writes: the viewer's choice of view
-// (view.txt) and, with dump_every, the frames it dumps.
-const VrConfig& configure(const std::string& config_dir, const std::string& state_dir);
+// (view.txt) and, with dump_every, the frames it dumps. `platform_defaults`, if given, is
+// applied over the game's defaults and under vr.txt: what a platform's runtime makes of
+// settings tuned on a Quest.
+const VrConfig& configure(const std::string& config_dir, const std::string& state_dir,
+                          void (*platform_defaults)(VrConfig&) = nullptr);
 
 // The instance, session, swapchains and actions. The GL context must be current.
 bool init(const Platform& p);
