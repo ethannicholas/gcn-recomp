@@ -373,7 +373,10 @@ function(gcn_add_game)
       # aliasing and floating point, and silence the noise it legitimately produces.
       target_compile_options(game_recomp PRIVATE /O2 /fp:precise /fp:except- /wd4101 /wd4102 /wd4723 /bigobj)
     else()
-      target_compile_options(game_recomp PRIVATE -O2 -fno-strict-aliasing -Wno-unused-label -Wno-unused-variable
+      # -fwrapv: the guest's integer arithmetic wraps, and the translation multiplies signed
+      # values in C (mulli), where an overflow is otherwise undefined and the optimizer may
+      # assume it never happens.
+      target_compile_options(game_recomp PRIVATE -O2 -fno-strict-aliasing -fwrapv -Wno-unused-label -Wno-unused-variable
                              -Wno-parentheses-equality -ffp-contract=off)
       # Line tables only, where the build has debug info at all: a crash's frames still
       # resolve to a line (addr2line, a symbolized backtrace), and nobody reads a
