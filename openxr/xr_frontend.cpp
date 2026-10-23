@@ -1010,7 +1010,10 @@ void read_pad(PadState& p) {
     p.trig_r = (uint8_t)(rt * 255.0f);
     if (lt > 0.85f) p.buttons |= PAD_L;
     if (rt > 0.85f) p.buttons |= PAD_R;
-    if (action_float(g_xr.grip_r) > 0.5f) p.buttons |= PAD_Z;
+    const vr::GameHooks& hooks = vr::game_hooks();
+    if (action_float(g_xr.grip_r) > 0.5f) p.buttons |= hooks.grip_right;
+    const bool grip_l = action_float(g_xr.grip_l) > 0.5f;
+    if (grip_l) p.buttons |= hooks.grip_left;
 
     auto to_u8 = [](float f) {
         int v = 128 + (int)(f * 100.0f);
@@ -1019,8 +1022,9 @@ void read_pad(PadState& p) {
     const XrVector2f l = action_vec2(g_xr.stick_l), r = action_vec2(g_xr.stick_r);
     // The Touch controllers have no D-pad, so holding the left grip turns the left
     // thumbstick into one: pushed past halfway, its stronger axis is a D-pad direction, and
-    // the control stick reads centred meanwhile so that the press does not also walk.
-    if (action_float(g_xr.grip_l) > 0.5f) {
+    // the control stick reads centred meanwhile so that the press does not also walk. Unless
+    // the game put a button on that grip (GameHooks::grip_left).
+    if (grip_l && !hooks.grip_left) {
         if (fmaxf(fabsf(l.x), fabsf(l.y)) > 0.5f) {
             if (fabsf(l.x) > fabsf(l.y)) p.buttons |= l.x > 0 ? PAD_RIGHT : PAD_LEFT;
             else p.buttons |= l.y > 0 ? PAD_UP : PAD_DOWN;

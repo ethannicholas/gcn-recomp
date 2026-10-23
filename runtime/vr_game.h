@@ -72,6 +72,13 @@ struct GameHooks {
     // call it.
     void (*map_pad)(PadState& p) = nullptr;
 
+    // The GameCube buttons (PAD_* in hw/pad.h) the Touch controllers' grips press. 0 for
+    // the left grip is the frontend's D-pad mode: held, it turns the left thumbstick into a
+    // D-pad, since a Touch controller has none. A game that never wants the D-pad from the
+    // player can put a button there instead.
+    uint16_t grip_left = 0;
+    uint16_t grip_right = 0x0010;  // PAD_Z
+
     // A gamepad's place in the controller state (merged after map_pad, by a frontend that
     // reads one), for a game whose controls on a modern pad are not the GameCube's
     // buttons in its places. Called on the frontend's thread; whatever the game takes from

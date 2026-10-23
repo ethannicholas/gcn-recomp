@@ -126,6 +126,12 @@ struct PixelState {
 // the HUD frame like the window, but its vertices on the picture's edge are taken far out
 // along the frame's plane, so that it still covers the whole view and its edges do not
 // show; a lookup of a copy of the frame is still the eye's own grab.
+// EyePushOut is for a perspective draw the game pulls towards its camera so that it wins
+// the depth test against the surface it lies on -- a shadow or a decal over the ground,
+// moved along the lines of sight so that the picture is unchanged. In an eye it would
+// float that far in front of the surface. It is scaled about the camera so that the centre
+// of the state's vertices is render_set_push_out's distance further away: the same place in
+// the game's picture, at the depth it stands for.
 // Otherwise the flat view is untouched; a hidden draw's textures are kept alive. For a game that hides a model's materials (by TexData::hash, the same in
 // every run) or an effect that cannot be re-projected (a screen-space refraction of part
 // of the frame).
@@ -145,7 +151,7 @@ struct EyeDrawFacts {
     float clip_x0, clip_x1, clip_y0, clip_y1, clip_area;
     uint64_t tex_hash[8];         // each texmap's texture by content, 0 for none or a copy
 };
-enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8, EyeHideEverywhere = 9, EyeFrameScreen = 10 };
+enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8, EyeHideEverywhere = 9, EyeFrameScreen = 10, EyePushOut = 11 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
 enum class CmdType : uint8_t { Draw, EfbCopy, Present };

@@ -117,6 +117,10 @@ void render_set_depth_layers(float background_from, float foreground_to, float f
 // its draws in the frame. 0 turns it off, which is the default.
 void render_set_hud_push(float below, float to);
 
+// How far an EyePushOut draw is put back, in view-space units: the distance the game pulled
+// it towards its camera. 0, the default, leaves it where it was drawn.
+void render_set_push_out(float units);
+
 // What a perspective draw the game placed in view space itself is in an eye (PixelState::
 // view_space). Off, the default, it is held in front of the camera: drawn with the head's
 // transform but outside the world's pitch correction and the game's own eye. On, it is a

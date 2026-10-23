@@ -147,6 +147,11 @@ static float g_hud_scale = 1.0f;
 static float g_hud_push_below = 0.0f, g_hud_push_to = 0.0f;
 static std::vector<float> g_hud_push;
 static float g_cur_hud_push = 1.0f;
+// render_set_push_out: how far an EyePushOut draw goes back. g_push_out holds each state's
+// scale about the camera for the frame (empty for none), g_cur_push_out the current draw's.
+static float g_push_out_units = 0.0f;
+static std::vector<float> g_push_out;
+static float g_cur_push_out = 1.0f;
 static float g_vr_view_hud[16], g_vr_view_world_hud[16];
 // Whether a perspective draw placed in view space is a billboard in the world rather than
 // something held before the camera (render_set_view_space_world). Off unless a game says.
@@ -1890,11 +1895,14 @@ static void apply_state(const PixelState& st, int prim) {
     // vertex shader), whether or not it is scaled.
     const bool fg_layer = g_fg_to > 0.0f && perspective && band_hi <= g_fg_to;
     const float hud_push = g_vr_active && hud_layer ? g_cur_hud_push : 1.0f;
+    // EyePushOut: scaled about the camera like a pushed HUD element, in any layer.
+    const float push_out = g_vr_active && !hud_layer ? g_cur_push_out : 1.0f;
+    const float push = hud_push * push_out;
     const bool same_proj = view_held && memcmp(st.proj, u.proj, sizeof(st.proj)) == 0 &&
                            st.view_space == u.view_space && background == u.background &&
                            foreground == u.foreground && fg_layer == u.fg_layer && hud_layer == u.hud_layer &&
                            flat3d == u.flat3d && screen == u.screen && frame_screen == u.frame_screen && facing == u.facing && !restore && !u.restore &&
-                           hud_push == u.hud_push && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
+                           push == u.hud_push && (!flat3d || memcmp(st.viewport, u.viewport, sizeof(st.viewport)) == 0);
     // Note: a draw sampling a copy of the whole frame (the water surface is one) must
     // stay in the world, however tempting its screen-space origin makes the overlay path
     // look. Sending the water through it put the water, and the racer baked into the
@@ -1931,18 +1939,19 @@ static void apply_state(const PixelState& st, int prim) {
                         2.0f * atanf(1.0f / p[0]) * 57.2958f, 2.0f * atanf(1.0f / p[2]) * 57.2958f,
                         p[0], p[2]);
             }
-            // A HUD element pushed out (render_set_hud_push): scaled about the camera in the
-            // game's view space, before the layer's own scale.
+            // A HUD element pushed out (render_set_hud_push), or a draw put back where the
+            // game pulled it from (EyePushOut): scaled about the camera in the game's view
+            // space, before the layer's own scale.
             float pushed[16];
-            if (hud_push != 1.0f) {
-                const float K[16] = {hud_push, 0, 0, 0, 0, hud_push, 0, 0, 0, 0, hud_push, 0, 0, 0, 0, 1};
+            if (push != 1.0f) {
+                const float K[16] = {push, 0, 0, 0, 0, push, 0, 0, 0, 0, push, 0, 0, 0, 0, 1};
                 mat4_mul(view, K, pushed);
                 view = pushed;
             }
             float far_proj[16];
             glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, game_proj ? P : eye_proj_for(p, perspective, far_proj));
             glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, view);
-            g_eye_layer_name = background ? "sky" : hud_push != 1.0f ? "hud-band(pushed)"
+            g_eye_layer_name = background ? "sky" : hud_push != 1.0f ? "hud-band(pushed)" : push_out != 1.0f ? "pushed-out"
                              : hud_layer ? (view_space_3d ? "hud-band(view)" : "hud-band(world)")
                              : foreground ? (view_space_3d ? "foreground(view)" : "foreground(world)")
                              : view_space_3d ? "view-space-3d" : g_cur_late_view ? "late(at-panel)"
@@ -2067,7 +2076,7 @@ static void apply_state(const PixelState& st, int prim) {
         u.frame_screen = frame_screen;
         u.restore = restore;
         u.facing = facing;
-        u.hud_push = hud_push;
+        u.hud_push = push;
     }
     // Per state, whatever the projection: see g_frame_grad.
     if (frame_screen && g_cur_uvgrad && pr.u_uvgrad >= 0) glUniform4fv(pr.u_uvgrad, 8, g_cur_uvgrad);
@@ -2896,6 +2905,8 @@ void render_set_hud_push(float below, float to) {
     g_hud_push_to = to;
 }
 
+void render_set_push_out(float units) { g_push_out_units = units > 0.0f ? units : 0.0f; }
+
 void render_set_eye_hook(EyeHook hook) { g_eye_hook = hook; }
 void render_set_world_pitch_hook(WorldPitchHook hook) { g_pitch_hook = hook; }
 static FrameHook g_frame_hook = nullptr;
@@ -3104,6 +3115,7 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     g_has_facing_box = false;
     g_true_scale.clear();
     g_hud_push.clear();
+    g_push_out.clear();
     if (g_hud_push_below > 0.0f && g_hud_to > 0.0f) {
         // Each HUD-layer state's nearest vertex over the frame, in view space.
         std::vector<float> nearest(b.states.size(), 1e30f);
@@ -3145,11 +3157,25 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
     filter_answers(b, &skip, answer, box);
     std::vector<uint8_t> hidden_mtx;   // EyeHideObject: the position matrices to clear of draws
     std::vector<uint8_t> late_mtx;     // EyeLateObject: those whose draws go last
+    std::vector<double> push_sum;      // EyePushOut: each state's vertices summed, and counted
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
         if (c.type != CmdType::Draw || skip[i]) continue;
         const int8_t a = answer[c.state];
         if (a == EyeKeep || a < 0) continue;
+        if (a == EyePushOut) {
+            if (g_push_out_units <= 0.0f || (int)b.states[c.state].proj[6] != 0) continue;
+            if (push_sum.empty()) push_sum.assign(b.states.size() * 4, 0.0);
+            double* s = &push_sum[c.state * 4];
+            for (uint32_t v = 0; v < c.count; v++) {
+                const float* p = b.verts[b.indices[c.first + v]].pos;
+                s[0] += p[0];
+                s[1] += p[1];
+                s[2] += p[2];
+                s[3] += 1.0;
+            }
+            continue;
+        }
         if (a == EyeFlat) {
             if (g_flat3d.empty()) g_flat3d.assign(b.states.size(), 0);
             g_flat3d[c.state] = 1;
@@ -3208,6 +3234,15 @@ static void eye_prepare(const Batch& b, const std::vector<uint8_t>& skip) {
         if (a == EyeHideObject) {
             if (hidden_mtx.size() <= c.mtx) hidden_mtx.resize(c.mtx + 1, 0);
             hidden_mtx[c.mtx] = 1;
+        }
+    }
+    if (!push_sum.empty()) {
+        g_push_out.assign(b.states.size(), 1.0f);
+        for (size_t s = 0; s < b.states.size(); s++) {
+            const double* p = &push_sum[s * 4];
+            if (p[3] == 0.0) continue;
+            const double d = sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) / p[3];
+            if (d > 0.0) g_push_out[s] = (float)((d + g_push_out_units) / d);
         }
     }
     if (hidden_mtx.empty() && late_mtx.empty()) return;
@@ -3914,6 +3949,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             g_cur_facing = !g_facing.empty() && g_facing[c.state];
             g_cur_true_scale = !g_true_scale.empty() && g_true_scale[c.state];
             g_cur_hud_push = g_hud_push.empty() ? 1.0f : g_hud_push[c.state];
+            g_cur_push_out = g_push_out.empty() ? 1.0f : g_push_out[c.state];
             g_cur_restore = restore_draw;
             g_cur_restore_box = restore_draw ? &g_restore_box[c.state * 4] : nullptr;
             apply_state(b.states[c.state], c.prim);
@@ -3923,6 +3959,7 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
             g_cur_facing = false;
             g_cur_true_scale = false;
             g_cur_hud_push = 1.0f;
+            g_cur_push_out = 1.0f;
             g_cur_restore = false;
             g_cur_restore_box = nullptr;
             // apply_state binds the EFB's scissor and viewport expectations; the eye
@@ -3936,8 +3973,9 @@ bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
         }
         if (eye_drawlog && do_copies) {
             const PixelState& st = b.states[c.state];
-            fprintf(stderr, "[eyedraw] %d st=%u %s band=%.5f..%.5f view_space=%d\n", eye_draw_index, c.state, g_eye_layer_name,
-                    (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f, st.viewport[5] / 16777215.0f, (int)st.view_space);
+            fprintf(stderr, "[eyedraw] %d st=%u %s band=%.5f..%.5f view_space=%d push=%.3f\n", eye_draw_index, c.state, g_eye_layer_name,
+                    (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f, st.viewport[5] / 16777215.0f, (int)st.view_space,
+                    g_push_out.empty() ? 1.0f : g_push_out[c.state]);
         }
         eye_draw_index++;
         draw_cmd(b, c);

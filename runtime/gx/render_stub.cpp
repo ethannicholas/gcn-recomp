@@ -13,5 +13,6 @@ bool render_first_person() { return false; }
 void render_set_frame_hook(FrameHook) {}
 void render_set_world_pitch_hook(WorldPitchHook) {}
 void render_set_shader_keys(const void*, size_t) {}
+void render_set_push_out(float) {}
 uint32_t present_count() { return 0; }
 }  // namespace gx

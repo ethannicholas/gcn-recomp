@@ -881,6 +881,20 @@ So for a draw of points the fragment shader spreads each such coordinate back ou
 else, where `gl_PointCoord` is undefined): from the vertex's value at the point's top left to
 value + 1/n at its bottom right, as GX does. Points keep their size in EFB pixels in an eye.
 
+## Draws pulled towards the camera
+
+A game can draw a shadow or a decal over the ground pulled along the lines of sight towards
+its camera, so that it wins the depth test against the surface without changing the
+picture. In an eye it floats that far in front of the surface. A game's eye filter answers
+`EyePushOut` for such a draw, and `render_set_push_out(units)` says how far it was pulled:
+each such state is scaled about the camera so that the centre of its vertices in the frame
+is that much further away (the same machinery as `render_set_hud_push`). 0, the default,
+leaves it where it was drawn.
+
+The eye draw log (`[eyedraw]`) prints each state's factor as `push=`. Its layer name is
+only rewritten when the program's projection uniforms change, so it can carry over from an
+earlier draw with another program; `push=` is the factor actually used.
+
 ## The eye's far plane
 
 An eye's projection comes from the frontend, with `VrConfig::far_m` (2 km by default) as its
