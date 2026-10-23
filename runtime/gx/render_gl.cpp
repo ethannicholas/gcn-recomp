@@ -98,6 +98,21 @@ static int g_scale = 2;
 // game's camera -- see render_hud_frame.
 static bool g_vr_active = false;
 static float g_vr_proj[16], g_vr_view[16];
+
+// The eye's projection with its far plane moved to a perspective draw's own: GX's
+// projection gives z' = p4 * z + p5 against w = -z, which is 0 -- the far plane -- at a
+// distance of p5 / p4. The eye's near plane stays. Otherwise the eye's far plane is the
+// frontend's (VrConfig::far_m), and whatever the game draws beyond it is clipped away.
+static const float* eye_proj_for(const float* p, bool perspective, float out[16]) {
+    if (!perspective || p[4] == 0.0f) return g_vr_proj;
+    const float f = p[5] / p[4];
+    const float n = g_vr_proj[14] / (g_vr_proj[10] - 1.0f);
+    if (!(f > n)) return g_vr_proj;
+    memcpy(out, g_vr_proj, 16 * sizeof(float));
+    out[10] = -(f + n) / (f - n);
+    out[14] = -2.0f * f * n / (f - n);
+    return out;
+}
 // The eye's view as the frontend gave it (render_set_vr_eye). g_vr_view is this times the
 // batch's view turn (Batch::view_turn, set_view_turn), from the camera the game turned to
 // the one the viewer stands at, so that the turn leaves the world where it was.
@@ -1683,8 +1698,8 @@ static bool zfreeze_plane_eye(const Batch& b, const Cmd& c, float out[4]) {
     if (c.prim != 0 || c.count < 3) return false;
     const PixelState& st = b.states[c.state];
     if ((int)st.proj[6] != 0) return false;
-    float M[16];
-    mat4_mul(g_vr_proj, st.view_space ? g_vr_view : g_vr_view_world, M);
+    float M[16], far_proj[16];
+    mat4_mul(eye_proj_for(st.proj, true, far_proj), st.view_space ? g_vr_view : g_vr_view_world, M);
     const float band_lo = (st.viewport[5] - fabsf(st.viewport[2])) / 16777215.0f;
     const float band_hi = st.viewport[5] / 16777215.0f;
     double X[3], Y[3], Z[3];
@@ -1924,7 +1939,8 @@ static void apply_state(const PixelState& st, int prim) {
                 mat4_mul(view, K, pushed);
                 view = pushed;
             }
-            glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, game_proj ? P : g_vr_proj);
+            float far_proj[16];
+            glUniformMatrix4fv(pr.u_proj, 1, GL_FALSE, game_proj ? P : eye_proj_for(p, perspective, far_proj));
             glUniformMatrix4fv(pr.u_view, 1, GL_FALSE, view);
             g_eye_layer_name = background ? "sky" : hud_push != 1.0f ? "hud-band(pushed)"
                              : hud_layer ? (view_space_3d ? "hud-band(view)" : "hud-band(world)")

@@ -27,8 +27,8 @@ struct VrConfig {
     float offset_y = 0.0f;
     float offset_z = 0.0f;
 
-    // Near and far planes, in metres. Their ratio sets depth precision, so widen only
-    // as far as the scene needs: too large a range shows up as z-fighting.
+    // Near and far planes, in metres. A perspective draw in the world takes its far plane
+    // from the game's own projection instead (graphics.md, "The eye's far plane").
     float near_m = 0.1f;
     float far_m = 2000.0f;
 

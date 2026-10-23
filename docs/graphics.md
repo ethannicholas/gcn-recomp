@@ -881,6 +881,15 @@ So for a draw of points the fragment shader spreads each such coordinate back ou
 else, where `gl_PointCoord` is undefined): from the vertex's value at the point's top left to
 value + 1/n at its bottom right, as GX does. Points keep their size in EFB pixels in an eye.
 
+## The eye's far plane
+
+An eye's projection comes from the frontend, with `VrConfig::far_m` (2 km by default) as its
+far plane. A world whose scenery stands farther out than that lost it in stereo: the eye
+clipped what the flat view drew, and as the plane turned with the head the gap moved across
+the scenery. A perspective draw in an eye now takes its far plane from the draw's own
+projection (`eye_proj_for`): GX's z' = p4 z + p5 against w = -z is 0 at a distance of
+p5 / p4. The eye's near plane stays. The z freeze plane in an eye uses the same projection.
+
 ## Depth bands in an eye
 
 A viewport's far depth is clamped to the buffer's 24 bits before anything is made of it
