@@ -1162,11 +1162,15 @@ void render_set_window_size(int w, int h) { g_win_w = w; g_win_h = h; }
 // view, which means changing it while the game runs.
 //
 // Nothing in the EFB has to survive the change: it is cleared and redrawn every frame.
-// The textures EFB copies land in do not get off so lightly -- they are allocated at
-// dst * scale but matched for reuse by their logical size alone, so a survivor would be
-// reused at the old resolution and quietly sample wrong. They go with the EFB.
+// The textures EFB copies land in are allocated at dst * scale but matched for reuse by
+// their logical size alone, so one left at the old resolution would be reused there and
+// quietly sample wrong. They are scaled with the EFB, contents and all: a copy the game
+// makes once and samples from then on (a machine's shadow, rendered from above as the race
+// loads) is never made again, and dropping them, as this did until 2026-10-22, left every
+// shadow in a race a translucent grey square from the moment the view went to stereo.
 static void gl_state_invalidate();
 static void uniforms_invalidate();
+static void xfbs_drop();
 void render_set_internal_scale(int scale) {
     if (scale < 1) scale = 1;
     if (scale > kMaxInternalScale) scale = kMaxInternalScale;
@@ -1218,14 +1222,29 @@ void render_set_internal_scale(int scale) {
     glDeleteTextures(1, &g_efb_depth);
     g_efb_color = color;
     g_efb_depth = depth;
-    for (auto it = g_textures.begin(); it != g_textures.end();) {
-        if (it->second.efb) {
-            glDeleteTextures(1, &it->second.tex);
-            it = g_textures.erase(it);
-        } else {
-            ++it;
-        }
+    GLuint rfbo = 0, dfbo = 0;
+    glGenFramebuffers(1, &rfbo);
+    glGenFramebuffers(1, &dfbo);
+    for (auto& [id, t] : g_textures) {
+        if (!t.efb) continue;
+        GLuint nt = 0;
+        glGenTextures(1, &nt);
+        glBindTexture(GL_TEXTURE_2D, nt);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t.w * g_scale, t.h * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dfbo);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, nt, 0);
+        // Nearest for a depth copy, whose texels are packed bytes that must not be averaged.
+        glBlitFramebuffer(0, 0, t.w * old_scale, t.h * old_scale, 0, 0, t.w * g_scale, t.h * g_scale,
+                          GL_COLOR_BUFFER_BIT, t.depth ? GL_NEAREST : GL_LINEAR);
+        glDeleteTextures(1, &t.tex);
+        t.tex = nt;
     }
+    glDeleteFramebuffers(1, &rfbo);
+    glDeleteFramebuffers(1, &dfbo);
+    xfbs_drop();
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         fatal("EFB framebuffer incomplete at internal scale %d", g_scale);
@@ -2698,6 +2717,16 @@ struct Xfb {
     uint32_t written_rows;
 };
 static std::vector<Xfb> g_xfbs;
+// At a change of internal scale: an XFB's texture is sized at the scale it was made at and
+// is found again by its guest layout alone, so it would be drawn into at the wrong size.
+// It holds only the frame being put together, which the next display copies make again.
+static void xfbs_drop() {
+    for (auto& x : g_xfbs) {
+        glDeleteFramebuffers(1, &x.fbo);
+        glDeleteTextures(1, &x.tex);
+    }
+    g_xfbs.clear();
+}
 
 static Xfb& xfb_for(uint32_t dest, uint32_t w, uint32_t stride, uint32_t h) {
     for (auto& x : g_xfbs)

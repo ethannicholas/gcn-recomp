@@ -684,6 +684,16 @@ rotating addresses. The front end then lists the copy's id with the decoded text
 go of (`Batch::dead_textures`), and the renderer deletes it a batch later; it no longer ages
 anything itself.
 
+A change of internal scale (`render_set_internal_scale`, which a frontend makes as it moves
+between theater and stereo) keeps the copies too, resampled to the new scale with the EFB.
+It used to drop them, on the grounds that the next frame's copies would make them again. A
+game that renders each racer's shadow from above once, as the race loads, and samples that
+copy for the rest of the race never makes it again: from the switch to stereo every shadow
+was a translucent grey square, the quad sampling a texture that was gone. The harness
+reproduces the switch with `GCN_RESCALE` (diagnostics.md), and without it never showed the
+fault. The XFBs a frame rendered in parts is put together in go at the change; they hold only
+that frame.
+
 **Copies a game's CPU reads.** A game that copies the frame out and then moves or reads
 the bytes with the CPU needs the copy in RAM, in its texture format. `gx::set_copy_writeback`
 takes a filter from the game; a copy it accepts is flagged, the renderer reads it back as it
