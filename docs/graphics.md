@@ -811,6 +811,13 @@ planes there, which keeps their clipping as it was. GL ES has no depth clamp in 
 keeps GL's clipping. `GXSetClipMode(GX_CLIP_DISABLE)` (XF 0x1005) is recorded in the pixel
 state and shown in the draw log as `noclip`, but not yet honoured.
 
+Neither test is exact: both planes are given 1e-5 of w, and on GL ES, where GL's own near
+and far planes stand where a full-range viewport puts GX's, a vertex within that much past
+them is put on the plane. A game drew its full-motion video as an orthographic quad at view
+z 1e-4 with its near plane at 0: a clip z of -1.0000001 against a w of 1, which a console
+draws. Clipped exactly, every frame of the video was thrown away and the screen stayed
+black (the decoded frames, in the textures, were fine).
+
 ## Z freeze
 
 With gen mode bit 19 set (`GXSetCoPlanar`) a triangle's depth is not its own: GX evaluates

@@ -353,6 +353,15 @@ void main() {
         p.y = u_vp_a.z * clip.w + u_vp_a.w * clip.y;
         p.z = u_vp_b.x * clip.w + u_vp_b.y * clip.z;
         p.w = clip.w;
+        // GX does not clip what lies a hair outside its depth range (see gx_clip below).
+        // Without a depth clamp (GL ES) GL's own near and far planes are where a full-range
+        // viewport puts GX's, and they would throw that hair away, so a vertex within it is
+        // put on the plane.
+#ifdef GL_ES
+        float zt = 2e-5 * abs(p.w);
+        if (p.z < -p.w && p.z >= -p.w - zt) p.z = -p.w;
+        if (p.z > p.w && p.z <= p.w + zt) p.z = p.w;
+#endif
         // GX's viewport transform points Y down and the EFB blit flips the image back,
         // so the flat path negates Y here to cancel it.
         gl_Position = vec4(p.x, -p.y, p.z, p.w);
@@ -362,8 +371,11 @@ void main() {
         // tenth and leaves everything farther at the buffer's maximum): GL, clipping after
         // the viewport, threw away all of the scene beyond that tenth. So the renderer
         // clamps depth (GL_DEPTH_CLAMP, which also turns off GL's own near and far
-        // clipping) and clips here where GX does.
-        gx_clip = vec2(clip.z + clip.w, -clip.z);
+        // clipping) and clips here where GX does -- give or take a hair, 1e-5 of w: a movie
+        // drawn as an orthographic quad at view z 1e-4, behind a near plane at 0, has a
+        // clip z of -1.0000001 against a w of 1, and a console draws it. Clipped exactly,
+        // the whole picture went.
+        gx_clip = vec2(clip.z + clip.w, -clip.z) + 1e-5 * abs(clip.w);
     }
 #ifdef GCN_CLIP
     // Where the renderer clamps depth, GL no longer clips at near and far, so every other
