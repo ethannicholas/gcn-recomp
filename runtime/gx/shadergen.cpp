@@ -348,20 +348,21 @@ void main() {
         gl_Position.z = (2.0 * cz / cw + 1.0) * gl_Position.w;
     } else {
         vec4 clip = u_proj * vec4(a_pos, 1.0);
+        // GX treats a clip z one float step past the near plane (z + w = -2^-23 at w 1) as
+        // on it, and clips two steps past (see "Depth past the viewport's range" in
+        // graphics.md). Scaling z by 1 - 1e-7 before the test, as Dolphin does, draws the
+        // first and clips the second. Without a depth clamp (GL ES) GL clips at its own
+        // planes, which a full-range viewport puts at GX's, so there the depth the
+        // viewport makes is taken from the scaled z too.
+        float cz = clip.z * (1.0 - 1e-7);
+#ifdef GL_ES
+        clip.z = cz;
+#endif
         vec4 p;
         p.x = u_vp_a.x * clip.w + u_vp_a.y * clip.x;
         p.y = u_vp_a.z * clip.w + u_vp_a.w * clip.y;
         p.z = u_vp_b.x * clip.w + u_vp_b.y * clip.z;
         p.w = clip.w;
-        // GX does not clip what lies a hair outside its depth range (see gx_clip below).
-        // Without a depth clamp (GL ES) GL's own near and far planes are where a full-range
-        // viewport puts GX's, and they would throw that hair away, so a vertex within it is
-        // put on the plane.
-#ifdef GL_ES
-        float zt = 2e-5 * abs(p.w);
-        if (p.z < -p.w && p.z >= -p.w - zt) p.z = -p.w;
-        if (p.z > p.w && p.z <= p.w + zt) p.z = p.w;
-#endif
         // GX's viewport transform points Y down and the EFB blit flips the image back,
         // so the flat path negates Y here to cancel it.
         gl_Position = vec4(p.x, -p.y, p.z, p.w);
@@ -371,11 +372,8 @@ void main() {
         // tenth and leaves everything farther at the buffer's maximum): GL, clipping after
         // the viewport, threw away all of the scene beyond that tenth. So the renderer
         // clamps depth (GL_DEPTH_CLAMP, which also turns off GL's own near and far
-        // clipping) and clips here where GX does -- give or take a hair, 1e-5 of w: a movie
-        // drawn as an orthographic quad at view z 1e-4, behind a near plane at 0, has a
-        // clip z of -1.0000001 against a w of 1, and a console draws it. Clipped exactly,
-        // the whole picture went.
-        gx_clip = vec2(clip.z + clip.w, -clip.z) + 1e-5 * abs(clip.w);
+        // clipping) and clips here where GX does, with the scaled z above.
+        gx_clip = vec2(cz + clip.w, -cz);
     }
 #ifdef GCN_CLIP
     // Where the renderer clamps depth, GL no longer clips at near and far, so every other

@@ -811,12 +811,22 @@ planes there, which keeps their clipping as it was. GL ES has no depth clamp in 
 keeps GL's clipping. `GXSetClipMode(GX_CLIP_DISABLE)` (XF 0x1005) is recorded in the pixel
 state and shown in the draw log as `noclip`, but not yet honoured.
 
-Neither test is exact: both planes are given 1e-5 of w, and on GL ES, where GL's own near
-and far planes stand where a full-range viewport puts GX's, a vertex within that much past
-them is put on the plane. A game drew its full-motion video as an orthographic quad at view
-z 1e-4 with its near plane at 0: a clip z of -1.0000001 against a w of 1, which a console
-draws. Clipped exactly, every frame of the video was thrown away and the screen stayed
-black (the decoded frames, in the textures, were fine).
+GX's near test is not exact IEEE either. Measured on a Wii (Dolphin issue 6914), a clip z +
+w of -2^-23 (-1.19e-7, one float step past -1 at w 1) draws and -2^-22 is clipped; Dolphin's
+hardware test for it (`hwtests`, `gxtest/clipping.cpp`) puts it as the GPU not implementing
+IEEE floats strictly, so that the sum "in fact is treated as zero". Why is not known (Dolphin
+PR 1366: "unclear why exactly it works on real hardware"). The renderer does what Dolphin
+does: z is scaled by 1 - 1e-7 (in float, 1 - 2^-23) before the test, which at w 1 lets the
+first through and clips the second, and leaves the far plane at z 0 exact. On GL ES, where
+GL's own planes stand where a full-range viewport puts GX's, the scaled z also makes the
+depth, which moves it by at most a step or two of the buffer.
+
+Games draw a full-screen 2D layer just there: an orthographic projection with its near
+plane at 0 and the layer at view z 1e-4, which in float comes to a clip z + w of exactly
+-2^-23. Clipped exactly, a full-motion video was thrown away whole and the screen stayed
+black (the decoded frames, in the textures, were fine). This note used to say both planes
+got 1e-5 of w, a guess about 80 times wider than the measurement allows, and applied at the
+far plane, where nothing was measured.
 
 ## Z freeze
 
