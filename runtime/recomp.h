@@ -275,11 +275,20 @@ static inline int32_t FCTIWZ(double d) {
     if (d <= -2147483648.0) return INT32_MIN;
     return (int32_t)d;
 }
-static inline int32_t FCTIW(double d) {
+/* fctiw rounds by FPSCR[RN] (bits 30-31): nearest even, toward zero, toward +inf, toward
+   -inf. Code that wants a floor sets RN to 3 around it (mtfsb1 30; mtfsb1 31; fctiw) and
+   restores the FPSCR after; rounding to nearest there is a different integer whenever the
+   fraction is a half or more. */
+static inline int32_t FCTIW(CPU* c, double d) {
     if (d != d) return INT32_MIN;
     if (d >= 2147483647.0) return INT32_MAX;
     if (d <= -2147483648.0) return INT32_MIN;
-    return (int32_t)nearbyint(d);
+    switch (c->fpscr & 3) {
+    case 1: return (int32_t)trunc(d);
+    case 2: return (int32_t)ceil(d);
+    case 3: return (int32_t)floor(d);
+    default: return (int32_t)nearbyint(d);
+    }
 }
 
 /* FPSCR[FPRF] (bits 15-19: C FL FG FE FU) for a result, as the 750 sets it: a code that

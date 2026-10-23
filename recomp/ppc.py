@@ -582,7 +582,7 @@ def translate63(pc, i, d, a, b, cc, rc):
     if xo == 12:  # frsp
         return f'{{ double v = (double)(float){F(b)}; {F(d)} = v; {P1(d)} = v;{FPRF_S} }}' + cr1(rc)
     if xo == 14:  # fctiw
-        return f'c->f[{d}].u = 0xFFF8000000000000ull | (uint32_t)FCTIW({F(b)});' + cr1(rc)
+        return f'c->f[{d}].u = 0xFFF8000000000000ull | (uint32_t)FCTIW(c, {F(b)});' + cr1(rc)
     if xo == 15:  # fctiwz
         return f'c->f[{d}].u = 0xFFF8000000000000ull | (uint32_t)FCTIWZ({F(b)});' + cr1(rc)
     if xo == 72:  # fmr
