@@ -3,6 +3,9 @@
 // writes the final 5ms stereo block that the AI DMA plays.
 #include "../runtime.h"
 #include "ax.h"
+#include "../sinc.h"
+#include <cmath>
+#include <cstdlib>
 #include <algorithm>
 #include <initializer_list>
 #include <string>
@@ -126,21 +129,68 @@ void mix_add(int32_t* out, const int16_t* in, int n, PB& pb, int vol_idx, bool r
     pb.w[vol_idx] = vol;
 }
 
+// ---- sample rate conversion ----
+// A PB's SRC type picks how a voice is resampled to 32 kHz: 0 a 4-tap polyphase filter, 1
+// linear interpolation, 2 none (each output sample repeats the newest input sample). The
+// polyphase filter's coefficients come from one of three tables in the DSP's coefficient
+// ROM, the PB's coef select picking which and the top 7 bits of the position's fraction
+// one of 128 phases. The AX library names the tables by their cutoff for a 32 kHz voice, 8,
+// 12 and 16 kHz: half, three quarters and all of the input's Nyquist frequency, so that a
+// voice pitched up far enough to alias can be given a lower one. The ROM is not ours to
+// ship, so tables of that shape are designed here, windowed sincs with those cutoffs, each
+// phase scaled to unity gain: close to the console's, not bit-exact.
+constexpr int SRC_PHASES = 128, SRC_TAPS = 4, SRC_TABLES = 3;
+int16_t g_src_coefs[SRC_TABLES][SRC_PHASES][SRC_TAPS];
+
+void make_src_tables() {
+    const double kCutoff[SRC_TABLES] = {0.5, 0.75, 1.0};
+    for (int t = 0; t < SRC_TABLES; t++)
+        for (int p = 0; p < SRC_PHASES; p++) {
+            double h[SRC_TAPS], sum = 0;
+            for (int k = 0; k < SRC_TAPS; k++) {
+                // Taps run oldest first; the output point lies between taps 1 and 2, p/128
+                // of the way. d is tap k's distance from it, in input samples (-2 to 2).
+                const double d = k - 1 - (double)p / SRC_PHASES;
+                const double x = sinc::kPi * kCutoff[t] * d;
+                const double sinc = d == 0 ? 1 : std::sin(x) / x;
+                // Kaiser windows for the two lower cutoffs, Hamming for the full band.
+                const double win = t == 2 ? 0.54 + 0.46 * std::cos(sinc::kPi * d / 2)
+                                          : sinc::bessel_i0(7 * std::sqrt(std::max(0.0, 1 - d * d / 4))) / sinc::bessel_i0(7);
+                h[k] = sinc * win;
+                sum += h[k];
+            }
+            for (int k = 0; k < SRC_TAPS; k++)
+                g_src_coefs[t][p][k] = (int16_t)std::min<long>(std::lround(h[k] / sum * 32768), 32767);
+        }
+}
+
+// For GCN_AXSTATS: voice-milliseconds by SRC (polyphase tables 0-2, linear, none).
+int g_stat_src[5];
+
 extern int g_stat_voices;
 void process_voice(PB& pb, int offset) {
     if (!pb.w[PB_RUNNING]) return;
     if (offset == 0) g_stat_voices++;
     int16_t samples[SPMS];
     Accel acc(pb);
-    // Sample rate conversion: linear interpolation, for the linear and polyphase modes alike.
+    // Sample rate conversion (above). last[] holds the newest four input samples, oldest first.
     uint32_t ratio = pb.get32(PB_RATIO_HI);
     uint32_t pos = pb.w[PB_FRAC];
     int16_t* last = (int16_t*)&pb.w[PB_LAST];
-    uint16_t src_type = pb.w[PB_SRC_TYPE];
+    const uint16_t src_type = pb.w[PB_SRC_TYPE];
+    const int table = std::min<int>(pb.w[PB_COEF_SELECT], SRC_TABLES - 1);
+    g_stat_src[src_type == 0 ? table : src_type == 2 ? 4 : 3]++;
     for (int i = 0; i < SPMS; i++) {
         int32_t frac = pos & 0xFFFF;
-        if (src_type == 2) samples[i] = last[3];
-        else samples[i] = (int16_t)(last[2] + (((last[3] - last[2]) * frac) >> 16));
+        if (src_type == 0) {
+            const int16_t* c = g_src_coefs[table][frac >> 9];
+            const int64_t s = (int64_t)last[0] * c[0] + (int64_t)last[1] * c[1] + (int64_t)last[2] * c[2] + (int64_t)last[3] * c[3];
+            samples[i] = (int16_t)std::clamp<int64_t>(s >> 15, -32768, 32767);
+        } else if (src_type == 2) {
+            samples[i] = last[3];
+        } else {
+            samples[i] = (int16_t)(last[2] + (((last[3] - last[2]) * frac) >> 16));
+        }
         pos += ratio;
         while (pos >= 0x10000) {
             last[0] = last[1]; last[1] = last[2]; last[2] = last[3];
@@ -262,6 +312,9 @@ void output(uint32_t surround_addr, uint32_t lr_addr) {
     for (int i = 0; i < SPF; i++) g_stat_peak = std::max(g_stat_peak, std::abs(g_left[i]));
     if (++g_stat_frames % 400 == 0 && getenv("GCN_AXSTATS")) {
         fprintf(stderr, "[ax] frames=%d voices(running, last frame)=%d peak=%d out=%08X\n", g_stat_frames, g_stat_voices, g_stat_peak, lr_addr);
+        fprintf(stderr, "[ax] voice-ms by SRC: polyphase 8k=%d 12k=%d 16k=%d, linear=%d, none=%d\n",
+                g_stat_src[0], g_stat_src[1], g_stat_src[2], g_stat_src[3], g_stat_src[4]);
+        for (int& n : g_stat_src) n = 0;
         g_stat_peak = 0;
     }
     for (int i = 0; i < SPF; i++) mem_w32(surround_addr + 4 * i, (uint32_t)g_surround[i]);
@@ -274,7 +327,10 @@ void output(uint32_t surround_addr, uint32_t lr_addr) {
 
 }  // namespace
 
-void ax_init() {}
+void ax_init() {
+    static const bool tables = (make_src_tables(), true);
+    (void)tables;
+}
 
 void ax_process_cmdlist(uint32_t addr, uint16_t size) {
     uint32_t pb_addr = 0;

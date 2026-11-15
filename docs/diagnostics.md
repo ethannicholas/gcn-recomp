@@ -336,6 +336,14 @@ default and `GCN_AUDIO_CUSHION_MS` to change it. Running dry, it stays silent un
 whole cushion is back, so every underrun is a gap at least that long; 60 ms, as it was, did
 not ride through the 40-60 ms a guest waits on a slow render stage.
 
+**How the sound is resampled.** Each AX voice is converted to 32 kHz the way its PB asks
+(`hw/ax.cpp`): the DSP's 4-tap polyphase filter (with tables designed to the coefficient
+ROM's three cutoffs, not the ROM's own), linear interpolation, or none. `GCN_AXSTATS`
+prints, every 2 s, how many voice-milliseconds used each, which says which of them a game
+uses at all. The 32 kHz mix goes to the device's 48 kHz through a 64-tap windowed sinc
+(`audio.cpp`, kernel in `sinc.h`), flat to 14 kHz; `GCN_AUDIO_RESAMPLE=linear` brings back
+the linear interpolation it replaced, to compare by ear.
+
 `GCN_CPU_SCALE=N` (or `clock_set_cpu_scale` from a game's sources) makes the emulated CPU
 N times as fast as the console's: the ticks per edge are divided by N, so the same frame of
 work takes 1/N of the virtual time. A game that paces itself on the retrace and is patched

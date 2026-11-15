@@ -7,6 +7,9 @@
 // callback its API hands it.
 #include "runtime.h"
 #include "hw/dtk.h"
+#include "sinc.h"
+#include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <mutex>
 #include <vector>
@@ -50,6 +53,27 @@ static bool g_ring_filling = true;  // silent until the cushion is (back) in han
 static double g_ring_avg;  // smoothed fill level, which the resampling rate steers by
 static int g_stat_underruns;
 static size_t g_stat_min_fill = SIZE_MAX;   // the lowest level a callback found, since asked
+
+// ---- 32 kHz to 48 kHz ----
+// The console has no such step: its DAC takes the 32 kHz stream, and filters it. Linear
+// interpolation, as this was, both dulled the treble (2.6 dB down at 10 kHz, 5 dB at 14)
+// and left images and aliases of everything, heard as a haze over the top: a 10 kHz tone
+// came with an image at 22 kHz 16 dB below it and an alias at 6 kHz 22 dB below. In its
+// place a 64-tap windowed sinc stands in for the DAC's reconstruction filter: flat to
+// 14 kHz (0.6 dB down at 14.5, 6 dB at 15.2), and for any tone up to 15 kHz nothing else
+// above -94 dBc. It works on the samples the ring has handed it, so it plays OUT_TAPS/2
+// samples (1 ms) behind the read position. GCN_AUDIO_RESAMPLE=linear brings back linear
+// interpolation, to compare by ear, or for a device too slow for this.
+static constexpr int OUT_TAPS = 64;
+static const sinc::Kernel g_out_kernel(OUT_TAPS, 512, 15200.0 / (DMA_RATE / 2), 8.6);
+static sinc::StereoHistory g_out_hist(OUT_TAPS);
+static bool linear_output() {
+    static const bool linear = [] {
+        const char* e = getenv("GCN_AUDIO_RESAMPLE");
+        return e && !strcmp(e, "linear");
+    }();
+    return linear;
+}
 
 void audio_push_dma(const int16_t* samples_be, uint32_t frames) {
     std::lock_guard<std::mutex> lk(g_ring_mutex);
@@ -143,6 +167,7 @@ void audio_render(int16_t* out, int frames) {
             g_ring_filling = false;
             g_ring_avg = (double)g_ring_count;
             g_dma_pos = 0;
+            g_out_hist.clear();  // so the sound comes back in through the filter, not with a click
         }
         // The guest's clock and the device's are not the same clock, so the level drifts.
         // Resample up to half a percent fast or slow to walk it back to the cushion, which
@@ -155,6 +180,7 @@ void audio_render(int16_t* out, int frames) {
         static int calls;
         if (stats && ++calls % 400 == 0)
             fprintf(stderr, "[ring] fill=%zu avg=%.0f trim=%+.3f%% underruns=%d\n", g_ring_count, g_ring_avg, trim * 100, g_stat_underruns);
+        const bool linear = linear_output();
         for (int i = 0; i < frames; i++) {
             int32_t l = 0, r = 0;
             // Out of samples: stay silent until the cushion is back. Playing each block as
@@ -163,11 +189,19 @@ void audio_render(int16_t* out, int frames) {
             if (!g_ring_filling) {
                 size_t a = g_ring_r, b = (g_ring_r + 1) % cap;
                 double f = g_dma_pos;
-                l = (int32_t)(g_ring[2 * a] * (1 - f) + g_ring[2 * b] * f);
-                r = (int32_t)(g_ring[2 * a + 1] * (1 - f) + g_ring[2 * b + 1] * f);
+                if (linear) {
+                    l = (int32_t)(g_ring[2 * a] * (1 - f) + g_ring[2 * b] * f);
+                    r = (int32_t)(g_ring[2 * a + 1] * (1 - f) + g_ring[2 * b + 1] * f);
+                } else {
+                    float fl, fr;
+                    g_out_kernel.apply2(g_out_hist.left(), g_out_hist.right(), f, fl, fr);
+                    l = std::clamp((int32_t)std::lround(fl), -32768, 32767);
+                    r = std::clamp((int32_t)std::lround(fr), -32768, 32767);
+                }
                 g_dma_pos += step;
                 while (g_dma_pos >= 1.0 && g_ring_count > 1) {
                     g_dma_pos -= 1.0;
+                    g_out_hist.push(g_ring[2 * g_ring_r], g_ring[2 * g_ring_r + 1]);
                     g_ring_r = (g_ring_r + 1) % cap;
                     g_ring_count--;
                 }
